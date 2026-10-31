@@ -8,8 +8,8 @@ export function calculateStringSimilarity(str1: string, str2: string): number {
   const s1 = normalizeText(str1);
   const s2 = normalizeText(str2);
 
-  if (s1 === s2) return 1.0;
   if (s1.length < 2 || s2.length < 2) return 0.0;
+  if (s1 === s2) return 1.0;
 
   const getBigrams = (str: string) => {
     const bigrams = new Map<string, number>();
@@ -36,9 +36,10 @@ export function calculateStringSimilarity(str1: string, str2: string): number {
 }
 
 export function normalizeText(text: string): string {
+  if (!text) return '';
   return text
     .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }

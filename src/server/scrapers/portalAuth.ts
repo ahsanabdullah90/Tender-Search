@@ -1,12 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { updatePortalHealth, getPortalAuthCredentials } from '../db.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
-const SESSIONS_DIR = path.resolve(PROJECT_ROOT, 'data', 'sessions');
+import { updatePortalHealth, getPortalAuthCredentials, SESSIONS_DIR } from '../db.js';
 
 export interface AuthResult {
   success: boolean;

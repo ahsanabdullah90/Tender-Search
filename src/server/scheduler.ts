@@ -4,9 +4,27 @@ import { startCrawlerScan, getActivePortalsList } from './scrapers/crawlerEngine
 let schedulerInterval: NodeJS.Timeout | null = null;
 let lastDailyHealthCheck: number = 0;
 
+export const schedulerDeps = {
+  startCrawlerScan: (portalId?: string, awaitCompletion?: boolean) => startCrawlerScan(portalId, awaitCompletion),
+  backupDatabase: () => backupDatabase()
+};
+
 export function initStartupScheduler() {
+  // 0. Reset any portals stuck in 'scanning' state from a previously interrupted process (Bug B3)
+  try {
+    const stuck = db.prepare("SELECT portal_id FROM portal_health WHERE status = 'scanning'").all() as { portal_id: string }[];
+    for (const p of stuck) {
+      updatePortalHealth(p.portal_id, {
+        status: 'error',
+        last_error_message: 'Previous scan was interrupted'
+      });
+    }
+  } catch (err) {
+    console.warn('[Tender Tracker Scheduler] Failed to reset stuck scanning portals:', err);
+  }
+
   // 1. Run database backup on startup if needed
-  backupDatabase().catch(err => console.error('Startup backup error:', err));
+  schedulerDeps.backupDatabase().catch(err => console.error('Startup backup error:', err));
 
   // 2. Check if a catch-up scan is required
   checkAndTriggerCatchUpScan();
@@ -18,7 +36,7 @@ export function initStartupScheduler() {
   if (schedulerInterval) clearInterval(schedulerInterval);
   schedulerInterval = setInterval(() => {
     // Run backup check periodically so backups occur daily during long uptimes
-    backupDatabase().catch(err => console.error('Periodic backup error:', err));
+    schedulerDeps.backupDatabase().catch(err => console.error('Periodic backup error:', err));
     checkAndTriggerCatchUpScan();
 
     // Check broken/offline links once every 24 hours
@@ -42,7 +60,7 @@ function checkAndTriggerCatchUpScan() {
 
     if (!lastScanStr) {
       console.log('[Tender Tracker Scheduler] No previous scan recorded. Initiating background crawl...');
-      startCrawlerScan();
+      schedulerDeps.startCrawlerScan();
       return;
     }
 
@@ -53,7 +71,7 @@ function checkAndTriggerCatchUpScan() {
     // If more than 12 hours have elapsed since the last successful scan
     if (hoursSinceLastScan >= 12) {
       console.log(`[Tender Tracker Scheduler] Last scan was ${hoursSinceLastScan.toFixed(1)}h ago. Starting catch-up scan...`);
-      startCrawlerScan();
+      schedulerDeps.startCrawlerScan();
     }
   } catch (err) {
     console.warn('[Tender Tracker Scheduler] Catch-up check failed:', err);
@@ -71,11 +89,9 @@ async function runDailyPortalHealthAdvisement() {
     const problemPortals = portals.filter(p => p.accessMode === 'offline_broken' || p.verifiedStatus.toLowerCase().includes('broken'));
 
     for (const portal of problemPortals) {
-      // Test single portal scan quietly to see if authority restored domain
+      // Test single portal scan quietly to see if authority restored domain (Bug B2)
       try {
-        const { startCrawlerScan } = await import('./scrapers/crawlerEngine.js');
-        // Let it run as targeted single scan
-        await startCrawlerScan(portal.id);
+        await schedulerDeps.startCrawlerScan(portal.id, true);
       } catch (err: any) {
         updatePortalHealth(portal.id, {
           last_error_message: `Daily health check: Portal remains unreachable (${err.message})`

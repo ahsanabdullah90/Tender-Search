@@ -1,10 +1,13 @@
-export type OpportunityStatus =
-  | 'New Opportunity'
-  | 'Under Review'
-  | 'Preparing Bid'
-  | 'Submitted'
-  | 'Won'
-  | 'Passed';
+export const TENDER_STATUSES = [
+  'New Opportunity',
+  'Under Review',
+  'Preparing Bid',
+  'Submitted',
+  'Won',
+  'Passed'
+] as const;
+
+export type OpportunityStatus = (typeof TENDER_STATUSES)[number];
 
 export interface CachedDossier {
   label: string;

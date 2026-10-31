@@ -1,14 +1,9 @@
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { updatePortalHealth, getPortalHealthList } from '../db.js';
+import { updatePortalHealth, getPortalHealthList, SESSIONS_DIR } from '../db.js';
 import { PORTAL_DEFINITIONS } from './portalList.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
-
-const SESSIONS_DIR = path.resolve(PROJECT_ROOT, 'data', 'sessions');
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }

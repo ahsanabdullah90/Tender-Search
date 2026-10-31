@@ -38,20 +38,16 @@ import {
 } from './src/server/scrapers/crawlerEngine.js';
 import { initStartupScheduler, stopStartupScheduler } from './src/server/scheduler.js';
 import { launchLocalBrowserHITL, verifyAndResumePortal } from './src/server/scrapers/playwrightEngine.js';
+import { TENDER_STATUSES } from './src/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+export function createApp(): express.Express {
+  const app = express();
+  app.use(express.json());
 
-app.use(express.json());
-
-// Initialize SQLite database and catch-up scheduler
-initDatabase();
-initStartupScheduler();
-
-// API Endpoints
+  // API Endpoints
 
 // 1. Tenders Listing & Filtering
 app.get('/api/tenders', (req, res) => {
@@ -80,6 +76,11 @@ app.get('/api/tenders/:id', (req, res) => {
 app.patch('/api/tenders/:id/status', (req, res) => {
   const { status, notes } = req.body;
   if (!status) return res.status(400).json({ error: 'Status is required' });
+  if (!TENDER_STATUSES.includes(status)) {
+    return res.status(400).json({
+      error: `Invalid status: "${status}". Valid statuses are: ${TENDER_STATUSES.join(', ')}`
+    });
+  }
   const success = updateTenderStatus(req.params.id, status, notes);
   if (!success) return res.status(404).json({ error: 'Tender not found' });
   res.json({ success: true, status });
@@ -353,8 +354,18 @@ app.get('/api/storage', (req, res) => res.json(getStorageStats()));
 
 app.post('/api/dossiers/prune-passed', (req, res) => res.json(pruneDossiersForPassed()));
 
+  return app;
+}
+
 // Vite Integration & Server Startup
-async function startServer() {
+export async function startServer() {
+  initDatabase();
+  initStartupScheduler();
+
+  const app = createApp();
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const HOST = process.env.HOST || '127.0.0.1';
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -370,8 +381,8 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Tender Tracker] Solo-Operator Console online at http://localhost:${PORT}`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`[Tender Tracker] Solo-Operator Console online at http://${HOST}:${PORT}`);
   });
 
   // Graceful shutdown handling on Windows / Linux
@@ -390,6 +401,17 @@ async function startServer() {
 
   process.on('SIGINT', handleExit);
   process.on('SIGTERM', handleExit);
+
+  return server;
 }
 
-startServer();
+const isDirectRun = Boolean(
+  process.argv[1] &&
+  (fileURLToPath(import.meta.url) === path.resolve(process.argv[1]) ||
+   process.argv[1].endsWith('server.ts') ||
+   process.argv[1].endsWith('server.js'))
+);
+
+if (isDirectRun) {
+  startServer();
+}

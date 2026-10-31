@@ -78,7 +78,7 @@ export function getActivePortalsList(targetPortalId?: string): PortalDefinition[
 /**
  * Executes a full scan across all active portals or a single target portal
  */
-export async function startCrawlerScan(targetPortalId?: string) {
+export async function startCrawlerScan(targetPortalId?: string, awaitCompletion: boolean = false): Promise<ScanStatus> {
   if (currentScanStatus.isScanning) {
     return currentScanStatus;
   }
@@ -101,8 +101,7 @@ export async function startCrawlerScan(targetPortalId?: string) {
   };
   broadcastProgress();
 
-  // Run in background
-  (async () => {
+  const scanExecution = async () => {
     try {
       const activeTracks = getAllDomainTracks().filter(t => t.is_active === 1);
 
@@ -122,7 +121,9 @@ export async function startCrawlerScan(targetPortalId?: string) {
             updatePortalHealth(portal.id, {
               status: 'hitl_required',
               last_scan_at: new Date().toISOString(),
-              last_error_message: 'Verification challenge detected (Cloudflare Turnstile or CAPTCHA)'
+              last_error_message: scrapeResult.isLoginRequired
+                ? 'Login credentials or active session required'
+                : 'Verification challenge detected (Cloudflare Turnstile or CAPTCHA)'
             });
           } else {
             const rawItems = scrapeResult.items;
@@ -150,7 +151,7 @@ export async function startCrawlerScan(targetPortalId?: string) {
               last_scan_at: new Date().toISOString(),
               last_items_found: itemsMatched,
               consecutive_zero_yields: newZeros,
-              last_error_message: null
+              last_error_message: rawItems.length === 0 ? 'No listings found on the last scan' : null
             });
           }
         } catch (err: any) {
@@ -169,7 +170,7 @@ export async function startCrawlerScan(targetPortalId?: string) {
         // Human-like pause before next portal if more remain
         if (i < portalsToScan.length - 1) {
           const delay = getHumanJitterDelay(2000, 4500);
-          await sleep(delay);
+          await crawlerDeps.sleep(delay);
         }
       }
     } finally {
@@ -179,9 +180,15 @@ export async function startCrawlerScan(targetPortalId?: string) {
       currentScanStatus.progressPercent = 100;
       broadcastProgress();
     }
-  })();
+    return currentScanStatus;
+  };
 
-  return currentScanStatus;
+  if (awaitCompletion) {
+    return await scanExecution();
+  } else {
+    scanExecution().catch(err => console.error('[Crawler] Background scan error:', err));
+    return currentScanStatus;
+  }
 }
 
 export interface RawScrapedItem {
@@ -201,19 +208,84 @@ export interface RawScrapedItem {
 export interface ScrapeResult {
   items: RawScrapedItem[];
   hitlRequired: boolean;
+  isLoginRequired?: boolean;
+}
+
+export const crawlerDeps = {
+  fetchHtml: fetchHtmlWithTolerantAgent,
+  sleep: (ms: number) => sleep(ms)
+};
+
+/**
+ * Extracts and disambiguates publish dates vs closing dates using labels and chronological sorting (Bug B7)
+ */
+export function extractDatesFromText(rowText: string): { publishDate: string | null; closingDate: string | null } {
+  // 1. Look for explicit labels
+  const closingLabelRegex = /(?:closing|submission|deadline|due|last)(?:[\s\w]{0,20}?)(?:[:\s-])\s*(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i;
+  const publishLabelRegex = /(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening)(?:[\s\w]{0,20}?)(?:[:\s-])\s*(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i;
+
+  const closingMatch = rowText.match(closingLabelRegex);
+  const publishMatch = rowText.match(publishLabelRegex);
+
+  let closingDate: string | null = closingMatch ? parseDateString(closingMatch[1]) : null;
+  let publishDate: string | null = publishMatch ? parseDateString(publishMatch[1]) : null;
+
+  if (closingDate) {
+    return { publishDate, closingDate };
+  }
+
+  // 2. If no explicit closing label found, extract all candidate dates
+  const globalDateRegex = /(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/gi;
+  const matches = rowText.match(globalDateRegex) || [];
+  const parsedDates: string[] = [];
+  for (const m of matches) {
+    const p = parseDateString(m);
+    if (p && !parsedDates.includes(p)) {
+      parsedDates.push(p);
+    }
+  }
+
+  if (parsedDates.length === 1) {
+    if (publishMatch && publishDate === parsedDates[0]) {
+      return { publishDate, closingDate: null };
+    }
+    return { publishDate: null, closingDate: parsedDates[0] };
+  }
+
+  if (parsedDates.length >= 2) {
+    parsedDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+    return {
+      publishDate: publishDate || parsedDates[0],
+      closingDate: parsedDates[parsedDates.length - 1]
+    };
+  }
+
+  return { publishDate: null, closingDate: null };
 }
 
 /**
- * Scrapes a portal via tolerant HTTP/Cheerio
+ * Parses raw HTML string from a portal into structured items or detects verification challenge.
  */
-async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string }): Promise<ScrapeResult> {
-  const html = await fetchHtmlWithTolerantAgent(portal.tendersUrl, 0, portal.sessionCookies);
+export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeResult {
   const $ = cheerio.load(html);
   const items: RawScrapedItem[] = [];
 
-  // Check for CAPTCHA or Cloudflare Turnstile blocking elements
-  if ($('iframe[src*="cloudflare"], #captcha, input[name*="captcha"]').length > 0 || html.includes('cf-browser-verification')) {
+  // Check for CAPTCHA or Cloudflare Turnstile blocking elements (Bug B4)
+  if (
+    $('iframe[src*="cloudflare"], #captcha, input[name*="captcha"]').length > 0 ||
+    html.includes('cf-browser-verification') ||
+    html.includes('challenges.cloudflare.com') ||
+    html.includes('Just a moment...') ||
+    html.includes('Attention Required! | Cloudflare')
+  ) {
     return { items: [], hitlRequired: true };
+  }
+
+  // Check for login forms or credentials requirement (Bug B5)
+  const hasLoginForm = $('input[type="password"]').length > 0 ||
+    /login to continue|enter credentials|sign in to access|session expired/i.test(html);
+  if (hasLoginForm && !$('table, .tender-row, .notice-item, .procurement-item').length) {
+    return { items: [], hitlRequired: true, isLoginRequired: true };
   }
 
   const selector = [
@@ -230,6 +302,9 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
   ].join(', ');
 
   $(selector).each((_, el) => {
+    // Skip table header rows
+    if ($(el).is('th') || $(el).closest('thead').length > 0 || $(el).find('th').length > $(el).find('td').length) return;
+
     const rowText = $(el).text().trim();
     if (!rowText || rowText.length < 20) return;
 
@@ -248,13 +323,8 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
     const refMatch = rowText.match(/(?:\bTS[-/]?\d{3,10}\b|\bPID\s*\([A-Z]+\)\s*\d+\b|\b[A-Z]{2,10}[-/][A-Z0-9/-]*\d[A-Z0-9/-]{1,20}\b)/i);
     const referenceNo = refMatch && isValidReferenceNo(refMatch[0]) ? refMatch[0] : null;
 
-    // Extract date pattern (e.g. 15-11-2026, 2026-11-15, 15 Nov 2026)
-    const dateMatch = rowText.match(/(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i);
-    let closingDate: string | null = null;
-    if (dateMatch) {
-      const parsed = parseDateString(dateMatch[0]);
-      if (parsed) closingDate = parsed;
-    }
+    // Disambiguate dates using labels (closing vs publish) (Bug B7)
+    const { publishDate, closingDate } = extractDatesFromText(rowText);
 
     // Collect any file attachments in row
     const attachmentUrls: string[] = [];
@@ -274,6 +344,7 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
         title,
         organization: portal.name,
         directUrl: fullUrl,
+        publishDate: publishDate || undefined,
         closingDate,
         description: rowText.slice(0, 300),
         attachmentUrls
@@ -284,7 +355,38 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
   return { items, hitlRequired: false };
 }
 
-function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0, cookieStr?: string): Promise<string> {
+/**
+ * Scrapes a portal via Playwright headless (if tier === 'playwright') with fallback to tolerant HTTP/Cheerio (Bug B1)
+ */
+async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string }): Promise<ScrapeResult> {
+  if (portal.tier === 'playwright') {
+    try {
+      const modName = 'playwright';
+      const playwright: any = await (Function('m', 'return import(m)')(modName) as Promise<any>).catch(() => null);
+      if (playwright && playwright.chromium) {
+        let browser: any = null;
+        try {
+          browser = await playwright.chromium.launch({ headless: true });
+          const context = await browser.newContext();
+          const page = await context.newPage();
+          await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          const html = await page.content();
+          await browser.close();
+          return parsePortalHtml(html, portal);
+        } catch {
+          if (browser) {
+            try { await browser.close(); } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const html = await crawlerDeps.fetchHtml(portal.tendersUrl, 0, portal.sessionCookies);
+  return parsePortalHtml(html, portal);
+}
+
+export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0, cookieStr?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
       return reject(new Error('Too many redirects while loading portal page'));
@@ -317,8 +419,19 @@ function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0, cook
       }
 
       if (res.statusCode && res.statusCode >= 400) {
-        res.resume();
-        return reject(new Error(`HTTP ${res.statusCode} from portal server`));
+        let errBody = '';
+        res.on('data', chunk => errBody += chunk);
+        res.on('end', () => {
+          if (
+            (res.statusCode === 403 || res.statusCode === 429 || res.statusCode === 503) &&
+            (errBody.includes('cloudflare') || errBody.includes('Just a moment') || errBody.includes('challenge'))
+          ) {
+            // Return challenge HTML so parsePortalHtml flags hitlRequired (Bug B4)
+            return resolve(errBody);
+          }
+          return reject(new Error(`HTTP ${res.statusCode} from portal server`));
+        });
+        return;
       }
 
       let data = '';
@@ -339,9 +452,18 @@ function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0, cook
  * Checks DD/MM/YYYY and DD-MM-YYYY first with explicit PKT (+05:00) timezone,
  * preventing US-style day/month swaps on days 1-12.
  */
+function isValidCalendarDay(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const maxDays = new Date(year, month, 0).getDate();
+  return day <= maxDays;
+}
+
 export function parseDateString(raw: string): string | null {
   if (!raw || !raw.trim()) return null;
   const str = raw.trim();
+
+  // Exclude known non-date text noise
+  if (/^(not available|n\/a|none|null|undefined|-+)$/i.test(str)) return null;
 
   try {
     // 1. Check numeric DD/MM/YYYY or DD-MM-YYYY with optional time
@@ -352,57 +474,98 @@ export function parseDateString(raw: string): string | null {
       let year = parseInt(dmyMatch[3], 10);
       if (year < 100) year += 2000;
 
-      const hour = dmyMatch[4] ? String(dmyMatch[4]).padStart(2, '0') : '14';
-      const minute = dmyMatch[5] ? String(dmyMatch[5]).padStart(2, '0') : '00';
-      const second = dmyMatch[6] ? String(dmyMatch[6]).padStart(2, '0') : '00';
+      const hour = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 14;
+      const minute = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
+      const second = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
 
-      if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-        // Construct with explicit PKT (+05:00)
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hour}:${minute}:${second}+05:00`));
+      if (
+        isValidCalendarDay(year, month, day) &&
+        hour >= 0 && hour < 24 &&
+        minute >= 0 && minute < 60 &&
+        second >= 0 && second < 60
+      ) {
+        const hStr = String(hour).padStart(2, '0');
+        const mStr = String(minute).padStart(2, '0');
+        const sStr = String(second).padStart(2, '0');
+        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
         if (!isNaN(d.getTime())) {
           return d.toISOString();
         }
       }
+      return null;
     }
 
     // 2. Named month format: e.g. 15 Nov 2026, 15-November-2026 with optional time
-    const namedMonthMatch = str.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    const namedMonthMatch = str.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
     if (namedMonthMatch) {
       const day = parseInt(namedMonthMatch[1], 10);
-      const monthName = namedMonthMatch[2];
+      const monthName = namedMonthMatch[2].toLowerCase();
       let year = parseInt(namedMonthMatch[3], 10);
       if (year < 100) year += 2000;
 
-      const hour = namedMonthMatch[4] || '14';
-      const minute = namedMonthMatch[5] || '00';
-      const second = namedMonthMatch[6] || '00';
+      const monthNames: Record<string, number> = {
+        jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+        apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+        aug: 8, august: 8, sep: 9, september: 9, oct: 10, october: 10,
+        nov: 11, november: 11, dec: 12, december: 12
+      };
+      const month = monthNames[monthName];
 
-      const d = new Date(Date.parse(`${day} ${monthName} ${year} ${hour}:${minute}:${second} GMT+0500`));
-      if (!isNaN(d.getTime())) {
-        return d.toISOString();
+      const hour = namedMonthMatch[4] ? parseInt(namedMonthMatch[4], 10) : 14;
+      const minute = namedMonthMatch[5] ? parseInt(namedMonthMatch[5], 10) : 0;
+      const second = namedMonthMatch[6] ? parseInt(namedMonthMatch[6], 10) : 0;
+
+      if (
+        month &&
+        isValidCalendarDay(year, month, day) &&
+        hour >= 0 && hour < 24 &&
+        minute >= 0 && minute < 60 &&
+        second >= 0 && second < 60
+      ) {
+        const hStr = String(hour).padStart(2, '0');
+        const mStr = String(minute).padStart(2, '0');
+        const sStr = String(second).padStart(2, '0');
+        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
+        if (!isNaN(d.getTime())) {
+          return d.toISOString();
+        }
       }
+      return null;
     }
 
     // 3. ISO format YYYY-MM-DD with optional time
     const isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
     if (isoMatch) {
-      const year = isoMatch[1];
-      const month = String(isoMatch[2]).padStart(2, '0');
-      const day = String(isoMatch[3]).padStart(2, '0');
-      const hour = isoMatch[4] ? String(isoMatch[4]).padStart(2, '0') : '14';
-      const minute = isoMatch[5] ? String(isoMatch[5]).padStart(2, '0') : '00';
-      const second = isoMatch[6] ? String(isoMatch[6]).padStart(2, '0') : '00';
+      const year = parseInt(isoMatch[1], 10);
+      const month = parseInt(isoMatch[2], 10);
+      const day = parseInt(isoMatch[3], 10);
+      const hour = isoMatch[4] ? parseInt(isoMatch[4], 10) : 14;
+      const minute = isoMatch[5] ? parseInt(isoMatch[5], 10) : 0;
+      const second = isoMatch[6] ? parseInt(isoMatch[6], 10) : 0;
 
-      const d = new Date(Date.parse(`${year}-${month}-${day}T${hour}:${minute}:${second}+05:00`));
-      if (!isNaN(d.getTime())) {
-        return d.toISOString();
+      if (
+        isValidCalendarDay(year, month, day) &&
+        hour >= 0 && hour < 24 &&
+        minute >= 0 && minute < 60 &&
+        second >= 0 && second < 60
+      ) {
+        const hStr = String(hour).padStart(2, '0');
+        const mStr = String(minute).padStart(2, '0');
+        const sStr = String(second).padStart(2, '0');
+        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
+        if (!isNaN(d.getTime())) {
+          return d.toISOString();
+        }
       }
+      return null;
     }
 
-    // 4. Fallback standard parse
-    const fallback = new Date(str);
-    if (!isNaN(fallback.getTime())) {
-      return fallback.toISOString();
+    // 4. Fallback standard parse (only if it contains digits and not noise)
+    if (/\d/.test(str)) {
+      const fallback = new Date(str);
+      if (!isNaN(fallback.getTime())) {
+        return fallback.toISOString();
+      }
     }
   } catch {}
 
@@ -429,27 +592,25 @@ export function formatClosingDate(isoDate: string | null): string {
 }
 
 /**
- * Matches scraped tender against active domain tracks and handles deduplication
+ * Matches scraped tender against active domain tracks and computes keyword match score
  */
-export async function processAndSaveTender(
+export function matchTracks(
   item: RawScrapedItem,
-  portal: PortalDefinition,
   activeTracks: any[]
-): Promise<{ isNew: boolean; hasCorrigendum: boolean; matched: boolean }> {
+): { matchedTracks: string[]; matchedKeywords: string[]; matchScore: number } {
   const combinedText = `${item.title} ${item.description || ''} ${item.organization} ${item.referenceNo || ''}`.toLowerCase();
 
-  // Keyword Matching across tracks
   const matchedTracks: string[] = [];
   const matchedKeywords: string[] = [];
 
   for (const track of activeTracks) {
     // Check negative keywords (exclusions)
-    const hasNegative = track.negative_keywords.some((neg: string) => combinedText.includes(neg.toLowerCase()));
+    const hasNegative = track.negative_keywords?.some((neg: string) => combinedText.includes(neg.toLowerCase()));
     if (hasNegative) continue;
 
     // Check positive keywords
     const hitKeywords: string[] = [];
-    for (const pos of track.positive_keywords) {
+    for (const pos of (track.positive_keywords || [])) {
       if (combinedText.includes(pos.toLowerCase())) {
         hitKeywords.push(pos);
       }
@@ -461,13 +622,25 @@ export async function processAndSaveTender(
     }
   }
 
+  const matchScore = matchedTracks.length === 0 ? 0 : Math.min(100, Math.max(30, matchedKeywords.length * 20));
+  return { matchedTracks, matchedKeywords, matchScore };
+}
+
+/**
+ * Matches scraped tender against active domain tracks and handles deduplication
+ */
+export async function processAndSaveTender(
+  item: RawScrapedItem,
+  portal: PortalDefinition,
+  activeTracks: any[]
+): Promise<{ isNew: boolean; hasCorrigendum: boolean; matched: boolean }> {
+  // Keyword Matching across tracks
+  const { matchedTracks, matchedKeywords, matchScore } = matchTracks(item, activeTracks);
+
   // If no track matched, skip saving
   if (matchedTracks.length === 0) {
     return { isNew: false, hasCorrigendum: false, matched: false };
   }
-
-  // Match score calculation
-  const matchScore = Math.min(100, Math.max(30, matchedKeywords.length * 20));
 
   // Check Deduplication
   const dedupMatch = findCanonicalMatch({
@@ -518,6 +691,14 @@ export async function processAndSaveTender(
       }
 
       return { isNew: false, hasCorrigendum: corrigendumDetected, matched: true };
+    }
+  }
+
+  // B6: Skip saving new opportunities if closing date is already in the past
+  if (item.closingDate) {
+    const closingTime = new Date(item.closingDate).getTime();
+    if (!isNaN(closingTime) && closingTime < Date.now()) {
+      return { isNew: false, hasCorrigendum: false, matched: true };
     }
   }
 

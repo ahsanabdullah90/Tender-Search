@@ -1,0 +1,472 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import request from 'supertest';
+import fs from 'fs';
+import path from 'path';
+import { createApp } from '../../server.js';
+import {
+  db,
+  initDatabase,
+  getAllTenders,
+  getTenderById,
+  getAllDomainTracks,
+  DOSSIERS_DIR
+} from '../../src/server/db.js';
+
+describe('Server API Routes', () => {
+  const app = createApp();
+
+  beforeEach(() => {
+    initDatabase();
+    db.prepare('DELETE FROM corrigendum_logs').run();
+    db.prepare('DELETE FROM pipeline_audit_logs').run();
+    db.prepare('DELETE FROM tenders').run();
+  });
+
+  const insertTestTender = (id: string, overrides: Record<string, any> = {}) => {
+    db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, portal_id, portal_name, reference_no, title, organization,
+        description, estimated_value, location, publish_date, closing_date,
+        direct_url, secondary_sources, domain_tracks, matched_keywords,
+        match_score, pipeline_status, is_bookmarked, status_notes, result_expected_date,
+        cached_dossiers, has_corrigendum
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?
+      )
+    `).run(
+      id,
+      overrides.canonical_id || id,
+      overrides.portal_id || 'epads',
+      overrides.portal_name || 'Federal PPRA',
+      overrides.reference_no || 'REF-API-101',
+      overrides.title || 'Enterprise High Availability Cloud Setup',
+      overrides.organization || 'Ministry of IT',
+      overrides.description || 'Cloud migration and managed services',
+      overrides.estimated_value || 'PKR 25,000,000',
+      overrides.location || 'Islamabad',
+      overrides.publish_date || '2026-05-01',
+      overrides.closing_date !== undefined ? overrides.closing_date : '2026-06-30T14:00:00+05:00',
+      overrides.direct_url || 'https://example.com/api-tender',
+      JSON.stringify(overrides.secondary_sources || []),
+      JSON.stringify(overrides.domain_tracks || ['Construction & Civil Works']),
+      JSON.stringify(overrides.matched_keywords || ['construction']),
+      overrides.match_score || 90,
+      overrides.pipeline_status || 'New Opportunity',
+      overrides.is_bookmarked || 0,
+      overrides.status_notes || '',
+      overrides.result_expected_date || null,
+      JSON.stringify(overrides.cached_dossiers || []),
+      overrides.has_corrigendum || 0
+    );
+  };
+
+  describe('GET /api/tenders', () => {
+    it('returns empty array when database has no tenders', async () => {
+      const res = await request(app).get('/api/tenders');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it('returns list of tenders with parsed JSON arrays', async () => {
+      insertTestTender('t-api-1');
+      const res = await request(app).get('/api/tenders');
+
+      expect(res.status).toBe(200);
+      expect(res.body.length).toBe(1);
+      expect(res.body[0].id).toBe('t-api-1');
+      expect(res.body[0].domain_tracks).toEqual(['Construction & Civil Works']);
+      expect(res.body[0].matched_keywords).toEqual(['construction']);
+    });
+
+    it('filters by status, bookmarkedOnly, and search query params', async () => {
+      insertTestTender('t-1', { pipeline_status: 'New Opportunity', is_bookmarked: 1 });
+      insertTestTender('t-2', { pipeline_status: 'Preparing Bid', is_bookmarked: 0 });
+
+      const statusRes = await request(app).get('/api/tenders?status=Preparing Bid');
+      expect(statusRes.body.length).toBe(1);
+      expect(statusRes.body[0].id).toBe('t-2');
+
+      const bookmarkRes = await request(app).get('/api/tenders?bookmarkedOnly=true');
+      expect(bookmarkRes.body.length).toBe(1);
+      expect(bookmarkRes.body[0].id).toBe('t-1');
+
+      const searchRes = await request(app).get('/api/tenders?search=Cloud Setup');
+      expect(searchRes.body.length).toBe(2);
+    });
+  });
+
+  describe('GET /api/tenders/:id', () => {
+    it('returns 200 and tender object when tender exists', async () => {
+      insertTestTender('t-found');
+      const res = await request(app).get('/api/tenders/t-found');
+
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe('t-found');
+      expect(res.body.title).toContain('Enterprise High Availability');
+    });
+
+    it('returns 404 when tender is not found', async () => {
+      const res = await request(app).get('/api/tenders/non-existent-id');
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Tender not found');
+    });
+  });
+
+  describe('PATCH /api/tenders/:id/status (Bug B8)', () => {
+    it('returns 400 when status is missing from request body', async () => {
+      insertTestTender('t-val');
+      const res = await request(app).patch('/api/tenders/t-val/status').send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Status is required');
+    });
+
+    it('returns 400 when status is not in allowed TENDER_STATUSES', async () => {
+      insertTestTender('t-val');
+      const res = await request(app)
+        .patch('/api/tenders/t-val/status')
+        .send({ status: 'InvalidPipelineStatus' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Invalid status: "InvalidPipelineStatus"');
+      expect(res.body.error).toContain('New Opportunity');
+      expect(res.body.error).toContain('Preparing Bid');
+    });
+
+    it('returns 404 when updating status of non-existent tender', async () => {
+      const res = await request(app)
+        .patch('/api/tenders/non-existent/status')
+        .send({ status: 'Preparing Bid' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Tender not found');
+    });
+
+    it('updates status and records audit log for valid status transition', async () => {
+      insertTestTender('t-val', { pipeline_status: 'New Opportunity' });
+
+      const res = await request(app)
+        .patch('/api/tenders/t-val/status')
+        .send({ status: 'Preparing Bid', notes: 'Shortlisted for technical response' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.status).toBe('Preparing Bid');
+
+      const updated = getTenderById('t-val');
+      expect(updated?.pipeline_status).toBe('Preparing Bid');
+      expect(updated?.status_notes).toBe('Shortlisted for technical response');
+    });
+  });
+
+  describe('PATCH & POST /api/tenders/:id/notes', () => {
+    it('updates notes via PATCH and POST', async () => {
+      insertTestTender('t-notes');
+
+      const resPatch = await request(app)
+        .patch('/api/tenders/t-notes/notes')
+        .send({ notes: 'Meeting scheduled with partner' });
+      expect(resPatch.status).toBe(200);
+      expect(resPatch.body.notes).toBe('Meeting scheduled with partner');
+
+      const resPost = await request(app)
+        .post('/api/tenders/t-notes/notes')
+        .send({ notes: 'Partner agreed to terms' });
+      expect(resPost.status).toBe(200);
+      expect(resPost.body.notes).toBe('Partner agreed to terms');
+
+      expect(getTenderById('t-notes')?.status_notes).toBe('Partner agreed to terms');
+    });
+
+    it('returns 404 when updating notes on non-existent tender', async () => {
+      const res = await request(app)
+        .patch('/api/tenders/non-existent/notes')
+        .send({ notes: 'Some note' });
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Tender not found');
+    });
+  });
+
+  describe('PATCH /api/tenders/:id/result-date', () => {
+    it('updates expected result date', async () => {
+      insertTestTender('t-res');
+
+      const res = await request(app)
+        .patch('/api/tenders/t-res/result-date')
+        .send({ date: '2026-08-15' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.result_expected_date).toBe('2026-08-15');
+
+      expect(getTenderById('t-res')?.result_expected_date).toBe('2026-08-15');
+    });
+
+    it('returns 404 for missing tender', async () => {
+      const res = await request(app)
+        .patch('/api/tenders/missing/result-date')
+        .send({ date: '2026-08-15' });
+      expect(res.status).toBe(404);
+    });
+
+    it('returns 400 for invalid date', async () => {
+      insertTestTender('t-res-inv');
+      const res = await request(app)
+        .patch('/api/tenders/t-res-inv/result-date')
+        .send({ date: 'invalid-date-string' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Invalid date');
+    });
+  });
+
+  describe('POST /api/tenders/:id/bookmark', () => {
+    it('toggles bookmark state', async () => {
+      insertTestTender('t-bkmk', { is_bookmarked: 0 });
+
+      const res1 = await request(app).post('/api/tenders/t-bkmk/bookmark');
+      expect(res1.status).toBe(200);
+      expect(res1.body.is_bookmarked).toBe(1);
+
+      const res2 = await request(app).post('/api/tenders/t-bkmk/bookmark');
+      expect(res2.status).toBe(200);
+      expect(res2.body.is_bookmarked).toBe(0);
+    });
+
+    it('returns success false for missing tender', async () => {
+      const res = await request(app).post('/api/tenders/missing/bookmark');
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(false);
+    });
+  });
+
+  describe('GET /api/kpis', () => {
+    it('returns dashboard KPI statistics', async () => {
+      insertTestTender('t-k1', { pipeline_status: 'New Opportunity' });
+      insertTestTender('t-k2', { pipeline_status: 'Preparing Bid' });
+
+      const res = await request(app).get('/api/kpis');
+      expect(res.status).toBe(200);
+      expect(res.body.totalTracked).toBe(2);
+      expect(res.body.inPipeline).toBe(1);
+      expect(typeof res.body.onlinePortals).toBe('number');
+    });
+  });
+
+  describe('Corrigenda API (/api/corrigenda)', () => {
+    it('retrieves unacknowledged corrigenda and allows acknowledging them', async () => {
+      insertTestTender('t-corr');
+      db.prepare(`
+        INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
+        VALUES ('corr-api-1', 't-corr', 'deadline_extension', '2026-06-01', '2026-06-15', 0)
+      `).run();
+
+      const getRes = await request(app).get('/api/corrigenda');
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.length).toBe(1);
+      expect(getRes.body[0].id).toBe('corr-api-1');
+
+      const ackRes = await request(app).post('/api/corrigenda/corr-api-1/acknowledge');
+      expect(ackRes.status).toBe(200);
+      expect(ackRes.body.success).toBe(true);
+
+      const getResAfter = await request(app).get('/api/corrigenda');
+      expect(getResAfter.body.length).toBe(0);
+    });
+  });
+
+  describe('Tracks API (/api/tracks)', () => {
+    it('lists, creates, and deletes domain tracks', async () => {
+      const listRes = await request(app).get('/api/tracks');
+      expect(listRes.status).toBe(200);
+      expect(Array.isArray(listRes.body)).toBe(true);
+
+      const createRes = await request(app)
+        .post('/api/tracks')
+        .send({
+          name: 'Cybersecurity Ops',
+          positive_keywords: ['penetration testing', 'soc'],
+          negative_keywords: ['cctv'],
+          is_active: 1
+        });
+
+      expect(createRes.status).toBe(200);
+      expect(createRes.body.success).toBe(true);
+      expect(createRes.body.id).toBeDefined();
+
+      const createdId = createRes.body.id;
+      const allTracks = getAllDomainTracks();
+      expect(allTracks.some(t => t.id === createdId)).toBe(true);
+
+      const deleteRes = await request(app).delete(`/api/tracks/${createdId}`);
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body.success).toBe(true);
+    });
+
+    it('returns 400 when creating track with empty name', async () => {
+      const res = await request(app).post('/api/tracks').send({ name: '' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Track name is required');
+    });
+  });
+
+  describe('Portals API (/api/portals)', () => {
+    it('returns list of portals and handles credentials saving', async () => {
+      const listRes = await request(app).get('/api/portals');
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.length).toBeGreaterThan(0);
+
+      const credRes = await request(app)
+        .post('/api/portals/epads/credentials')
+        .send({
+          username: 'portal_officer',
+          password: 'pass123Password!',
+          loginUrl: 'https://epms.ppra.gov.pk/custom'
+        });
+
+      expect(credRes.status).toBe(200);
+      expect(credRes.body.success).toBe(true);
+
+      const getCredRes = await request(app).get('/api/portals/epads/credentials');
+      expect(getCredRes.status).toBe(200);
+      expect(getCredRes.body.username).toBe('portal_officer');
+      expect(getCredRes.body.hasPassword).toBe(true);
+      expect(getCredRes.body.loginUrl).toBe('https://epms.ppra.gov.pk/custom');
+    });
+
+    it('returns 404 for unknown portal credentials', async () => {
+      const res = await request(app).get('/api/portals/unknown_portal/credentials');
+      expect(res.status).toBe(404);
+    });
+
+    it('supports HITL launch and verification routes', async () => {
+      const launchRes = await request(app).post('/api/portals/epads/hitl-launch');
+      expect(launchRes.status).toBe(200);
+      expect(launchRes.body.success).toBe(true);
+
+      const verifyRes = await request(app).post('/api/portals/epads/hitl-verify');
+      expect(verifyRes.status).toBe(200);
+      expect(verifyRes.body.success).toBe(true);
+    });
+  });
+
+  describe('Scan Control API (/api/scan)', () => {
+    it('returns current scan status', async () => {
+      const res = await request(app).get('/api/scan/status');
+      expect(res.status).toBe(200);
+      expect(typeof res.body.isScanning).toBe('boolean');
+      expect(typeof res.body.progressPercent).toBe('number');
+    });
+
+    it('triggers crawler scan via start endpoint', async () => {
+      const res = await request(app).post('/api/scan/start');
+      expect(res.status).toBe(200);
+      expect(typeof res.body.isScanning).toBe('boolean');
+    });
+  });
+
+  describe('Dossiers & Storage API', () => {
+    it('returns storage stats', async () => {
+      const res = await request(app).get('/api/storage');
+      expect(res.status).toBe(200);
+      expect(typeof res.body.total_bytes).toBe('number');
+      expect(typeof res.body.passed_bytes).toBe('number');
+    });
+
+    it('prunes dossiers for passed tenders', async () => {
+      const res = await request(app).post('/api/dossiers/prune-passed');
+      expect(res.status).toBe(200);
+      expect(typeof res.body.freed_bytes).toBe('number');
+      expect(typeof res.body.tenders).toBe('number');
+    });
+
+    it('serves cached dossier files when present and returns 404 when absent', async () => {
+      const tenderId = 'tender-api-doc-1';
+      const filename = 'bidding_doc.pdf';
+      const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+      fs.mkdirSync(tenderDir, { recursive: true });
+      fs.writeFileSync(path.resolve(tenderDir, filename), '%PDF-1.4 API Test Document');
+
+      const foundRes = await request(app).get(`/api/dossiers/${tenderId}/${filename}`);
+      expect(foundRes.status).toBe(200);
+      expect(foundRes.headers['content-type']).toContain('application/pdf');
+
+      const notFoundRes = await request(app).get(`/api/dossiers/${tenderId}/missing.pdf`);
+      expect(notFoundRes.status).toBe(404);
+      expect(notFoundRes.text).toBe('Dossier file not found on disk');
+    });
+  });
+
+  describe('Backups API (/api/backups)', () => {
+    it('lists backups and creates manual backup', async () => {
+      const createRes = await request(app).post('/api/backups');
+      expect(createRes.status).toBe(200);
+      expect(createRes.body.name).toContain('tender_tracker_');
+      expect(createRes.body.name).toContain('_manual.db');
+
+      const listRes = await request(app).get('/api/backups');
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe('Export CSV API (/api/export/csv)', () => {
+    it('exports tenders to CSV with UTF-8 BOM and correct headers', async () => {
+      insertTestTender('t-exp-1', { title: 'Solar Power System', pipeline_status: 'New Opportunity' });
+      insertTestTender('t-exp-2', { title: 'Construction of School', pipeline_status: 'Preparing Bid' });
+
+      const allRes = await request(app).get('/api/export/csv');
+      expect(allRes.status).toBe(200);
+      expect(allRes.headers['content-type']).toContain('text/csv');
+      expect(allRes.text.startsWith('\uFEFF')).toBe(true);
+      expect(allRes.text).toContain('Reference No,Title,Organization');
+      expect(allRes.text).toContain('Solar Power System');
+      expect(allRes.text).toContain('Construction of School');
+
+      // Test scope filters
+      const inboxRes = await request(app).get('/api/export/csv?scope=inbox');
+      expect(inboxRes.text).toContain('Solar Power System');
+      expect(inboxRes.text).not.toContain('Construction of School');
+
+      const pipelineRes = await request(app).get('/api/export/csv?scope=pipeline');
+      expect(pipelineRes.text).toContain('Construction of School');
+      expect(pipelineRes.text).not.toContain('Solar Power System');
+    });
+  });
+
+  describe('Clear Tenders API (/api/tenders/clear)', () => {
+    it('clears unreviewed only when unreviewedOnly is true', async () => {
+      insertTestTender('t-unreviewed', { pipeline_status: 'New Opportunity' });
+      insertTestTender('t-active', { pipeline_status: 'Preparing Bid' });
+
+      const res = await request(app)
+        .post('/api/tenders/clear')
+        .send({ unreviewedOnly: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.message).toContain('Unreviewed opportunities cleared');
+
+      expect(getTenderById('t-unreviewed')).toBeNull();
+      expect(getTenderById('t-active')).not.toBeNull();
+    });
+
+    it('clears all tenders when unreviewedOnly is false', async () => {
+      insertTestTender('t-1', { pipeline_status: 'New Opportunity' });
+      insertTestTender('t-2', { pipeline_status: 'Preparing Bid' });
+
+      const res = await request(app)
+        .post('/api/tenders/clear')
+        .send({ unreviewedOnly: false });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.message).toContain('All tenders wiped');
+
+      expect(getAllTenders().length).toBe(0);
+    });
+  });
+});

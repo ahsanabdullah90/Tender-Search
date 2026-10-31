@@ -377,7 +377,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
           <div className="flex items-center justify-between gap-4">
             <div>
               <div className="font-semibold">Clear Inbox</div>
-              <p className="text-ink-muted">Removes tenders you have not acted on, and passed ones. Bookmarked tenders and your pipeline stay.</p>
+              <p className="text-ink-muted">Removes unreviewed opportunities from the inbox. Active bid pursuits, bookmarks, and pipeline records are preserved.</p>
             </div>
             <Button variant="danger" onClick={() => setConfirm('inbox')}>Clear Inbox</Button>
           </div>
@@ -397,7 +397,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
         title="Clear the Inbox?"
         footer={<><Button onClick={closeConfirm}>Cancel</Button><Button variant="danger" onClick={() => { closeConfirm(); onClearInbox(); setMessage('Inbox cleared.'); }}>Clear Inbox</Button></>}
       >
-        <p>Tenders you have not acted on will be removed. Your pipeline and bookmarks are kept.</p>
+        <p>Unreviewed opportunities in the inbox will be cleared. Tenders in your pipeline and bookmarks are preserved.</p>
       </Dialog>
 
       <Dialog
