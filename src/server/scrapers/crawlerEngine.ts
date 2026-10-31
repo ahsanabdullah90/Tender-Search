@@ -61,8 +61,10 @@ export function getActivePortalsList(targetPortalId?: string): PortalDefinition[
       tier: (dbP.tier as any) || def.tier,
       baseUrl: dbP.base_url || def.baseUrl,
       tendersUrl: dbP.tenders_url || def.tendersUrl,
+      loginUrl: dbP.login_url || def.loginUrl,
       accessMode: (dbP.access_mode as any) || def.accessMode,
-      verifiedStatus: dbP.verified_status || def.verifiedStatus
+      verifiedStatus: dbP.verified_status || def.verifiedStatus,
+      sessionCookies: dbP.session_cookies || undefined
     };
   });
 
@@ -204,8 +206,8 @@ export interface ScrapeResult {
 /**
  * Scrapes a portal via tolerant HTTP/Cheerio
  */
-async function scrapePortal(portal: PortalDefinition): Promise<ScrapeResult> {
-  const html = await fetchHtmlWithTolerantAgent(portal.tendersUrl);
+async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string }): Promise<ScrapeResult> {
+  const html = await fetchHtmlWithTolerantAgent(portal.tendersUrl, 0, portal.sessionCookies);
   const $ = cheerio.load(html);
   const items: RawScrapedItem[] = [];
 
@@ -282,7 +284,7 @@ async function scrapePortal(portal: PortalDefinition): Promise<ScrapeResult> {
   return { items, hitlRequired: false };
 }
 
-function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0): Promise<string> {
+function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0, cookieStr?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
       return reject(new Error('Too many redirects while loading portal page'));
@@ -298,15 +300,20 @@ function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0): Pro
     const isHttps = parsedUrl.protocol === 'https:';
     const client = isHttps ? https : http;
 
+    const reqHeaders: Record<string, string> = { ...HUMAN_CHROME_HEADERS };
+    if (cookieStr) {
+      reqHeaders['Cookie'] = cookieStr;
+    }
+
     const req = client.get(url, {
       agent: isHttps ? sslTolerantAgent : undefined,
-      headers: HUMAN_CHROME_HEADERS,
+      headers: reqHeaders,
       timeout: 15000
     }, res => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         const nextUrl = new URL(res.headers.location, url).toString();
-        return fetchHtmlWithTolerantAgent(nextUrl, redirectCount + 1).then(resolve).catch(reject);
+        return fetchHtmlWithTolerantAgent(nextUrl, redirectCount + 1, cookieStr).then(resolve).catch(reject);
       }
 
       if (res.statusCode && res.statusCode >= 400) {

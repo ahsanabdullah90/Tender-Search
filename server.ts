@@ -19,8 +19,11 @@ import {
   acknowledgeCorrigendum,
   getKpiStats,
   clearAllTenders,
+  savePortalCredentials,
+  getPortalAuthCredentials,
   db
 } from './src/server/db.js';
+import { authenticatePortal } from './src/server/scrapers/portalAuth.js';
 import {
   startCrawlerScan,
   currentScanStatus,
@@ -170,6 +173,34 @@ app.post('/api/portals/:portalId/hitl-launch', async (req, res) => {
 app.post('/api/portals/:portalId/hitl-verify', (req, res) => {
   verifyAndResumePortal(req.params.portalId);
   res.json({ success: true });
+});
+
+app.get('/api/portals/:portalId/credentials', (req, res) => {
+  const creds = getPortalAuthCredentials(req.params.portalId);
+  if (!creds) {
+    return res.status(404).json({ success: false, message: 'Portal not found' });
+  }
+  res.json({
+    username: creds.username || '',
+    loginUrl: creds.loginUrl || '',
+    hasPassword: Boolean(creds.password)
+  });
+});
+
+app.post('/api/portals/:portalId/credentials', async (req, res) => {
+  try {
+    const { username, password, loginUrl } = req.body;
+    savePortalCredentials(req.params.portalId, { username, password, loginUrl });
+
+    if (username && password) {
+      const authResult = await authenticatePortal(req.params.portalId, username, password, loginUrl);
+      return res.json(authResult);
+    }
+
+    res.json({ success: true, message: 'Portal credentials saved successfully.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // 7. Crawler Scan & Streaming (alias /stream and /progress)

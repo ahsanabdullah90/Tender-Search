@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { 
   SlidersHorizontal, Plus, Trash2, Edit2, Check, X, ExternalLink, RefreshCw, 
-  CheckCircle2, AlertTriangle, AlertOctagon, Radio, Globe, Shield, Search
+  CheckCircle2, AlertTriangle, AlertOctagon, Radio, Globe, Shield, Search, KeyRound
 } from 'lucide-react';
 import { DomainTrack, PortalHealth } from '../types';
+import { PortalCredentialsModal } from './PortalCredentialsModal';
 
 interface SettingsWorkspaceProps {
   tracks: DomainTrack[];
@@ -50,6 +51,7 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   });
 
   const [portalSearch, setPortalSearch] = useState('');
+  const [credentialsPortal, setCredentialsPortal] = useState<PortalHealth | null>(null);
 
   // Handle Track Create / Edit
   const handleStartAddTrack = () => {
@@ -514,6 +516,17 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                         <span>Edit</span>
                       </button>
 
+                      {(portal.access_mode === 'login_required' || portal.access_mode === 'cloudflare' || portal.portal_id === 'tender_services' || portal.login_url) && (
+                        <button
+                          onClick={() => setCredentialsPortal(portal)}
+                          className="px-2 py-1 rounded border border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/40 font-medium text-[11px] flex items-center gap-1 cursor-pointer"
+                          title="Enter login credentials (email & password)"
+                        >
+                          <KeyRound className="w-3 h-3" />
+                          <span>Credentials</span>
+                        </button>
+                      )}
+
                       {isHitl ? (
                         <>
                           <button
@@ -557,6 +570,17 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
           </div>
         </div>
       )}
+      {/* Dedicated Portal Credentials Modal */}
+      <PortalCredentialsModal
+        portal={credentialsPortal}
+        isOpen={Boolean(credentialsPortal)}
+        onClose={() => setCredentialsPortal(null)}
+        onSuccess={() => {
+          if (credentialsPortal) {
+            onUpdatePortal(credentialsPortal.portal_id, { status: 'online' });
+          }
+        }}
+      />
     </div>
   );
 };

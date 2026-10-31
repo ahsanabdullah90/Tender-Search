@@ -5,6 +5,7 @@ export interface PortalDefinition {
   tier: 'playwright' | 'http';
   baseUrl: string;
   tendersUrl: string;
+  loginUrl?: string;
   description: string;
   defaultKeywords: string[];
   accessMode: 'public' | 'login_required' | 'cloudflare' | 'offline_broken';
@@ -20,6 +21,7 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     tier: 'playwright',
     baseUrl: 'https://www.ppra.gov.pk',
     tendersUrl: 'https://epms.ppra.gov.pk/',
+    loginUrl: 'https://epms.ppra.gov.pk/',
     description: 'Federal statutory public procurement electronic system (EPMS/EPADS)',
     defaultKeywords: ['construction', 'solar', 'stationery', 'education', 'tvet'],
     accessMode: 'login_required',
@@ -220,10 +222,11 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     tier: 'playwright',
     baseUrl: 'https://tenderservice.pk',
     tendersUrl: 'https://tenderservice.pk',
+    loginUrl: 'https://tenderservice.pk/permits/login.php',
     description: 'Commercial aggregator consolidating nationwide public notices',
     defaultKeywords: ['construction', 'solar', 'education', 'stationery', 'video production'],
-    accessMode: 'cloudflare',
-    verifiedStatus: 'Blocked by Cloudflare bot-protection'
+    accessMode: 'login_required',
+    verifiedStatus: 'Login required (permits/login.php)'
   },
   {
     id: 'pid',

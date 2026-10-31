@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { X, ExternalLink, RefreshCw, CheckCircle2, AlertTriangle, AlertOctagon, Radio, Edit2, Check, Globe } from 'lucide-react';
+import { X, ExternalLink, RefreshCw, CheckCircle2, AlertTriangle, AlertOctagon, Radio, Edit2, Check, Globe, KeyRound } from 'lucide-react';
 import { PortalHealth } from '../types';
+import { PortalCredentialsModal } from './PortalCredentialsModal';
 
 interface PortalHealthModalProps {
   isOpen: boolean;
@@ -22,6 +23,7 @@ export const PortalHealthModal: React.FC<PortalHealthModalProps> = ({
   onUpdatePortal
 }) => {
   const [editingPortalId, setEditingPortalId] = useState<string | null>(null);
+  const [credentialsPortal, setCredentialsPortal] = useState<PortalHealth | null>(null);
 
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -334,6 +336,17 @@ export const PortalHealthModal: React.FC<PortalHealthModalProps> = ({
                         <span>Edit</span>
                       </button>
 
+                      {(portal.access_mode === 'login_required' || portal.access_mode === 'cloudflare' || portal.portal_id === 'tender_services' || portal.login_url) && (
+                        <button
+                          onClick={() => setCredentialsPortal(portal)}
+                          className="px-2 py-1 rounded border border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/40 font-medium text-[11px] flex items-center gap-1 cursor-pointer"
+                          title="Enter login credentials (email & password)"
+                        >
+                          <KeyRound className="w-3 h-3" />
+                          <span>Credentials</span>
+                        </button>
+                      )}
+
                       {isHitl ? (
                         <>
                           <button
@@ -387,6 +400,18 @@ export const PortalHealthModal: React.FC<PortalHealthModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Dedicated Portal Credentials Modal */}
+      <PortalCredentialsModal
+        portal={credentialsPortal}
+        isOpen={Boolean(credentialsPortal)}
+        onClose={() => setCredentialsPortal(null)}
+        onSuccess={() => {
+          if (credentialsPortal && onUpdatePortal) {
+            onUpdatePortal(credentialsPortal.portal_id, { status: 'online' });
+          }
+        }}
+      />
     </div>
   );
 };

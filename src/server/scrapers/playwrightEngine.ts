@@ -34,7 +34,7 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
   const defPortal = PORTAL_DEFINITIONS.find(p => p.id === portalId);
 
   const portalName = dbPortal?.portal_name || defPortal?.name || portalId;
-  const tendersUrl = dbPortal?.tenders_url || defPortal?.tendersUrl || '#';
+  const targetUrl = dbPortal?.login_url || defPortal?.loginUrl || dbPortal?.tenders_url || defPortal?.tendersUrl || '#';
 
   const sessionPath = path.resolve(SESSIONS_DIR, portalId);
   if (!fs.existsSync(sessionPath)) {
@@ -65,13 +65,13 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
       });
 
       const page = await browser.newPage();
-      await page.goto(tendersUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
       return {
         success: true,
         message: `Local browser window opened for ${portalName}. Complete the verification and close the browser.`,
         portalName,
-        portalUrl: tendersUrl,
+        portalUrl: targetUrl,
         isHeadlessFallback: false
       };
     } else {
@@ -79,7 +79,7 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
         success: true,
         message: `Direct link provided. Open in your browser, complete the CAPTCHA, and click 'Verify Session' below.`,
         portalName,
-        portalUrl: tendersUrl,
+        portalUrl: targetUrl,
         isHeadlessFallback: true
       };
     }
@@ -89,7 +89,7 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
       success: true,
       message: `Open ${portalName} in your browser to verify, then click 'Verify Session' to resume.`,
       portalName,
-      portalUrl: tendersUrl,
+      portalUrl: targetUrl,
       isHeadlessFallback: true
     };
   }

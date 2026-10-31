@@ -115,6 +115,10 @@ export function initDatabase() {
       tier TEXT NOT NULL,
       base_url TEXT NOT NULL,
       tenders_url TEXT NOT NULL,
+      login_url TEXT,
+      auth_username TEXT,
+      auth_password TEXT,
+      session_cookies TEXT,
       status TEXT DEFAULT 'online',
       last_scan_at TEXT,
       last_items_found INTEGER DEFAULT 0,
@@ -188,20 +192,20 @@ function seedDefaultDomainTracks() {
 
 function seedPortalHealth() {
   // Check if columns exist; if not, add them (schema migration)
-  try {
-    db.prepare('ALTER TABLE portal_health ADD COLUMN access_mode TEXT DEFAULT "public"').run();
-  } catch {}
-  try {
-    db.prepare('ALTER TABLE portal_health ADD COLUMN verified_status TEXT').run();
-  } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN access_mode TEXT DEFAULT "public"').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN verified_status TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN login_url TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_username TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_password TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN session_cookies TEXT').run(); } catch {}
 
   // INSERT OR IGNORE so user edits to URLs, access modes, tiers, and statuses are NEVER overwritten on reboot
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO portal_health (
-      portal_id, portal_name, category, tier, base_url, tenders_url,
+      portal_id, portal_name, category, tier, base_url, tenders_url, login_url,
       status, last_items_found, consecutive_zero_yields, access_mode, verified_status
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
   `);
 
   const insertMany = db.transaction((portals: typeof PORTAL_DEFINITIONS) => {
@@ -213,7 +217,14 @@ function seedPortalHealth() {
         : p.accessMode === 'cloudflare'
         ? 'hitl_required'
         : 'online';
-      insertStmt.run(p.id, p.name, p.category, p.tier, p.baseUrl, p.tendersUrl, initialStatus, p.accessMode, p.verifiedStatus);
+      insertStmt.run(p.id, p.name, p.category, p.tier, p.baseUrl, p.tendersUrl, p.loginUrl || null, initialStatus, p.accessMode, p.verifiedStatus);
+      
+      // If loginUrl is defined in PORTAL_DEFINITIONS and not set in DB, populate it
+      if (p.loginUrl) {
+        try {
+          db.prepare('UPDATE portal_health SET login_url = ? WHERE portal_id = ? AND (login_url IS NULL OR login_url = "")').run(p.loginUrl, p.id);
+        } catch {}
+      }
     }
   });
 
@@ -399,15 +410,35 @@ export function reScoreTendersAgainstTracks() {
 }
 
 export function getPortalHealthList(): PortalHealth[] {
-  return db.prepare('SELECT * FROM portal_health ORDER BY portal_name ASC').all() as PortalHealth[];
+  const rows = db.prepare('SELECT * FROM portal_health ORDER BY portal_name ASC').all() as any[];
+  return rows.map(r => ({
+    portal_id: r.portal_id,
+    portal_name: r.portal_name,
+    category: r.category,
+    tier: r.tier,
+    base_url: r.base_url,
+    tenders_url: r.tenders_url,
+    login_url: r.login_url,
+    auth_username: r.auth_username,
+    has_credentials: Boolean(r.auth_password),
+    session_cookies: r.session_cookies,
+    status: r.status,
+    last_scan_at: r.last_scan_at,
+    last_items_found: r.last_items_found,
+    consecutive_zero_yields: r.consecutive_zero_yields,
+    last_error_message: r.last_error_message,
+    access_mode: r.access_mode,
+    verified_status: r.verified_status
+  }));
 }
 
-export function updatePortalHealth(portalId: string, updates: Partial<PortalHealth>) {
+export function updatePortalHealth(portalId: string, updates: Partial<PortalHealth> & { auth_password?: string }) {
   const existing = db.prepare('SELECT * FROM portal_health WHERE portal_id = ?').get(portalId);
   if (!existing) return;
 
   const allowedColumns = new Set([
-    'portal_name', 'category', 'tier', 'base_url', 'tenders_url',
+    'portal_name', 'category', 'tier', 'base_url', 'tenders_url', 'login_url',
+    'auth_username', 'auth_password', 'session_cookies',
     'status', 'last_scan_at', 'last_items_found', 'consecutive_zero_yields',
     'last_error_message', 'access_mode', 'verified_status'
   ]);
@@ -426,6 +457,25 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
   values.push(portalId);
 
   db.prepare(`UPDATE portal_health SET ${fields.join(', ')} WHERE portal_id = ?`).run(...values);
+}
+
+export function savePortalCredentials(portalId: string, creds: { username?: string; password?: string; loginUrl?: string }) {
+  const updates: any = {};
+  if (creds.username !== undefined) updates.auth_username = creds.username;
+  if (creds.password !== undefined && creds.password.trim().length > 0) updates.auth_password = creds.password;
+  if (creds.loginUrl !== undefined) updates.login_url = creds.loginUrl;
+  updatePortalHealth(portalId, updates);
+}
+
+export function getPortalAuthCredentials(portalId: string): { username?: string; password?: string; loginUrl?: string; cookies?: string } | null {
+  const row = db.prepare('SELECT auth_username, auth_password, login_url, session_cookies FROM portal_health WHERE portal_id = ?').get(portalId) as any;
+  if (!row) return null;
+  return {
+    username: row.auth_username,
+    password: row.auth_password,
+    loginUrl: row.login_url,
+    cookies: row.session_cookies
+  };
 }
 
 export function getUnacknowledgedCorrigenda(): (CorrigendumLog & { tender_title: string; portal_name: string })[] {

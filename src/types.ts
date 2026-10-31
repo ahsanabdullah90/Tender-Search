@@ -85,6 +85,10 @@ export interface PortalHealth {
   tier: 'playwright' | 'http';
   base_url: string;
   tenders_url: string;
+  login_url?: string;
+  auth_username?: string;
+  has_credentials?: boolean;
+  session_cookies?: string;
   status: 'online' | 'scanning' | 'hitl_required' | 'selector_broken' | 'error';
   last_scan_at: string | null;
   last_items_found: number;
