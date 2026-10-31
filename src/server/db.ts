@@ -22,7 +22,7 @@ for (const dir of [DATA_DIR, BACKUPS_DIR, DOSSIERS_DIR, SESSIONS_DIR]) {
   }
 }
 
-const DB_PATH = path.resolve(DATA_DIR, 'sentinel.db');
+const DB_PATH = path.resolve(DATA_DIR, 'tender_tracker.db');
 export const db = new Database(DB_PATH);
 
 // Configure SQLite pragmas for solo laptop performance and concurrency safety
@@ -548,7 +548,7 @@ export function getKpiStats() {
 
 export async function backupDatabase(): Promise<{ success: boolean; path?: string; skipped?: boolean }> {
   const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 8);
-  const backupPath = path.resolve(BACKUPS_DIR, `sentinel_${timestamp}.db`);
+  const backupPath = path.resolve(BACKUPS_DIR, `tender_tracker_${timestamp}.db`);
   
   // Skip if today's backup already exists
   if (fs.existsSync(backupPath)) {
@@ -557,7 +557,7 @@ export async function backupDatabase(): Promise<{ success: boolean; path?: strin
 
   try {
     await db.backup(backupPath);
-    console.log(`[Sentinel DB] Daily backup generated: ${backupPath}`);
+    console.log(`[Tender Tracker DB] Daily backup generated: ${backupPath}`);
     // Prune backups older than 14 days
     const files = fs.readdirSync(BACKUPS_DIR);
     const now = Date.now();

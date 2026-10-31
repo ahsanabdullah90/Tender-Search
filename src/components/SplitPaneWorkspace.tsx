@@ -25,12 +25,12 @@ export function SplitPaneWorkspace({
   onToggleBookmark,
 }: SplitPaneWorkspaceProps) {
   const [sortBy, setSortBy] = useState<'deadline' | 'score' | 'newest'>(() => {
-    return (localStorage.getItem('sentinel_sortBy') as any) || 'deadline';
+    return (localStorage.getItem('tender_tracker_sortBy') as any) || 'deadline';
   });
 
   const handleSortChange = (newSort: 'deadline' | 'score' | 'newest') => {
     setSortBy(newSort);
-    localStorage.setItem('sentinel_sortBy', newSort);
+    localStorage.setItem('tender_tracker_sortBy', newSort);
   };
 
   // Sorted tenders

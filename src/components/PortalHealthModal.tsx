@@ -82,7 +82,7 @@ export const PortalHealthModal: React.FC<PortalHealthModalProps> = ({
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <Radio className="w-4 h-4 text-blue-600" />
-              <span>Procurement Sentinel Portals &amp; URL Configuration</span>
+              <span>Procurement Portals &amp; URL Configuration</span>
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
               Edit live URLs, access modes, scraper tiers (Playwright/HTTP), and test connectivity across all 16+ portals.

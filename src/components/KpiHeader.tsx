@@ -56,7 +56,7 @@ export const KpiHeader: React.FC<KpiHeaderProps> = ({
             </div>
             <div>
               <div className="text-base font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap">
-                SENTINEL
+                TENDER TRACKER
               </div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">
                 Pakistan Procurement Command Center
@@ -268,7 +268,7 @@ export const KpiHeader: React.FC<KpiHeaderProps> = ({
             </div>
           </div>
 
-          {/* Card 5: Portal Sentinel Health */}
+          {/* Card 5: Portal Health */}
           <button
             onClick={() => onTabChange('management')}
             className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xs text-left hover:border-slate-400 dark:hover:border-slate-600 transition-colors group cursor-pointer"

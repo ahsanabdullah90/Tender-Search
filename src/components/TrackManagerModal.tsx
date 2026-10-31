@@ -95,7 +95,7 @@ export const TrackManagerModal: React.FC<TrackManagerModalProps> = ({
         {/* Modal Content */}
         <div className="p-5 overflow-y-auto space-y-4 text-xs flex-1">
           <p className="text-slate-500 dark:text-slate-400">
-            Configure target procurement sectors and active search synonyms. Sentinel automatically scores notices using these exact terms and excludes notices matching negative keywords.
+            Configure target procurement sectors and active search synonyms. Tender Tracker automatically scores notices using these exact terms and excludes notices matching negative keywords.
           </p>
 
           {/* Add New Track Button / Form */}

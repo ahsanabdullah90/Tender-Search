@@ -41,7 +41,7 @@ function checkAndTriggerCatchUpScan() {
     const lastScanStr = row?.last_scan;
 
     if (!lastScanStr) {
-      console.log('[Sentinel Scheduler] No previous scan recorded. Initiating background crawl...');
+      console.log('[Tender Tracker Scheduler] No previous scan recorded. Initiating background crawl...');
       startCrawlerScan();
       return;
     }
@@ -52,11 +52,11 @@ function checkAndTriggerCatchUpScan() {
 
     // If more than 12 hours have elapsed since the last successful scan
     if (hoursSinceLastScan >= 12) {
-      console.log(`[Sentinel Scheduler] Last scan was ${hoursSinceLastScan.toFixed(1)}h ago. Starting catch-up scan...`);
+      console.log(`[Tender Tracker Scheduler] Last scan was ${hoursSinceLastScan.toFixed(1)}h ago. Starting catch-up scan...`);
       startCrawlerScan();
     }
   } catch (err) {
-    console.warn('[Sentinel Scheduler] Catch-up check failed:', err);
+    console.warn('[Tender Tracker Scheduler] Catch-up check failed:', err);
   }
 }
 
@@ -83,6 +83,6 @@ async function runDailyPortalHealthAdvisement() {
       }
     }
   } catch (e) {
-    console.warn('[Sentinel Scheduler] Daily health advisement check note:', e);
+    console.warn('[Tender Tracker Scheduler] Daily health advisement check note:', e);
   }
 }

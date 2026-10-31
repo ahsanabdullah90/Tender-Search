@@ -1,7 +1,7 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 echo "========================================================"
-echo "Starting Sentinel - Pakistan Procurement Watchdog"
+echo "Starting Tender Tracker - Pakistan Procurement Watchdog"
 echo "Solo-Operator Local Edition (http://localhost:3000)"
 echo "========================================================"
 

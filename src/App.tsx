@@ -13,13 +13,13 @@ import { Tender, DomainTrack, PortalHealth, CorrigendumLog, ScanStatus, Opportun
 export default function App() {
   // Theme State with localStorage persistence
   const [isDark, setIsDark] = useState<boolean>(() => {
-    const saved = localStorage.getItem('sentinel_isDark');
+    const saved = localStorage.getItem('tender_tracker_isDark');
     if (saved !== null) return saved === 'true';
     return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
 
   useEffect(() => {
-    localStorage.setItem('sentinel_isDark', String(isDark));
+    localStorage.setItem('tender_tracker_isDark', String(isDark));
     if (isDark) {
       document.documentElement.classList.add('dark');
     } else {
@@ -64,12 +64,12 @@ export default function App() {
   const [bookmarkedOnly, setBookmarkedOnly] = useState<boolean>(false);
   const [corrigendumOnly, setCorrigendumOnly] = useState<boolean>(false);
   const [currentView, setCurrentView] = useState<'split' | 'table' | 'kanban'>(() => {
-    return (localStorage.getItem('sentinel_currentView') as any) || 'split';
+    return (localStorage.getItem('tender_tracker_currentView') as any) || 'split';
   });
 
   const handleViewChange = (view: 'split' | 'table' | 'kanban') => {
     setCurrentView(view);
-    localStorage.setItem('sentinel_currentView', view);
+    localStorage.setItem('tender_tracker_currentView', view);
   };
 
   // Debounce search query to avoid laggy queries

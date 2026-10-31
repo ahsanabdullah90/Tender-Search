@@ -317,7 +317,7 @@ app.get('/api/export/csv', (req, res) => {
   const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\r\n');
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="sentinel_tenders_' + new Date().toISOString().slice(0, 10) + '.csv"');
+  res.setHeader('Content-Disposition', 'attachment; filename="tender_tracker_tenders_' + new Date().toISOString().slice(0, 10) + '.csv"');
   res.send(csvContent);
 });
 
@@ -339,17 +339,17 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Sentinel Watchdog] Solo-Operator Console online at http://localhost:${PORT}`);
+    console.log(`[Tender Tracker] Solo-Operator Console online at http://localhost:${PORT}`);
   });
 
   // Graceful shutdown handling on Windows / Linux
   const handleExit = () => {
-    console.log('\n[Sentinel Watchdog] Shutting down cleanly...');
+    console.log('\n[Tender Tracker] Shutting down cleanly...');
     stopStartupScheduler();
     try {
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.close();
-      console.log('[Sentinel Watchdog] Database closed cleanly.');
+      console.log('[Tender Tracker] Database closed cleanly.');
     } catch {}
     server.close(() => {
       process.exit(0);
