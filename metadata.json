@@ -1,0 +1,6 @@
+{
+  "name": "Sentinel - Pakistan Procurement & Tender Watchdog",
+  "description": "Autonomous procurement scout and opportunity command center monitoring 16+ Pakistani statutory portals, PPRA EPADS, provincial boards, and international agencies with fuzzy deduplication, local dossier caching, and human-in-the-loop verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
