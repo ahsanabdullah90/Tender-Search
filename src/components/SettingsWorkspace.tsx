@@ -530,13 +530,24 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
                           </button>
                         </>
                       ) : (
-                        <button
-                          onClick={() => onScanSinglePortal(portal.portal_id)}
-                          className="px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 font-medium text-[11px] flex items-center gap-1 cursor-pointer"
-                        >
-                          <RefreshCw className="w-3 h-3" />
-                          <span>Scan</span>
-                        </button>
+                        <>
+                          {portal.tier === 'playwright' && (
+                            <button
+                              onClick={() => onLaunchHitl(portal.portal_id)}
+                              title="Open persistent browser to log in or update credentials"
+                              className="px-2 py-1 rounded border border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/40 font-medium text-[11px] flex items-center gap-1 cursor-pointer"
+                            >
+                              <span>Browser / Login</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => onScanSinglePortal(portal.portal_id)}
+                            className="px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 font-medium text-[11px] flex items-center gap-1 cursor-pointer"
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                            <span>Scan</span>
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
