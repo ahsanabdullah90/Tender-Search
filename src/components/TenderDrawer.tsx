@@ -19,6 +19,16 @@ export const TenderDrawer: React.FC<TenderDrawerProps> = ({
   const [notesSaved, setNotesSaved] = useState(false);
 
   useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && tender) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [tender, onClose]);
+
+  useEffect(() => {
     if (tender) {
       setNotes(tender.status_notes || '');
       setNotesSaved(false);
@@ -39,8 +49,11 @@ export const TenderDrawer: React.FC<TenderDrawerProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-xs transition-opacity">
-      <div className="w-full max-w-xl h-full bg-white dark:bg-slate-900 shadow-2xl flex flex-col border-l border-slate-200 dark:border-slate-800 transition-colors">
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-xs transition-opacity" onClick={onClose}>
+      <div 
+        className="w-full max-w-xl h-full bg-white dark:bg-slate-900 shadow-2xl flex flex-col border-l border-slate-200 dark:border-slate-800 transition-colors"
+        onClick={e => e.stopPropagation()}
+      >
         {/* Drawer Header */}
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between gap-4">
           <div>
@@ -180,7 +193,7 @@ export const TenderDrawer: React.FC<TenderDrawerProps> = ({
                       </div>
                     </div>
                     <a
-                      href={`/api/dossiers/${tender.id}/${doc.localPath.split('/').pop()}`}
+                      href={doc.localPath.startsWith('/') ? doc.localPath : `/api/dossiers/${tender.id}/${encodeURIComponent(doc.localPath.replace(/\\/g, '/').split('/').pop() || '')}`}
                       target="_blank"
                       rel="noreferrer"
                       className="px-2.5 py-1 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 dark:hover:bg-blue-900 text-blue-700 dark:text-blue-300 rounded font-medium flex items-center gap-1 transition-colors"

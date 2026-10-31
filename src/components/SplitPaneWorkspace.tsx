@@ -24,7 +24,14 @@ export function SplitPaneWorkspace({
   onSaveNotes,
   onToggleBookmark,
 }: SplitPaneWorkspaceProps) {
-  const [sortBy, setSortBy] = useState<'deadline' | 'score' | 'newest'>('deadline');
+  const [sortBy, setSortBy] = useState<'deadline' | 'score' | 'newest'>(() => {
+    return (localStorage.getItem('sentinel_sortBy') as any) || 'deadline';
+  });
+
+  const handleSortChange = (newSort: 'deadline' | 'score' | 'newest') => {
+    setSortBy(newSort);
+    localStorage.setItem('sentinel_sortBy', newSort);
+  };
 
   // Sorted tenders
   const sortedTenders = useMemo(() => {
@@ -43,6 +50,31 @@ export function SplitPaneWorkspace({
       return bTime - aTime;
     });
   }, [tenders, sortBy]);
+
+  // Keyboard navigation (ArrowUp / ArrowDown) across triage feed
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (targetTag === 'input' || targetTag === 'textarea' || targetTag === 'select') return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        const currentIndex = sortedTenders.findIndex(t => t.id === selectedTender?.id);
+        if (currentIndex < sortedTenders.length - 1) {
+          onSelectTender(sortedTenders[currentIndex + 1]);
+        }
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        const currentIndex = sortedTenders.findIndex(t => t.id === selectedTender?.id);
+        if (currentIndex > 0) {
+          onSelectTender(sortedTenders[currentIndex - 1]);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [sortedTenders, selectedTender, onSelectTender]);
 
   // If no tender is selected but list has items, auto-select the first one for instantaneous preview
   React.useEffect(() => {
@@ -68,7 +100,7 @@ export function SplitPaneWorkspace({
             <span className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">Sort:</span>
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as any)}
+              onChange={(e) => handleSortChange(e.target.value as any)}
               className="text-xs py-1 px-2 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 focus:outline-hidden focus:ring-1 focus:ring-slate-900 dark:focus:ring-slate-100"
             >
               <option value="deadline">Urgent Cutoff</option>

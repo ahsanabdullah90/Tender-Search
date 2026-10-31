@@ -1,14 +1,20 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
-import { DomainTrack, PortalHealth, Tender, CorrigendumLog, PipelineAuditLog } from '../types.js';
+import { fileURLToPath } from 'url';
+import { DomainTrack, PortalHealth, Tender, CorrigendumLog } from '../types.js';
 import { PORTAL_DEFINITIONS } from './scrapers/portalList.js';
 
-// Ensure required data directories exist
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
-const DOSSIERS_DIR = path.resolve(DATA_DIR, 'dossiers');
-const SESSIONS_DIR = path.resolve(DATA_DIR, 'sessions');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// Root of project is two levels up from src/server
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+
+// Ensure required data directories exist relative to project root
+export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
+export const DOSSIERS_DIR = path.resolve(DATA_DIR, 'dossiers');
+export const SESSIONS_DIR = path.resolve(DATA_DIR, 'sessions');
 
 for (const dir of [DATA_DIR, BACKUPS_DIR, DOSSIERS_DIR, SESSIONS_DIR]) {
   if (!fs.existsSync(dir)) {
@@ -23,6 +29,15 @@ export const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
+
+function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
 
 export function initDatabase() {
   // 1. Tenders Table
@@ -180,17 +195,13 @@ function seedPortalHealth() {
     db.prepare('ALTER TABLE portal_health ADD COLUMN verified_status TEXT').run();
   } catch {}
 
+  // INSERT OR IGNORE so user edits to URLs, access modes, tiers, and statuses are NEVER overwritten on reboot
   const insertStmt = db.prepare(`
-    INSERT INTO portal_health (portal_id, portal_name, category, tier, base_url, tenders_url, status, last_items_found, consecutive_zero_yields, access_mode, verified_status)
+    INSERT OR IGNORE INTO portal_health (
+      portal_id, portal_name, category, tier, base_url, tenders_url,
+      status, last_items_found, consecutive_zero_yields, access_mode, verified_status
+    )
     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-    ON CONFLICT(portal_id) DO UPDATE SET
-      portal_name = excluded.portal_name,
-      category = excluded.category,
-      tier = excluded.tier,
-      base_url = excluded.base_url,
-      tenders_url = excluded.tenders_url,
-      access_mode = excluded.access_mode,
-      verified_status = excluded.verified_status
   `);
 
   const insertMany = db.transaction((portals: typeof PORTAL_DEFINITIONS) => {
@@ -239,23 +250,22 @@ export function getAllTenders(filters?: {
     params.push(term, term, term, term);
   }
 
+  if (filters?.track && filters.track !== 'All') {
+    query += ' AND EXISTS (SELECT 1 FROM json_each(tenders.domain_tracks) WHERE value = ?)';
+    params.push(filters.track);
+  }
+
   query += ' ORDER BY CASE WHEN closing_date IS NULL THEN 1 ELSE 0 END, closing_date ASC, updated_at DESC';
 
   const rows = db.prepare(query).all(...params) as any[];
 
-  // Filter track in memory or via JSON contains
-  return rows
-    .map(row => ({
-      ...row,
-      secondary_sources: JSON.parse(row.secondary_sources || '[]'),
-      domain_tracks: JSON.parse(row.domain_tracks || '[]'),
-      matched_keywords: JSON.parse(row.matched_keywords || '[]'),
-      cached_dossiers: JSON.parse(row.cached_dossiers || '[]')
-    }))
-    .filter(t => {
-      if (!filters?.track || filters.track === 'All') return true;
-      return t.domain_tracks.includes(filters.track);
-    });
+  return rows.map(row => ({
+    ...row,
+    secondary_sources: safeJsonParse(row.secondary_sources, []),
+    domain_tracks: safeJsonParse(row.domain_tracks, []),
+    matched_keywords: safeJsonParse(row.matched_keywords, []),
+    cached_dossiers: safeJsonParse(row.cached_dossiers, [])
+  }));
 }
 
 export function getTenderById(id: string): Tender | null {
@@ -263,10 +273,10 @@ export function getTenderById(id: string): Tender | null {
   if (!row) return null;
   return {
     ...row,
-    secondary_sources: JSON.parse(row.secondary_sources || '[]'),
-    domain_tracks: JSON.parse(row.domain_tracks || '[]'),
-    matched_keywords: JSON.parse(row.matched_keywords || '[]'),
-    cached_dossiers: JSON.parse(row.cached_dossiers || '[]')
+    secondary_sources: safeJsonParse(row.secondary_sources, []),
+    domain_tracks: safeJsonParse(row.domain_tracks, []),
+    matched_keywords: safeJsonParse(row.matched_keywords, []),
+    cached_dossiers: safeJsonParse(row.cached_dossiers, [])
   };
 }
 
@@ -275,65 +285,117 @@ export function updateTenderStatus(id: string, newStatus: string, notes?: string
   if (!tender) return false;
 
   const previousStatus = tender.pipeline_status;
-  const updateStmt = db.prepare(`
-    UPDATE tenders 
-    SET pipeline_status = ?, status_notes = COALESCE(?, status_notes), updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `);
-  updateStmt.run(newStatus, notes, id);
 
-  // Log in pipeline_audit_logs
-  const logStmt = db.prepare(`
-    INSERT INTO pipeline_audit_logs (id, tender_id, previous_status, new_status, notes)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-  logStmt.run('log-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6), id, previousStatus, newStatus, notes || null);
+  const updateTx = db.transaction(() => {
+    db.prepare(`
+      UPDATE tenders 
+      SET pipeline_status = ?, status_notes = COALESCE(?, status_notes), updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(newStatus, notes, id);
 
+    db.prepare(`
+      INSERT INTO pipeline_audit_logs (id, tender_id, previous_status, new_status, notes)
+      VALUES (?, ?, ?, ?, ?)
+    `).run('log-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6), id, previousStatus, newStatus, notes || null);
+  });
+
+  updateTx();
   return true;
 }
 
-export function toggleTenderBookmark(id: string) {
+export function toggleTenderBookmark(id: string): { success: boolean; is_bookmarked: number } {
+  const tender = getTenderById(id);
+  if (!tender) return { success: false, is_bookmarked: 0 };
+
+  const nextState = tender.is_bookmarked === 1 ? 0 : 1;
   db.prepare(`
     UPDATE tenders 
-    SET is_bookmarked = CASE WHEN is_bookmarked = 1 THEN 0 ELSE 1 END, updated_at = CURRENT_TIMESTAMP
+    SET is_bookmarked = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(id);
-  return true;
+  `).run(nextState, id);
+
+  return { success: true, is_bookmarked: nextState };
 }
 
-export function updateTenderNotes(id: string, notes: string) {
-  db.prepare(`
+export function updateTenderNotes(id: string, notes: string): boolean {
+  const res = db.prepare(`
     UPDATE tenders SET status_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
   `).run(notes, id);
-  return true;
+  return res.changes > 0;
 }
 
 export function getAllDomainTracks(): DomainTrack[] {
   const rows = db.prepare('SELECT * FROM domain_tracks ORDER BY name ASC').all() as any[];
   return rows.map(r => ({
     ...r,
-    positive_keywords: JSON.parse(r.positive_keywords || '[]'),
-    negative_keywords: JSON.parse(r.negative_keywords || '[]')
+    positive_keywords: safeJsonParse(r.positive_keywords, []),
+    negative_keywords: safeJsonParse(r.negative_keywords, [])
   }));
 }
 
 export function saveDomainTrack(track: { id?: string; name: string; positive_keywords: string[]; negative_keywords: string[]; is_active?: number }) {
   const id = track.id || 'track-' + Date.now();
-  const stmt = db.prepare(`
-    INSERT INTO domain_tracks (id, name, positive_keywords, negative_keywords, is_active)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(name) DO UPDATE SET
-      positive_keywords = excluded.positive_keywords,
-      negative_keywords = excluded.negative_keywords,
-      is_active = excluded.is_active
-  `);
-  stmt.run(id, track.name, JSON.stringify(track.positive_keywords), JSON.stringify(track.negative_keywords), track.is_active ?? 1);
+  const existing = track.id ? db.prepare('SELECT id FROM domain_tracks WHERE id = ?').get(track.id) : null;
+
+  if (existing) {
+    db.prepare(`
+      UPDATE domain_tracks
+      SET name = ?, positive_keywords = ?, negative_keywords = ?, is_active = ?
+      WHERE id = ?
+    `).run(track.name, JSON.stringify(track.positive_keywords), JSON.stringify(track.negative_keywords), track.is_active ?? 1, id);
+  } else {
+    db.prepare(`
+      INSERT INTO domain_tracks (id, name, positive_keywords, negative_keywords, is_active)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET
+        positive_keywords = excluded.positive_keywords,
+        negative_keywords = excluded.negative_keywords,
+        is_active = excluded.is_active
+    `).run(id, track.name, JSON.stringify(track.positive_keywords), JSON.stringify(track.negative_keywords), track.is_active ?? 1);
+  }
+
+  // Re-evaluate tenders against tracks when track rules change
+  reScoreTendersAgainstTracks();
   return id;
 }
 
 export function deleteDomainTrack(id: string) {
   db.prepare('DELETE FROM domain_tracks WHERE id = ?').run(id);
+  reScoreTendersAgainstTracks();
   return true;
+}
+
+export function reScoreTendersAgainstTracks() {
+  const tracks = getAllDomainTracks().filter(t => t.is_active === 1);
+  const tenders = db.prepare('SELECT id, title, description, organization, reference_no FROM tenders').all() as any[];
+
+  const updateStmt = db.prepare(`
+    UPDATE tenders SET domain_tracks = ?, matched_keywords = ?, match_score = ? WHERE id = ?
+  `);
+
+  const updateTx = db.transaction(() => {
+    for (const tender of tenders) {
+      const combinedText = `${tender.title} ${tender.description || ''} ${tender.organization} ${tender.reference_no || ''}`.toLowerCase();
+      const matchedTracks: string[] = [];
+      const matchedKeywords: string[] = [];
+
+      for (const track of tracks) {
+        const hasNegative = track.negative_keywords.some((neg: string) => combinedText.includes(neg.toLowerCase()));
+        if (hasNegative) continue;
+
+        const hitKeywords = track.positive_keywords.filter((pos: string) => combinedText.includes(pos.toLowerCase()));
+        if (hitKeywords.length > 0) {
+          matchedTracks.push(track.name);
+          matchedKeywords.push(...hitKeywords);
+        }
+      }
+
+      const matchScore = Math.min(100, Math.max(30, matchedKeywords.length * 20));
+      updateStmt.run(JSON.stringify(matchedTracks), JSON.stringify(Array.from(new Set(matchedKeywords))), matchScore, tender.id);
+    }
+  });
+
+  updateTx();
 }
 
 export function getPortalHealthList(): PortalHealth[] {
@@ -344,12 +406,20 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
   const existing = db.prepare('SELECT * FROM portal_health WHERE portal_id = ?').get(portalId);
   if (!existing) return;
 
+  const allowedColumns = new Set([
+    'portal_name', 'category', 'tier', 'base_url', 'tenders_url',
+    'status', 'last_scan_at', 'last_items_found', 'consecutive_zero_yields',
+    'last_error_message', 'access_mode', 'verified_status'
+  ]);
+
   const fields: string[] = [];
   const values: any[] = [];
 
   for (const [key, val] of Object.entries(updates)) {
-    fields.push(`${key} = ?`);
-    values.push(val);
+    if (allowedColumns.has(key) && val !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(val);
+    }
   }
 
   if (fields.length === 0) return;
@@ -369,19 +439,32 @@ export function getUnacknowledgedCorrigenda(): (CorrigendumLog & { tender_title:
 }
 
 export function acknowledgeCorrigendum(id: string) {
-  db.prepare('UPDATE corrigendum_logs SET is_acknowledged = 1 WHERE id = ?').run(id);
+  const log = db.prepare('SELECT tender_id FROM corrigendum_logs WHERE id = ?').get(id) as { tender_id: string } | undefined;
+  if (!log) return false;
+
+  const updateTx = db.transaction(() => {
+    db.prepare('UPDATE corrigendum_logs SET is_acknowledged = 1 WHERE id = ?').run(id);
+
+    // If no other unacknowledged corrigenda remain for this tender, clear tender flag
+    const remaining = (db.prepare('SELECT COUNT(*) as c FROM corrigendum_logs WHERE tender_id = ? AND is_acknowledged = 0').get(log.tender_id) as any).c;
+    if (remaining === 0) {
+      db.prepare('UPDATE tenders SET has_corrigendum = 0 WHERE id = ?').run(log.tender_id);
+    }
+  });
+
+  updateTx();
   return true;
 }
 
 export function getKpiStats() {
   const totalTracked = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c;
   
-  // Closing in < 72h
+  // Accurate Julian-day comparison handles both ISO 'T' and SQLite space formats cleanly
   const closingSoon = (db.prepare(`
     SELECT COUNT(*) as c FROM tenders 
     WHERE closing_date IS NOT NULL 
-    AND closing_date > datetime('now')
-    AND closing_date <= datetime('now', '+3 days')
+    AND julianday(closing_date) > julianday('now')
+    AND julianday(closing_date) <= julianday('now', '+3 days')
     AND pipeline_status NOT IN ('Won', 'Passed')
   `).get() as any).c;
 
@@ -413,11 +496,18 @@ export function getKpiStats() {
   };
 }
 
-export async function backupDatabase() {
+export async function backupDatabase(): Promise<{ success: boolean; path?: string; skipped?: boolean }> {
   const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 8);
   const backupPath = path.resolve(BACKUPS_DIR, `sentinel_${timestamp}.db`);
+  
+  // Skip if today's backup already exists
+  if (fs.existsSync(backupPath)) {
+    return { success: true, path: backupPath, skipped: true };
+  }
+
   try {
     await db.backup(backupPath);
+    console.log(`[Sentinel DB] Daily backup generated: ${backupPath}`);
     // Prune backups older than 14 days
     const files = fs.readdirSync(BACKUPS_DIR);
     const now = Date.now();
@@ -428,15 +518,45 @@ export async function backupDatabase() {
         fs.unlinkSync(filePath);
       }
     }
+    return { success: true, path: backupPath };
   } catch (err) {
     console.error('Database backup failed:', err);
+    return { success: false };
   }
 }
 
-export function clearAllTenders() {
-  db.prepare('DELETE FROM corrigendum_logs').run();
-  db.prepare('DELETE FROM pipeline_audit_logs').run();
-  db.prepare('DELETE FROM tenders').run();
+/**
+ * Clear Tenders:
+ * - unreviewedOnly = true: Preserves user-curated opportunities (Under Review, Preparing Bid, Submitted, Won) and bookmarks.
+ * - unreviewedOnly = false: Complete factory wipe of all tenders.
+ */
+export function clearAllTenders(unreviewedOnly: boolean = false) {
+  const wipeTx = db.transaction(() => {
+    if (unreviewedOnly) {
+      // Delete only New Opportunity and Passed tenders that are NOT bookmarked
+      db.prepare(`
+        DELETE FROM corrigendum_logs 
+        WHERE tender_id IN (
+          SELECT id FROM tenders WHERE pipeline_status IN ('New Opportunity', 'Passed') AND is_bookmarked = 0
+        )
+      `).run();
+      db.prepare(`
+        DELETE FROM pipeline_audit_logs 
+        WHERE tender_id IN (
+          SELECT id FROM tenders WHERE pipeline_status IN ('New Opportunity', 'Passed') AND is_bookmarked = 0
+        )
+      `).run();
+      db.prepare(`
+        DELETE FROM tenders 
+        WHERE pipeline_status IN ('New Opportunity', 'Passed') AND is_bookmarked = 0
+      `).run();
+    } else {
+      db.prepare('DELETE FROM corrigendum_logs').run();
+      db.prepare('DELETE FROM pipeline_audit_logs').run();
+      db.prepare('DELETE FROM tenders').run();
+    }
+  });
+
+  wipeTx();
   return true;
 }
-

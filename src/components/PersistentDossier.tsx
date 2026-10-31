@@ -78,10 +78,15 @@ export function PersistentDossier({
   const handleNotesBlur = async () => {
     if (notes !== (tender.status_notes || '')) {
       setIsSavingNotes(true);
-      await onSaveNotes(tender.id, notes);
-      setIsSavingNotes(false);
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 2000);
+      try {
+        await onSaveNotes(tender.id, notes);
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 2000);
+      } catch (err) {
+        console.error('Note save failed:', err);
+      } finally {
+        setIsSavingNotes(false);
+      }
     }
   };
 
@@ -312,7 +317,7 @@ export function PersistentDossier({
                   </div>
 
                   <a
-                    href={file.localPath}
+                    href={file.localPath.startsWith('/') ? file.localPath : `/api/dossiers/${tender.id}/${encodeURIComponent(file.localPath.replace(/\\/g, '/').split('/').pop() || '')}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 rounded transition-colors shrink-0"

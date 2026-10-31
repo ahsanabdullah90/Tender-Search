@@ -1,9 +1,17 @@
 import path from 'path';
 import fs from 'fs';
-import { updatePortalHealth } from '../db.js';
+import { fileURLToPath } from 'url';
+import { updatePortalHealth, getPortalHealthList } from '../db.js';
 import { PORTAL_DEFINITIONS } from './portalList.js';
 
-const SESSIONS_DIR = path.resolve(process.cwd(), 'data', 'sessions');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
+
+const SESSIONS_DIR = path.resolve(PROJECT_ROOT, 'data', 'sessions');
+if (!fs.existsSync(SESSIONS_DIR)) {
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+}
 
 export interface HitlLaunchResult {
   success: boolean;
@@ -13,15 +21,20 @@ export interface HitlLaunchResult {
   isHeadlessFallback?: boolean;
 }
 
+// Active HITL browser contexts tracked to prevent multiple hanging processes
+const activeHitlContexts = new Map<string, any>();
+
 /**
  * Launches the local Playwright browser window on the operator's desktop (headless: false)
  * for CAPTCHA / Cloudflare Turnstile / 2FA resolution.
  */
 export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaunchResult> {
-  const portal = PORTAL_DEFINITIONS.find(p => p.id === portalId);
-  if (!portal) {
-    return { success: false, message: 'Portal not found', portalName: portalId, portalUrl: '#' };
-  }
+  const dbPortals = getPortalHealthList();
+  const dbPortal = dbPortals.find(p => p.portal_id === portalId);
+  const defPortal = PORTAL_DEFINITIONS.find(p => p.id === portalId);
+
+  const portalName = dbPortal?.portal_name || defPortal?.name || portalId;
+  const tendersUrl = dbPortal?.tenders_url || defPortal?.tendersUrl || '#';
 
   const sessionPath = path.resolve(SESSIONS_DIR, portalId);
   if (!fs.existsSync(sessionPath)) {
@@ -29,35 +42,44 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
   }
 
   try {
-    // Attempt dynamic import of playwright if installed locally
     const modName = 'playwright';
     const playwright: any = await (Function('m', 'return import(m)')(modName) as Promise<any>).catch(() => null);
 
-    if (playwright && process.env.DISPLAY || process.platform === 'win32' || process.platform === 'darwin') {
+    if (playwright && (process.env.DISPLAY || process.platform === 'win32' || process.platform === 'darwin')) {
+      // Close any already open context for this portal
+      if (activeHitlContexts.has(portalId)) {
+        try {
+          await activeHitlContexts.get(portalId).close();
+        } catch {}
+        activeHitlContexts.delete(portalId);
+      }
+
       const browser = await playwright.chromium.launchPersistentContext(sessionPath, {
         headless: false,
         viewport: { width: 1280, height: 800 }
       });
 
-      const page = await browser.newPage();
-      await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      activeHitlContexts.set(portalId, browser);
+      browser.on('close', () => {
+        activeHitlContexts.delete(portalId);
+      });
 
-      // Return success indicating window opened on the user's laptop
+      const page = await browser.newPage();
+      await page.goto(tendersUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
       return {
         success: true,
-        message: `Local browser window opened for ${portal.name}. Complete the verification and close the browser.`,
-        portalName: portal.name,
-        portalUrl: portal.tendersUrl,
+        message: `Local browser window opened for ${portalName}. Complete the verification and close the browser.`,
+        portalName,
+        portalUrl: tendersUrl,
         isHeadlessFallback: false
       };
     } else {
-      // In cloud sandbox or headless server without GUI display:
-      // Provide direct portal launch link and instant verification
       return {
         success: true,
         message: `Direct link provided. Open in your browser, complete the CAPTCHA, and click 'Verify Session' below.`,
-        portalName: portal.name,
-        portalUrl: portal.tendersUrl,
+        portalName,
+        portalUrl: tendersUrl,
         isHeadlessFallback: true
       };
     }
@@ -65,9 +87,9 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
     console.warn(`Local browser launch for ${portalId} encountered:`, err.message);
     return {
       success: true,
-      message: `Open ${portal.name} in your browser to verify, then click 'Verify Session' to resume.`,
-      portalName: portal.name,
-      portalUrl: portal.tendersUrl,
+      message: `Open ${portalName} in your browser to verify, then click 'Verify Session' to resume.`,
+      portalName,
+      portalUrl: tendersUrl,
       isHeadlessFallback: true
     };
   }
@@ -77,6 +99,14 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
  * Resumes automated scraping on a portal after operator confirms human verification
  */
 export function verifyAndResumePortal(portalId: string) {
+  // If browser context is still open, attempt graceful close
+  if (activeHitlContexts.has(portalId)) {
+    try {
+      activeHitlContexts.get(portalId).close();
+    } catch {}
+    activeHitlContexts.delete(portalId);
+  }
+
   updatePortalHealth(portalId, {
     status: 'online',
     last_error_message: null

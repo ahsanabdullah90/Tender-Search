@@ -1,5 +1,5 @@
-import React from 'react';
-import { Search, LayoutGrid, List, SlidersHorizontal, Download, Bookmark, AlertTriangle, Columns } from 'lucide-react';
+import React, { useState } from 'react';
+import { Search, LayoutGrid, List, SlidersHorizontal, Download, Bookmark, AlertTriangle, Columns, Trash2, AlertOctagon } from 'lucide-react';
 import { DomainTrack } from '../types';
 
 interface TrackFilterBarProps {
@@ -18,7 +18,8 @@ interface TrackFilterBarProps {
   onViewChange: (view: 'split' | 'table' | 'kanban') => void;
   onOpenTrackModal: () => void;
   onExportCsv: () => void;
-  onClearDatabase?: () => void;
+  onClearDatabase?: (unreviewedOnly: boolean) => void;
+  isScanning?: boolean;
 }
 
 export const TrackFilterBar: React.FC<TrackFilterBarProps> = ({
@@ -37,8 +38,24 @@ export const TrackFilterBar: React.FC<TrackFilterBarProps> = ({
   onViewChange,
   onOpenTrackModal,
   onExportCsv,
-  onClearDatabase
+  onClearDatabase,
+  isScanning
 }) => {
+  const [showClearModal, setShowClearModal] = useState(false);
+  const [clearMode, setClearMode] = useState<'unreviewed' | 'all'>('unreviewed');
+  const [confirmText, setConfirmText] = useState('');
+
+  const handleConfirmClear = () => {
+    if (clearMode === 'all' && confirmText.trim().toUpperCase() !== 'CLEAR') {
+      return;
+    }
+    if (onClearDatabase) {
+      onClearDatabase(clearMode === 'unreviewed');
+    }
+    setShowClearModal(false);
+    setConfirmText('');
+  };
+
   return (
     <div className="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 sm:px-6 lg:px-8 py-3 transition-colors">
       <div className="max-w-7xl mx-auto flex flex-col gap-3">
@@ -76,11 +93,16 @@ export const TrackFilterBar: React.FC<TrackFilterBarProps> = ({
           <div className="flex items-center gap-2 shrink-0">
             {onClearDatabase && (
               <button
-                onClick={onClearDatabase}
-                title="Wipe database to start 100% clean with live data only"
-                className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-red-600 hover:border-red-300 dark:hover:border-red-800 text-xs font-medium transition-colors cursor-pointer"
+                onClick={() => setShowClearModal(true)}
+                disabled={isScanning}
+                title="Industry Practice: Guarded cleanup of unreviewed or obsolete notices"
+                className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
+                  isScanning 
+                    ? 'border-slate-200 text-slate-300 dark:border-slate-800 dark:text-slate-600 cursor-not-allowed'
+                    : 'border-slate-200 dark:border-slate-700 text-slate-500 hover:text-red-600 hover:border-red-300 dark:hover:border-red-800'
+                }`}
               >
-                Clear Slate
+                Clear Slate...
               </button>
             )}
             <button
@@ -199,6 +221,119 @@ export const TrackFilterBar: React.FC<TrackFilterBarProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Industry-Standard Guarded Clear Slate Modal */}
+      {showClearModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-lg bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+                <AlertOctagon className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Database Opportunity Cleanup
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Choose your cleanup scope. Industry best practice protects ongoing bid pursuits.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <label
+                className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  clearMode === 'unreviewed'
+                    ? 'border-blue-500 bg-blue-50/30 dark:bg-blue-950/20'
+                    : 'border-slate-200 dark:border-slate-800'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="clearMode"
+                  checked={clearMode === 'unreviewed'}
+                  onChange={() => setClearMode('unreviewed')}
+                  className="mt-0.5"
+                />
+                <div>
+                  <div className="font-semibold text-slate-900 dark:text-white">
+                    Clear Unreviewed Leads Only (Recommended)
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Deletes only raw "New Opportunity" notices. <strong>Preserves</strong> all opportunities in review/bid pipeline (`Preparing Bid`, `Submitted`, `Won`), bookmarked tenders, and your notes.
+                  </div>
+                </div>
+              </label>
+
+              <label
+                className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  clearMode === 'all'
+                    ? 'border-rose-500 bg-rose-50/30 dark:bg-rose-950/20'
+                    : 'border-slate-200 dark:border-slate-800'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="clearMode"
+                  checked={clearMode === 'all'}
+                  onChange={() => setClearMode('all')}
+                  className="mt-0.5"
+                />
+                <div>
+                  <div className="font-semibold text-rose-700 dark:text-rose-400">
+                    Complete Factory Reset (Destructive)
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Permanently wipes <strong>all</strong> tenders, bid notes, audit logs, and corrigenda.
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            {clearMode === 'all' && (
+              <div className="space-y-1.5 pt-1">
+                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                  Type <span className="font-mono text-rose-600 dark:text-rose-400">CLEAR</span> to confirm complete purge:
+                </label>
+                <input
+                  type="text"
+                  value={confirmText}
+                  onChange={e => setConfirmText(e.target.value)}
+                  placeholder="CLEAR"
+                  className="w-full p-2 text-xs rounded border border-rose-300 dark:border-rose-800 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono"
+                />
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowClearModal(false);
+                  setConfirmText('');
+                }}
+                className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmClear}
+                disabled={clearMode === 'all' && confirmText.trim().toUpperCase() !== 'CLEAR'}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white shadow-xs cursor-pointer ${
+                  clearMode === 'all'
+                    ? confirmText.trim().toUpperCase() === 'CLEAR'
+                      ? 'bg-rose-600 hover:bg-rose-700'
+                      : 'bg-rose-300 cursor-not-allowed'
+                    : 'bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-slate-200 dark:text-slate-900'
+                }`}
+              >
+                {clearMode === 'unreviewed' ? 'Clear Unreviewed Leads' : 'Confirm Complete Wipe'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

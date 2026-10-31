@@ -1,7 +1,7 @@
 import { db } from './db.js';
 
 /**
- * Calculates Dice's coefficient (Bigram/Trigram similarity) between two strings.
+ * Calculates Dice's coefficient (Bigram similarity) between two strings.
  * Returns a value between 0.0 and 1.0.
  */
 export function calculateStringSimilarity(str1: string, str2: string): number {
@@ -51,11 +51,31 @@ export interface DuplicateMatchResult {
 }
 
 /**
+ * Validates whether a string has the structural characteristics of a genuine
+ * procurement reference number (contains at least one digit and not generic dictionary words).
+ */
+export function isValidReferenceNo(ref?: string | null): boolean {
+  if (!ref) return false;
+  const trimmed = ref.trim();
+  if (trimmed.length < 4 || trimmed.length > 40) return false;
+
+  // Must contain at least one digit (genuine procurement references almost universally contain numbers)
+  if (!/\d/.test(trimmed)) return false;
+
+  // Blacklist common generic terms that accidentally match regex
+  const lower = trimmed.toLowerCase();
+  const genericWords = ['tender', 'notice', 'procurement', 'tenders', 'quotation', 'corrigendum', 'advertisement', 'bidding'];
+  if (genericWords.includes(lower)) return false;
+
+  return true;
+}
+
+/**
  * Checks if a tender matches an existing active opportunity in the database.
  * Matches if:
- * 1. Normalized Reference Numbers match exactly (if present and > 4 chars)
+ * 1. Normalized Reference Numbers match exactly (if valid genuine ref with digits)
  * OR
- * 2. Title + Organization similarity >= 0.85 AND closing dates within ±1 day (or both null)
+ * 2. Title + Organization similarity >= 0.85 AND closing dates within ±1.5 days (or both null)
  */
 export function findCanonicalMatch(candidate: {
   referenceNo?: string | null;
@@ -63,13 +83,15 @@ export function findCanonicalMatch(candidate: {
   organization: string;
   closingDate?: string | null;
 }): DuplicateMatchResult {
-  // 1. Exact Reference Number check (if non-empty and non-trivial)
-  if (candidate.referenceNo && candidate.referenceNo.trim().length > 4) {
-    const normRef = normalizeText(candidate.referenceNo);
+  // 1. Exact Reference Number check (if valid genuine ref number with numbers)
+  if (isValidReferenceNo(candidate.referenceNo)) {
+    const rawRef = candidate.referenceNo!.trim();
+    const cleanRef = rawRef.replace(/[-/_\s]/g, '').toLowerCase();
+
     const existingRef = db.prepare(`
       SELECT id, canonical_id FROM tenders 
-      WHERE LOWER(REPLACE(REPLACE(reference_no, '-', ''), '/', '')) = LOWER(REPLACE(REPLACE(?, '-', ''), '/', ''))
-    `).get(candidate.referenceNo) as any;
+      WHERE LOWER(REPLACE(REPLACE(REPLACE(reference_no, '-', ''), '/', ''), ' ', '')) = ?
+    `).get(cleanRef) as any;
 
     if (existingRef) {
       return {
@@ -84,7 +106,6 @@ export function findCanonicalMatch(candidate: {
   // 2. Query candidates by closing date proximity
   let candidates: any[] = [];
   if (candidate.closingDate) {
-    // Within ±1.5 days
     candidates = db.prepare(`
       SELECT id, canonical_id, title, organization, closing_date 
       FROM tenders 
@@ -92,7 +113,6 @@ export function findCanonicalMatch(candidate: {
       AND ABS(julianday(closing_date) - julianday(?)) <= 1.5
     `).all(candidate.closingDate);
   } else {
-    // Both NULL closing dates
     candidates = db.prepare(`
       SELECT id, canonical_id, title, organization, closing_date 
       FROM tenders 
@@ -102,7 +122,6 @@ export function findCanonicalMatch(candidate: {
   }
 
   const targetString = candidate.organization + ' ' + candidate.title;
-
   let bestMatch: DuplicateMatchResult = { isDuplicate: false, similarity: 0 };
 
   for (const existing of candidates) {

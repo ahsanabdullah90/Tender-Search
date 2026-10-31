@@ -3,9 +3,17 @@ import path from 'path';
 import crypto from 'crypto';
 import https from 'https';
 import http from 'http';
+import { fileURLToPath } from 'url';
 import { CachedDossier } from '../types.js';
 
-const DOSSIERS_ROOT = path.resolve(process.cwd(), 'data', 'dossiers');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+
+const DOSSIERS_ROOT = path.resolve(PROJECT_ROOT, 'data', 'dossiers');
+if (!fs.existsSync(DOSSIERS_ROOT)) {
+  fs.mkdirSync(DOSSIERS_ROOT, { recursive: true });
+}
 
 // Tolerant agent for legacy .gov.pk SSL certificates
 const sslTolerantAgent = new https.Agent({
@@ -56,24 +64,36 @@ export async function downloadAndCacheDossier(
     fs.writeFileSync(finalPath, buffer);
 
     const mimeType = getMimeType(filename);
+    const webUrl = `/api/dossiers/${encodeURIComponent(tenderId)}/${encodeURIComponent(filename)}`;
 
     return {
       label,
-      localPath: path.relative(process.cwd(), finalPath),
+      localPath: webUrl,
       originalUrl: remoteUrl,
       mimeType,
       sha256: hash,
       sizeBytes: buffer.length
     };
   } catch (err) {
-    console.warn(`Failed to download dossier from ${remoteUrl}:`, err);
+    console.warn(`Failed to download dossier from ${remoteUrl}:`, (err as any)?.message || err);
     return null;
   }
 }
 
-function fetchFileBuffer(url: string, cookie?: string): Promise<Buffer> {
+function fetchFileBuffer(url: string, cookie?: string, redirectCount: number = 0): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const isHttps = url.startsWith('https:');
+    if (redirectCount > 5) {
+      return reject(new Error('Too many redirects while downloading dossier'));
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return reject(new Error(`Invalid URL: ${url}`));
+    }
+
+    const isHttps = parsedUrl.protocol === 'https:';
     const client = isHttps ? https : http;
 
     const headers: Record<string, string> = {
@@ -87,12 +107,15 @@ function fetchFileBuffer(url: string, cookie?: string): Promise<Buffer> {
       headers,
       timeout: 20000
     }, res => {
-      // Follow up to 3 redirects
+      // Follow redirects cleanly
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchFileBuffer(res.headers.location, cookie).then(resolve).catch(reject);
+        res.resume();
+        const nextUrl = new URL(res.headers.location, url).toString();
+        return fetchFileBuffer(nextUrl, cookie, redirectCount + 1).then(resolve).catch(reject);
       }
 
       if (res.statusCode && res.statusCode >= 400) {
+        res.resume();
         return reject(new Error(`HTTP ${res.statusCode} loading file`));
       }
 

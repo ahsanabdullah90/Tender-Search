@@ -1,8 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
 
-// Initialize the Google Gen AI client with default environment secret GEMINI_API_KEY
-const ai = new GoogleGenAI();
-
 export interface OcrExtractedData {
   referenceNo: string | null;
   organization: string;
@@ -19,12 +16,12 @@ export interface OcrExtractedData {
  */
 export async function extractTenderFromImage(imageBuffer: Buffer, mimeType: string = 'image/jpeg'): Promise<OcrExtractedData | null> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    console.warn('GEMINI_API_KEY not configured for OCR service');
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.trim()) {
     return null;
   }
 
   try {
+    const ai = new GoogleGenAI({ apiKey });
     const base64Data = imageBuffer.toString('base64');
 
     const prompt = `You are a procurement data extraction specialist for Pakistan government tender notices.

@@ -1,11 +1,14 @@
 import { db, getAllDomainTracks, updatePortalHealth, getPortalHealthList } from '../db.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
-import { findCanonicalMatch } from '../deduplicator.js';
+import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../deduplicator.js';
 import { getHumanJitterDelay, sleep, sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, Tender } from '../../types.js';
+import { downloadAndCacheDossier } from '../dossierManager.js';
+import { extractTenderFromImage } from '../ocrService.js';
 import * as cheerio from 'cheerio';
 import https from 'https';
 import http from 'http';
+import crypto from 'crypto';
 
 // Global scan state for solo operator monitoring
 export let currentScanStatus: ScanStatus = {
@@ -32,21 +35,57 @@ export function removeProgressListener(listener: ProgressListener) {
 
 function broadcastProgress() {
   for (const listener of progressListeners) {
-    listener({ ...currentScanStatus });
+    try {
+      listener({ ...currentScanStatus });
+    } catch (e) {
+      // Ignore stale subscriber errors
+    }
   }
 }
 
 /**
- * Executes a full scan across all 16+ portals or a single target portal
+ * Builds merged portal list combining SQLite overrides with base defaults
+ */
+export function getActivePortalsList(targetPortalId?: string): PortalDefinition[] {
+  const dbPortals = getPortalHealthList();
+  const dbMap = new Map<string, any>(dbPortals.map(p => [p.portal_id, p]));
+
+  let list: PortalDefinition[] = PORTAL_DEFINITIONS.map(def => {
+    const dbP = dbMap.get(def.id);
+    if (!dbP) return def;
+
+    return {
+      ...def,
+      name: dbP.portal_name || def.name,
+      category: (dbP.category as any) || def.category,
+      tier: (dbP.tier as any) || def.tier,
+      baseUrl: dbP.base_url || def.baseUrl,
+      tendersUrl: dbP.tenders_url || def.tendersUrl,
+      accessMode: (dbP.access_mode as any) || def.accessMode,
+      verifiedStatus: dbP.verified_status || def.verifiedStatus
+    };
+  });
+
+  if (targetPortalId) {
+    list = list.filter(p => p.id === targetPortalId);
+  }
+
+  return list;
+}
+
+/**
+ * Executes a full scan across all active portals or a single target portal
  */
 export async function startCrawlerScan(targetPortalId?: string) {
   if (currentScanStatus.isScanning) {
     return currentScanStatus;
   }
 
-  const portalsToScan = targetPortalId
-    ? PORTAL_DEFINITIONS.filter(p => p.id === targetPortalId)
-    : PORTAL_DEFINITIONS;
+  const allPortals = getActivePortalsList(targetPortalId);
+  // In automated full scans, skip offline_broken portals unless explicitly triggered individually
+  const portalsToScan = targetPortalId 
+    ? allPortals 
+    : allPortals.filter(p => p.accessMode !== 'offline_broken');
 
   currentScanStatus = {
     isScanning: true,
@@ -75,33 +114,48 @@ export async function startCrawlerScan(targetPortalId?: string) {
         updatePortalHealth(portal.id, { status: 'scanning' });
 
         try {
-          const rawItems = await scrapePortal(portal);
+          const scrapeResult = await scrapePortal(portal);
 
-          let itemsMatched = 0;
-          for (const item of rawItems) {
-            const result = processAndSaveTender(item, portal, activeTracks);
-            if (result.isNew) currentScanStatus.newTendersFound++;
-            if (result.hasCorrigendum) currentScanStatus.corrigendaFound++;
-            if (result.matched) itemsMatched++;
+          if (scrapeResult.hitlRequired) {
+            updatePortalHealth(portal.id, {
+              status: 'hitl_required',
+              last_scan_at: new Date().toISOString(),
+              last_error_message: 'Verification challenge detected (Cloudflare Turnstile or CAPTCHA)'
+            });
+          } else {
+            const rawItems = scrapeResult.items;
+            let itemsMatched = 0;
+
+            for (const item of rawItems) {
+              try {
+                const result = await processAndSaveTender(item, portal, activeTracks);
+                if (result.isNew) currentScanStatus.newTendersFound++;
+                if (result.hasCorrigendum) currentScanStatus.corrigendaFound++;
+                if (result.matched) itemsMatched++;
+              } catch (itemErr: any) {
+                console.warn(`[Crawler] Failed saving item from ${portal.id}:`, itemErr.message);
+              }
+            }
+
+            // Consecutive zero yields tracks raw items count (website structure/selector failure), not keyword match rate
+            const health = db.prepare('SELECT consecutive_zero_yields FROM portal_health WHERE portal_id = ?').get(portal.id) as any;
+            const currentZeros = health?.consecutive_zero_yields || 0;
+            const newZeros = rawItems.length === 0 ? currentZeros + 1 : 0;
+            const nextStatus = newZeros >= 3 ? 'selector_broken' : 'online';
+
+            updatePortalHealth(portal.id, {
+              status: nextStatus,
+              last_scan_at: new Date().toISOString(),
+              last_items_found: itemsMatched,
+              consecutive_zero_yields: newZeros,
+              last_error_message: null
+            });
           }
-
-          // Reset consecutive zero yields if items found
-          const health = db.prepare('SELECT consecutive_zero_yields FROM portal_health WHERE portal_id = ?').get(portal.id) as any;
-          const currentZeros = health?.consecutive_zero_yields || 0;
-          const newZeros = itemsMatched === 0 ? currentZeros + 1 : 0;
-          const nextStatus = newZeros >= 3 ? 'selector_broken' : 'online';
-
-          updatePortalHealth(portal.id, {
-            status: nextStatus,
-            last_scan_at: new Date().toISOString(),
-            last_items_found: itemsMatched,
-            consecutive_zero_yields: newZeros,
-            last_error_message: null
-          });
         } catch (err: any) {
-          console.error(`Error scanning portal ${portal.id}:`, err);
+          console.error(`[Crawler] Error scanning portal ${portal.id}:`, err.message || err);
           updatePortalHealth(portal.id, {
             status: 'error',
+            last_scan_at: new Date().toISOString(),
             last_error_message: err.message || 'Scrape connection failure'
           });
         }
@@ -139,90 +193,109 @@ export interface RawScrapedItem {
   location?: string;
   description?: string;
   isCorrigendum?: boolean;
+  attachmentUrls?: string[];
+}
+
+export interface ScrapeResult {
+  items: RawScrapedItem[];
+  hitlRequired: boolean;
 }
 
 /**
  * Scrapes a portal via tolerant HTTP/Cheerio
  */
-async function scrapePortal(portal: PortalDefinition): Promise<RawScrapedItem[]> {
-  try {
-    const html = await fetchHtmlWithTolerantAgent(portal.tendersUrl);
-    const $ = cheerio.load(html);
-    const items: RawScrapedItem[] = [];
+async function scrapePortal(portal: PortalDefinition): Promise<ScrapeResult> {
+  const html = await fetchHtmlWithTolerantAgent(portal.tendersUrl);
+  const $ = cheerio.load(html);
+  const items: RawScrapedItem[] = [];
 
-    // Check for CAPTCHA or blocking elements
-    if ($('iframe[src*="cloudflare"], #captcha, input[name*="captcha"]').length > 0 || html.includes('cf-browser-verification')) {
-      updatePortalHealth(portal.id, { status: 'hitl_required' });
-      return [];
+  // Check for CAPTCHA or Cloudflare Turnstile blocking elements
+  if ($('iframe[src*="cloudflare"], #captcha, input[name*="captcha"]').length > 0 || html.includes('cf-browser-verification')) {
+    return { items: [], hitlRequired: true };
+  }
+
+  const selector = [
+    'table tbody tr',
+    'table#ContentPlaceHolder1_GridView1 tr',
+    '.tender-row',
+    '.notice-item',
+    '.view-content .views-row',
+    '.procurement-item',
+    '.download-item',
+    '.tender-item',
+    '.tab-pane table tr',
+    'article'
+  ].join(', ');
+
+  $(selector).each((_, el) => {
+    const rowText = $(el).text().trim();
+    if (!rowText || rowText.length < 20) return;
+
+    const link = $(el).find('a').first();
+    const href = link.attr('href') || portal.tendersUrl;
+    let fullUrl = href;
+    try {
+      fullUrl = href.startsWith('http') ? href : new URL(href, portal.baseUrl).toString();
+    } catch {
+      fullUrl = portal.tendersUrl;
     }
 
-    // Portal-specific and generic table/list parser
-    // Selectors:
-    // - Punjab eProc: table#ContentPlaceHolder1_GridView1 tr, table.grid tr
-    // - NDMA: .view-content .views-row, table.table tr
-    // - FDE: .wp-block-file, .download-item, table tbody tr, article
-    // - MOFEPT: table tr, .tender-list li
-    // - Ignite: .tender-box, .procurement-item, table tbody tr, .tab-pane tr
-    // - PSDF: .procurement-card, table tr, .tender-card
-    // - TechDestination (PSEB): .tender-item, article, table tr
-    // - Generic fallbacks
-    const selector = [
-      'table tbody tr',
-      'table#ContentPlaceHolder1_GridView1 tr',
-      '.tender-row',
-      '.notice-item',
-      '.view-content .views-row',
-      '.procurement-item',
-      '.download-item',
-      '.tender-item',
-      '.tab-pane table tr',
-      'article'
-    ].join(', ');
+    const title = link.text().trim() || $(el).find('td:nth-child(2), h3, h4').first().text().trim() || rowText.slice(0, 100);
 
-    $(selector).each((_, el) => {
-      const rowText = $(el).text().trim();
-      if (!rowText || rowText.length < 20) return;
+    // Extract genuine procurement reference number pattern (must contain at least one digit)
+    const refMatch = rowText.match(/(?:\bTS[-/]?\d{3,10}\b|\bPID\s*\([A-Z]+\)\s*\d+\b|\b[A-Z]{2,10}[-/][A-Z0-9/-]*\d[A-Z0-9/-]{1,20}\b)/i);
+    const referenceNo = refMatch && isValidReferenceNo(refMatch[0]) ? refMatch[0] : null;
 
-      const link = $(el).find('a').first();
-      const href = link.attr('href') || portal.tendersUrl;
-      const fullUrl = href.startsWith('http') ? href : new URL(href, portal.baseUrl).toString();
-      const title = link.text().trim() || $(el).find('td:nth-child(2), h3, h4').first().text().trim() || rowText.slice(0, 100);
+    // Extract date pattern (e.g. 15-11-2026, 2026-11-15, 15 Nov 2026)
+    const dateMatch = rowText.match(/(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i);
+    let closingDate: string | null = null;
+    if (dateMatch) {
+      const parsed = parseDateString(dateMatch[0]);
+      if (parsed) closingDate = parsed;
+    }
 
-      // Extract reference number pattern (e.g. PPRA-2026/04, TS-1234, PID(I)1234)
-      const refMatch = rowText.match(/(?:TS\d+|[A-Z0-9/-]{4,25}|PID\([A-Z]\)\d+)/i);
-      const referenceNo = refMatch ? refMatch[0] : null;
-
-      // Extract date pattern (e.g., 15-11-2026, 2026-11-15, 15 Nov 2026)
-      const dateMatch = rowText.match(/(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i);
-      let closingDate: string | null = null;
-      if (dateMatch) {
-        const parsed = parseDateString(dateMatch[0]);
-        if (parsed) closingDate = parsed;
-      }
-
-      if (title.length > 5) {
-        items.push({
-          referenceNo: referenceNo || undefined,
-          title,
-          organization: portal.name,
-          directUrl: fullUrl,
-          closingDate,
-          description: rowText.slice(0, 300)
-        });
+    // Collect any file attachments in row
+    const attachmentUrls: string[] = [];
+    $(el).find('a[href]').each((__, aEl) => {
+      const aHref = $(aEl).attr('href');
+      if (aHref && /\.(pdf|docx?|xlsx?|jpe?g|png)(\?|$)/i.test(aHref)) {
+        try {
+          const absUrl = aHref.startsWith('http') ? aHref : new URL(aHref, portal.baseUrl).toString();
+          attachmentUrls.push(absUrl);
+        } catch {}
       }
     });
 
-    return items;
-  } catch (err: any) {
-    // If blocked or server down, fail safely without throwing unhandled rejection
-    console.warn(`Portal ${portal.id} request notice: ${err.message}`);
-    return [];
-  }
+    if (title.length > 5) {
+      items.push({
+        referenceNo: referenceNo || undefined,
+        title,
+        organization: portal.name,
+        directUrl: fullUrl,
+        closingDate,
+        description: rowText.slice(0, 300),
+        attachmentUrls
+      });
+    }
+  });
+
+  return { items, hitlRequired: false };
 }
 
-function fetchHtmlWithTolerantAgent(url: string): Promise<string> {
+function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0): Promise<string> {
   return new Promise((resolve, reject) => {
-    const isHttps = url.startsWith('https:');
+    if (redirectCount > 5) {
+      return reject(new Error('Too many redirects while loading portal page'));
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return reject(new Error(`Invalid URL: ${url}`));
+    }
+
+    const isHttps = parsedUrl.protocol === 'https:';
     const client = isHttps ? https : http;
 
     const req = client.get(url, {
@@ -231,7 +304,14 @@ function fetchHtmlWithTolerantAgent(url: string): Promise<string> {
       timeout: 15000
     }, res => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchHtmlWithTolerantAgent(res.headers.location).then(resolve).catch(reject);
+        res.resume();
+        const nextUrl = new URL(res.headers.location, url).toString();
+        return fetchHtmlWithTolerantAgent(nextUrl, redirectCount + 1).then(resolve).catch(reject);
+      }
+
+      if (res.statusCode && res.statusCode >= 400) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode} from portal server`));
       }
 
       let data = '';
@@ -247,26 +327,78 @@ function fetchHtmlWithTolerantAgent(url: string): Promise<string> {
   });
 }
 
-function parseDateString(raw: string): string | null {
+/**
+ * Strict date string parsing for Pakistani tenders:
+ * Checks DD/MM/YYYY and DD-MM-YYYY first with explicit PKT (+05:00) timezone,
+ * preventing US-style day/month swaps on days 1-12.
+ */
+export function parseDateString(raw: string): string | null {
+  if (!raw || !raw.trim()) return null;
+  const str = raw.trim();
+
   try {
-    const d = new Date(raw);
-    if (!isNaN(d.getTime())) {
-      return d.toISOString();
-    }
-    // Attempt DD/MM/YYYY
-    const parts = raw.split(/[-/.]/);
-    if (parts.length === 3) {
-      const day = parseInt(parts[0], 10);
-      const month = parseInt(parts[1], 10) - 1;
-      const year = parseInt(parts[2].length === 2 ? '20' + parts[2] : parts[2], 10);
-      const d2 = new Date(year, month, day);
-      if (!isNaN(d2.getTime())) {
-        return d2.toISOString();
+    // 1. Check numeric DD/MM/YYYY or DD-MM-YYYY with optional time
+    const dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (dmyMatch) {
+      const day = parseInt(dmyMatch[1], 10);
+      const month = parseInt(dmyMatch[2], 10);
+      let year = parseInt(dmyMatch[3], 10);
+      if (year < 100) year += 2000;
+
+      const hour = dmyMatch[4] ? String(dmyMatch[4]).padStart(2, '0') : '14';
+      const minute = dmyMatch[5] ? String(dmyMatch[5]).padStart(2, '0') : '00';
+      const second = dmyMatch[6] ? String(dmyMatch[6]).padStart(2, '0') : '00';
+
+      if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+        // Construct with explicit PKT (+05:00)
+        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hour}:${minute}:${second}+05:00`));
+        if (!isNaN(d.getTime())) {
+          return d.toISOString();
+        }
       }
     }
-  } catch {
-    // Fallback
-  }
+
+    // 2. Named month format: e.g. 15 Nov 2026, 15-November-2026 with optional time
+    const namedMonthMatch = str.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (namedMonthMatch) {
+      const day = parseInt(namedMonthMatch[1], 10);
+      const monthName = namedMonthMatch[2];
+      let year = parseInt(namedMonthMatch[3], 10);
+      if (year < 100) year += 2000;
+
+      const hour = namedMonthMatch[4] || '14';
+      const minute = namedMonthMatch[5] || '00';
+      const second = namedMonthMatch[6] || '00';
+
+      const d = new Date(Date.parse(`${day} ${monthName} ${year} ${hour}:${minute}:${second} GMT+0500`));
+      if (!isNaN(d.getTime())) {
+        return d.toISOString();
+      }
+    }
+
+    // 3. ISO format YYYY-MM-DD with optional time
+    const isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (isoMatch) {
+      const year = isoMatch[1];
+      const month = String(isoMatch[2]).padStart(2, '0');
+      const day = String(isoMatch[3]).padStart(2, '0');
+      const hour = isoMatch[4] ? String(isoMatch[4]).padStart(2, '0') : '14';
+      const minute = isoMatch[5] ? String(isoMatch[5]).padStart(2, '0') : '00';
+      const second = isoMatch[6] ? String(isoMatch[6]).padStart(2, '0') : '00';
+
+      const d = new Date(Date.parse(`${year}-${month}-${day}T${hour}:${minute}:${second}+05:00`));
+      if (!isNaN(d.getTime())) {
+        return d.toISOString();
+      }
+    }
+
+    // 4. Fallback standard parse
+    const fallback = new Date(str);
+    if (!isNaN(fallback.getTime())) {
+      return fallback.toISOString();
+    }
+  } catch {}
+
   return null;
 }
 
@@ -292,11 +424,11 @@ export function formatClosingDate(isoDate: string | null): string {
 /**
  * Matches scraped tender against active domain tracks and handles deduplication
  */
-export function processAndSaveTender(
+export async function processAndSaveTender(
   item: RawScrapedItem,
   portal: PortalDefinition,
   activeTracks: any[]
-): { isNew: boolean; hasCorrigendum: boolean; matched: boolean } {
+): Promise<{ isNew: boolean; hasCorrigendum: boolean; matched: boolean }> {
   const combinedText = `${item.title} ${item.description || ''} ${item.organization} ${item.referenceNo || ''}`.toLowerCase();
 
   // Keyword Matching across tracks
@@ -322,7 +454,7 @@ export function processAndSaveTender(
     }
   }
 
-  // If no track matched, skip saving unless marked general
+  // If no track matched, skip saving
   if (matchedTracks.length === 0) {
     return { isNew: false, hasCorrigendum: false, matched: false };
   }
@@ -342,7 +474,7 @@ export function processAndSaveTender(
 
   if (dedupMatch.isDuplicate && dedupMatch.matchedTenderId) {
     // Append secondary source to existing tender
-    const existing = db.prepare('SELECT secondary_sources, closing_date, has_corrigendum FROM tenders WHERE id = ?').get(dedupMatch.matchedTenderId) as any;
+    const existing = db.prepare('SELECT secondary_sources, closing_date, has_corrigendum, cached_dossiers FROM tenders WHERE id = ?').get(dedupMatch.matchedTenderId) as any;
     if (existing) {
       const sources = JSON.parse(existing.secondary_sources || '[]');
       const alreadyPresent = sources.some((s: any) => s.portalName === portal.name);
@@ -359,81 +491,132 @@ export function processAndSaveTender(
       let corrigendumDetected = false;
       if (item.closingDate && existing.closing_date && item.closingDate !== existing.closing_date) {
         corrigendumDetected = true;
-        db.prepare(`
-          UPDATE tenders SET closing_date = ?, closing_date_formatted = ?, has_corrigendum = 1, updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `).run(item.closingDate, formattedDate, dedupMatch.matchedTenderId);
+        const updateTx = db.transaction(() => {
+          db.prepare(`
+            UPDATE tenders SET closing_date = ?, closing_date_formatted = ?, has_corrigendum = 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).run(item.closingDate, formattedDate, dedupMatch.matchedTenderId);
 
-        db.prepare(`
-          INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
-          VALUES (?, ?, 'deadline_extension', ?, ?, 0)
-        `).run(
-          'corr-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-          dedupMatch.matchedTenderId,
-          formatClosingDate(existing.closing_date),
-          formattedDate
-        );
+          db.prepare(`
+            INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
+            VALUES (?, ?, 'deadline_extension', ?, ?, 0)
+          `).run(
+            'corr-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+            dedupMatch.matchedTenderId,
+            formatClosingDate(existing.closing_date),
+            formattedDate
+          );
+        });
+        updateTx();
       }
 
       return { isNew: false, hasCorrigendum: corrigendumDetected, matched: true };
     }
   }
 
-  // Insert as new Tender
-  const tenderId = 'tender-' + portal.id + '-' + (item.referenceNo ? item.referenceNo.replace(/[^a-zA-Z0-9]/g, '') : Date.now().toString());
+  // Deterministic, collision-free tender primary key based on SHA-256 hash
+  const idMaterial = `${portal.id}:${item.referenceNo || ''}:${normalizeText(item.title)}:${item.directUrl}`;
+  const tenderHash = crypto.createHash('sha256').update(idMaterial).digest('hex').slice(0, 16);
+  const tenderId = `tender-${portal.id}-${tenderHash}`;
   const canonicalId = dedupMatch.canonicalId || tenderId;
 
-  const insertStmt = db.prepare(`
-    INSERT INTO tenders (
-      id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
-      domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
-      estimated_value, location, description, has_corrigendum, pipeline_status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity')
-  `);
+  // Insert as new Tender wrapped in a transaction
+  const insertTx = db.transaction(() => {
+    const insertStmt = db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
+        estimated_value, location, description, has_corrigendum, pipeline_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity')
+      ON CONFLICT(id) DO UPDATE SET
+        match_score = excluded.match_score,
+        domain_tracks = excluded.domain_tracks,
+        matched_keywords = excluded.matched_keywords,
+        updated_at = CURRENT_TIMESTAMP
+    `);
 
-  insertStmt.run(
-    tenderId,
-    canonicalId,
-    item.referenceNo || null,
-    item.title,
-    item.organization,
-    portal.id,
-    portal.name,
-    item.directUrl,
-    JSON.stringify(matchedTracks),
-    JSON.stringify(Array.from(new Set(matchedKeywords))),
-    matchScore,
-    item.publishDate || new Date().toISOString().slice(0, 10),
-    item.closingDate || null,
-    formattedDate,
-    item.estimatedValue || null,
-    item.location || 'Pakistan',
-    item.description || item.title,
-    item.isCorrigendum ? 1 : 0
-  );
+    insertStmt.run(
+      tenderId,
+      canonicalId,
+      item.referenceNo || null,
+      item.title,
+      item.organization,
+      portal.id,
+      portal.name,
+      item.directUrl,
+      JSON.stringify(matchedTracks),
+      JSON.stringify(Array.from(new Set(matchedKeywords))),
+      matchScore,
+      item.publishDate || new Date().toISOString().slice(0, 10),
+      item.closingDate || null,
+      formattedDate,
+      item.estimatedValue || null,
+      item.location || 'Pakistan',
+      item.description || item.title,
+      item.isCorrigendum ? 1 : 0
+    );
+  });
+
+  insertTx();
+
+  // If tender notice has downloadable attachments, cache first attachment in background
+  if (item.attachmentUrls && item.attachmentUrls.length > 0) {
+    const firstUrl = item.attachmentUrls[0];
+    const label = `${item.title.slice(0, 30)}_Doc`;
+    downloadAndCacheDossier(tenderId, firstUrl, label).then(async (doc) => {
+      if (doc) {
+        db.prepare('UPDATE tenders SET cached_dossiers = ? WHERE id = ?').run(JSON.stringify([doc]), tenderId);
+        // If document is an image and tender lacks date or reference, attempt Gemini OCR extraction
+        if (doc.mimeType.startsWith('image/') && (!item.closingDate || !item.referenceNo)) {
+          try {
+            const fs = await import('fs');
+            const path = await import('path');
+            const filename = path.basename(doc.localPath);
+            const diskPath = path.resolve(process.cwd(), 'data', 'dossiers', tenderId, filename);
+            if (fs.existsSync(diskPath)) {
+              const imgBuffer = fs.readFileSync(diskPath);
+              const ocrResult = await extractTenderFromImage(imgBuffer, doc.mimeType);
+              if (ocrResult) {
+                if (ocrResult.referenceNo && !item.referenceNo) {
+                  db.prepare('UPDATE tenders SET reference_no = ? WHERE id = ?').run(ocrResult.referenceNo, tenderId);
+                }
+                if (ocrResult.closingDateISO && !item.closingDate) {
+                  db.prepare('UPDATE tenders SET closing_date = ?, closing_date_formatted = ? WHERE id = ?').run(
+                    ocrResult.closingDateISO,
+                    ocrResult.closingDateFormatted || formatClosingDate(ocrResult.closingDateISO),
+                    tenderId
+                  );
+                }
+              }
+            }
+          } catch (ocrErr: any) {
+            console.warn('[OCR] Background extraction warning:', ocrErr.message);
+          }
+        }
+      }
+    }).catch(() => {});
+  }
 
   return { isNew: true, hasCorrigendum: Boolean(item.isCorrigendum), matched: true };
 }
 
 /**
  * Seeds a high-fidelity realistic dataset representing real-world tenders
- * across Pakistani statutory portals, so the solo operator has an immediate,
- * actionable set of tenders upon first launch.
+ * across Pakistani statutory portals on fresh install.
  */
 export function seedRealisticTenders() {
   const count = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c;
   if (count > 0) return;
 
   const sampleTenders = [
-    // 1. Solar
     {
       referenceNo: 'EPADS-2026-SLR-041',
       title: 'Solarization of 150 Public Schools and Rural Health Centers in Southern Punjab (Phase-II)',
       organization: 'Punjab Energy Department / Punjab eProc',
-      portalId: 'punjab-pra',
-      portalName: 'Punjab PPRA (e-Procurement)',
-      directUrl: 'https://eproc.punjab.gov.pk/tenders/slr-150-phase2',
-      closingDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000 + 4 * 3600 * 1000).toISOString(), // ~2.1 days
+      portalId: 'punjab_eproc',
+      portalName: 'Punjab PPRA (eproc.punjab.gov.pk)',
+      directUrl: 'http://eproc.punjab.gov.pk/ActiveTenders.aspx',
+      closingDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000 + 4 * 3600 * 1000).toISOString(),
       estimatedValue: 'PKR 85,000,000',
       location: 'Multan & Bahawalpur, Punjab',
       description: 'Turnkey EPC contract for design, supply, installation, testing and commissioning of 10kW to 25kW hybrid solar photovoltaic (PV) systems with net metering and lithium iron phosphate (LiFePO4) storage banks.',
@@ -447,7 +630,7 @@ export function seedRealisticTenders() {
       organization: 'Ministry of Federal Education & Professional Training',
       portalId: 'mofept',
       portalName: 'Ministry of Federal Education & Professional Training',
-      directUrl: 'https://mofept.gov.pk/Tenders/Details/2026-08',
+      directUrl: 'https://mofept.gov.pk/Tenders',
       closingDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
       estimatedValue: 'PKR 32,500,000',
       location: 'Islamabad Capital Territory',
@@ -456,16 +639,14 @@ export function seedRealisticTenders() {
       keywords: ['solar panels', 'pv system', 'clean energy', 'education'],
       score: 88
     },
-
-    // 2. Construction & Civil Works
     {
       referenceNo: 'KPPRA-CW-2026-112',
       title: 'Rehabilitation and Infrastructure Upgradation of District Hospital Complex Swat',
       organization: 'KP Communication & Works Department',
       portalId: 'kppra',
-      portalName: 'KP Public Procurement Authority (KPPRA)',
-      directUrl: 'https://kppra.gov.pk/tenders/cw-2026-112',
-      closingDate: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000 + 6 * 3600 * 1000).toISOString(), // < 30 hours!
+      portalName: 'Khyber Pakhtunkhwa KPPRA (kp.eprocure.gov.pk)',
+      directUrl: 'https://kp.eprocure.gov.pk',
+      closingDate: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000 + 6 * 3600 * 1000).toISOString(),
       estimatedValue: 'PKR 142,000,000',
       location: 'Swat, Khyber Pakhtunkhwa',
       description: 'Civil works comprising structural retrofitting, architectural renovation, waterproofing, HVAC ducting, and exterior masonry rehabilitation.',
@@ -474,12 +655,12 @@ export function seedRealisticTenders() {
       score: 92
     },
     {
-      referenceNo: 'BPPRA-INFRA-890',
+      referenceNo: 'NDMA-INFRA-890',
       title: 'Construction of Prefabricated Flood-Resilient Community Warehouses & Emergency Hubs',
       organization: 'National Disaster Management Authority (NDMA)',
       portalId: 'ndma',
       portalName: 'National Disaster Management Authority (NDMA)',
-      directUrl: 'https://ndma.gov.pk/tenders/infra-890-warehouses',
+      directUrl: 'https://ndma.gov.pk/tenders',
       closingDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
       estimatedValue: 'PKR 64,000,000',
       location: 'Lasbela & Naseerabad, Balochistan',
@@ -488,15 +669,13 @@ export function seedRealisticTenders() {
       keywords: ['construction', 'infrastructure', 'prefabricated', 'building repair'],
       score: 85
     },
-
-    // 3. Vocational Training / TVET
     {
       referenceNo: 'PSDF-TVET-2026-Q4',
       title: 'Skills for High-Demand Industrial Trades: Provision of Competency-Based Training (CBT) Courses',
       organization: 'Punjab Skills Development Fund (PSDF)',
       portalId: 'psdf',
       portalName: 'Punjab Skills Development Fund (PSDF)',
-      directUrl: 'https://psdf.org.pk/procurement/tvet-2026-q4',
+      directUrl: 'https://psdf.org.pk/procurement',
       closingDate: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString(),
       estimatedValue: 'PKR 55,000,000',
       location: 'Lahore, Faisalabad & Gujranwala',
@@ -506,29 +685,12 @@ export function seedRealisticTenders() {
       score: 96
     },
     {
-      referenceNo: 'GIZ-PAK-2026-904',
-      title: 'Strengthening TVET Sector in Pakistan: Master Trainer Capacity Building Program',
-      organization: 'Deutsche Gesellschaft für Internationale Zusammenarbeit (GIZ)',
-      portalId: 'giz',
-      portalName: 'Deutsche Gesellschaft für Internationale Zusammenarbeit (GIZ)',
-      directUrl: 'https://www.giz.de/en/workingwithgiz/bidding_processes.html?id=904',
-      closingDate: new Date(Date.now() + 11 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'EUR 180,000 (Approx PKR 54,000,000)',
-      location: 'Islamabad & Provincial Capitals',
-      description: 'Consultancy and training firm required to conduct technical capacity building modules for instructors at government vocational institutes across Pakistan.',
-      tracks: ['Vocational Training (TVET)', 'Education & Learning'],
-      keywords: ['tvet', 'capacity building', 'technical training', 'youth skills'],
-      score: 90
-    },
-
-    // 4. Education & Learning
-    {
       referenceNo: 'FDE-EDU-2026-03',
       title: 'Printing and Supply of Single National Curriculum Supplementary Readers & Classroom Textbooks',
       organization: 'Federal Directorate of Education (FDE)',
       portalId: 'fde',
       portalName: 'Federal Directorate of Education (FDE)',
-      directUrl: 'https://fde.gov.pk/tenders/textbooks-2026-03',
+      directUrl: 'https://fde.gov.pk/download-category/tender/',
       closingDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000 + 12 * 3600 * 1000).toISOString(),
       estimatedValue: 'PKR 48,000,000',
       location: 'ICT Islamabad',
@@ -538,61 +700,12 @@ export function seedRealisticTenders() {
       score: 94
     },
     {
-      referenceNo: 'UNGM-UNICEF-PAK-092',
-      title: 'Provision of Early Childhood Education (ECE) Classroom Learning Kits for Remote Flood-Affected Areas',
-      organization: 'United Nations Global Marketplace (UNGM / UNICEF)',
-      portalId: 'ungm',
-      portalName: 'United Nations Global Marketplace (UNGM)',
-      directUrl: 'https://www.ungm.org/Public/Notice/UNICEF-PAK-092',
-      closingDate: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'USD 120,000',
-      location: 'Sindh & Balochistan',
-      description: 'Procurement and distribution of interactive pedagogical kits, wooden educational toys, flashcards, and student stationery supplies.',
-      tracks: ['Education & Learning', 'Stationery & Office Supplies'],
-      keywords: ['education', 'learning material', 'school supplies', 'classroom'],
-      score: 91
-    },
-
-    // 5. Stationery & IT Consumables
-    {
-      referenceNo: 'PEEF-STAT-2026-19',
-      title: 'Annual Rate Contract for Office Stationery, Photocopier Paper, and Laser Toner Cartridges',
-      organization: 'Punjab Educational Endowment Fund (PEEF)',
-      portalId: 'peef',
-      portalName: 'Punjab Educational Endowment Fund (PEEF)',
-      directUrl: 'https://peef.org.pk/tenders/stat-2026-19',
-      closingDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'PKR 12,000,000',
-      location: 'Lahore, Punjab',
-      description: 'Framework agreement for provision of imported A4 paper reams (80gsm), OEM toner cartridges (HP, Canon, Ricoh), files, folders, and desk consumables for FY 2026-27.',
-      tracks: ['Stationery & Office Supplies'],
-      keywords: ['stationery', 'office supplies', 'paper rim', 'toner', 'cartridge'],
-      score: 92
-    },
-    {
-      referenceNo: 'PSEB-IT-SUPPLIES-07',
-      title: 'Procurement of IT Consumables, Printing Hardware, and Office Equipment for Software Technology Parks',
-      organization: 'Pakistan Software Export Board (PSEB)',
-      portalId: 'pseb',
-      portalName: 'Pakistan Software Export Board (PSEB)',
-      directUrl: 'https://pseb.org.pk/tenders/it-supplies-07',
-      closingDate: null, // Graceful NOT AVAILABLE demonstration!
-      estimatedValue: 'PKR 18,500,000',
-      location: 'Islamabad, Lahore, Karachi',
-      description: 'Bulk supply of high-yield laser cartridges, network printers, paper reams, and executive office consumables for regional tech incubation centers.',
-      tracks: ['Stationery & Office Supplies'],
-      keywords: ['it consumables', 'office supplies', 'toner', 'printing', 'office equipment'],
-      score: 87
-    },
-
-    // 6. Media, Documentaries & Communications
-    {
       referenceNo: 'IGNITE-MEDIA-2026-02',
       title: 'Hiring of Creative Agency for National Innovation Documentary Series and Digital Video Production',
       organization: 'Ignite National Technology Fund',
       portalId: 'ignite',
       portalName: 'Ignite National Technology Fund',
-      directUrl: 'https://ignite.org.pk/tenders/media-doc-2026-02',
+      directUrl: 'https://ignite.org.pk/procurement/',
       closingDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
       estimatedValue: 'PKR 28,000,000',
       location: 'Islamabad',
@@ -600,38 +713,6 @@ export function seedRealisticTenders() {
       tracks: ['Media, Documentaries & Communications'],
       keywords: ['documentary', 'media production', 'video production', 'digital communications', 'short film'],
       score: 98
-    },
-    {
-      referenceNo: 'PID-ADV-2026-104',
-      title: 'Public Awareness & Strategic Advocacy Campaign on Renewable Energy & Energy Efficiency',
-      organization: 'Press Information Department (PID) / Ministry of Information',
-      portalId: 'press-gazette',
-      portalName: 'Daily Press E-Papers (Dawn, Jang, Express)',
-      directUrl: 'https://pid.gov.pk/tenders/adv-2026-104',
-      closingDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'PKR 45,000,000',
-      location: 'Nationwide (Print & Electronic Media)',
-      description: 'Conception, scripting, multi-lingual audio-visual PSA production (Urdu, Pashto, Sindhi, Balochi), newspaper gazette advert design, and media placement.',
-      tracks: ['Media, Documentaries & Communications', 'Solar & Clean Energy'],
-      keywords: ['advocacy campaign', 'awareness campaign', 'media production', 'public relations', 'audio visual'],
-      score: 93
-    },
-
-    // 7. Federal PPRA EPADS multi-track
-    {
-      referenceNo: 'PPRA-EPADS-2026-8819',
-      title: 'Solarization and Building Renovation of Federal Government Model Colleges in Islamabad (Package-A)',
-      organization: 'Federal Directorate of Education / Federal PPRA EPADS',
-      portalId: 'ppra-federal',
-      portalName: 'Federal PPRA (EPADS)',
-      directUrl: 'https://epms.ppra.org.pk/tender/notice/8819',
-      closingDate: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000 + 1 * 3600 * 1000).toISOString(), // Closes tomorrow!
-      estimatedValue: 'PKR 52,000,000',
-      location: 'Islamabad',
-      description: 'Dual-scope turnkey bid: (1) Civil rehabilitation and renovation of academic blocks, (2) Supply and commissioning of 50kW on-grid solar power systems.',
-      tracks: ['Construction & Civil Works', 'Solar & Clean Energy', 'Education & Learning'],
-      keywords: ['renovation', 'solarization', 'building repair', 'pv system', 'education'],
-      score: 97
     }
   ];
 
@@ -649,18 +730,14 @@ export function seedRealisticTenders() {
       const tenderId = `tender-${t.portalId}-${i + 1}`;
       const formattedDate = formatClosingDate(t.closingDate);
       
-      // Give realistic diverse pipeline statuses
       let initialStatus = 'New Opportunity';
       let notes = '';
       if (i === 0) {
         initialStatus = 'Preparing Bid';
-        notes = 'BOQ downloaded. Vendor quotes for solar inverters requested from Multan suppliers.';
+        notes = 'BOQ evaluated. Vendor quotes for solar inverters requested from Multan suppliers.';
       } else if (i === 1) {
         initialStatus = 'Under Review';
         notes = 'Evaluating NCC site access and building structural engineering clearance.';
-      } else if (i === 2) {
-        initialStatus = 'Preparing Bid';
-        notes = 'Emergency medical infrastructure. Pricing civil masonry rates.';
       }
 
       insertStmt.run(
@@ -681,12 +758,11 @@ export function seedRealisticTenders() {
         t.estimatedValue,
         t.location,
         t.description,
-        i === 0 ? 1 : 0, // Corrigendum on the first tender to demonstrate the alert!
+        i === 0 ? 1 : 0,
         initialStatus,
         notes
       );
 
-      // If tender 0 has corrigendum, create log entry
       if (i === 0) {
         db.prepare(`
           INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
