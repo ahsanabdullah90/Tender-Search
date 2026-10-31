@@ -11,7 +11,9 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 
 // Ensure required data directories exist relative to project root
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const DATA_DIR = process.env.TENDER_DATA_DIR
+  ? path.resolve(process.env.TENDER_DATA_DIR)
+  : path.resolve(PROJECT_ROOT, 'data');
 export const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
 export const DOSSIERS_DIR = path.resolve(DATA_DIR, 'dossiers');
 export const SESSIONS_DIR = path.resolve(DATA_DIR, 'sessions');
@@ -130,6 +132,9 @@ export function initDatabase() {
   `);
 
   seedDefaultDomainTracks();
+  // Optional date the owner expects the award result. Older databases get the column here.
+  try { db.prepare('ALTER TABLE tenders ADD COLUMN result_expected_date TEXT').run(); } catch {}
+
   seedPortalHealth();
 }
 
@@ -332,6 +337,14 @@ export function updateTenderNotes(id: string, notes: string): boolean {
   const res = db.prepare(`
     UPDATE tenders SET status_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
   `).run(notes, id);
+  return res.changes > 0;
+}
+
+/** Pass null or an empty string to clear the date. */
+export function updateTenderResultDate(id: string, date: string | null): boolean {
+  const res = db.prepare(`
+    UPDATE tenders SET result_expected_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+  `).run(date || null, id);
   return res.changes > 0;
 }
 
@@ -573,6 +586,75 @@ export async function backupDatabase(): Promise<{ success: boolean; path?: strin
     console.error('Database backup failed:', err);
     return { success: false };
   }
+}
+
+export interface BackupInfo {
+  name: string;
+  created_at: string;
+  size_bytes: number;
+}
+
+export function listBackups(): BackupInfo[] {
+  return fs
+    .readdirSync(BACKUPS_DIR)
+    .filter(f => f.endsWith('.db'))
+    .map(name => {
+      const stat = fs.statSync(path.resolve(BACKUPS_DIR, name));
+      return { name, created_at: stat.mtime.toISOString(), size_bytes: stat.size };
+    })
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+/** On-demand backup. Unlike the daily one, it never skips and keeps its own file name. */
+export async function backupNow(): Promise<BackupInfo | null> {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').slice(0, 15);
+  const name = `tender_tracker_${stamp}_manual.db`;
+  try {
+    await db.backup(path.resolve(BACKUPS_DIR, name));
+    return listBackups().find(b => b.name === name) ?? null;
+  } catch (err) {
+    console.error('Manual backup failed:', err);
+    return null;
+  }
+}
+
+function folderSize(dir: string): number {
+  if (!fs.existsSync(dir)) return 0;
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.resolve(dir, entry.name);
+    total += entry.isDirectory() ? folderSize(full) : fs.statSync(full).size;
+  }
+  return total;
+}
+
+export function getStorageStats() {
+  const passed = db.prepare(`SELECT id FROM tenders WHERE pipeline_status = 'Passed'`).all() as { id: string }[];
+  const passedBytes = passed.reduce((sum, t) => sum + folderSize(path.resolve(DOSSIERS_DIR, t.id)), 0);
+  const withDocs = db.prepare(`SELECT COUNT(*) AS n FROM tenders WHERE cached_dossiers IS NOT NULL AND cached_dossiers != '[]'`).get() as { n: number };
+  return {
+    total_bytes: folderSize(DOSSIERS_DIR),
+    passed_bytes: passedBytes,
+    passed_tenders: passed.length,
+    tenders_with_documents: withDocs.n
+  };
+}
+
+/** Deletes saved documents for Passed tenders only. Returns the bytes freed. */
+export function pruneDossiersForPassed(): { freed_bytes: number; tenders: number } {
+  const passed = db.prepare(`SELECT id FROM tenders WHERE pipeline_status = 'Passed'`).all() as { id: string }[];
+  let freed = 0;
+  let count = 0;
+  for (const { id } of passed) {
+    const dir = path.resolve(DOSSIERS_DIR, id);
+    // Never follow an id that would leave the dossiers folder.
+    if (!dir.startsWith(DOSSIERS_DIR + path.sep) || !fs.existsSync(dir)) continue;
+    freed += folderSize(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+    db.prepare(`UPDATE tenders SET cached_dossiers = '[]' WHERE id = ?`).run(id);
+    count++;
+  }
+  return { freed_bytes: freed, tenders: count };
 }
 
 /**

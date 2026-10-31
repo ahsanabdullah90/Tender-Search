@@ -1,34 +1,59 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { KpiHeader } from './components/KpiHeader';
-import { TrackFilterBar } from './components/TrackFilterBar';
-import { SplitPaneWorkspace } from './components/SplitPaneWorkspace';
-import { TenderTable } from './components/TenderTable';
-import { TenderKanban } from './components/TenderKanban';
-import { TenderDrawer } from './components/TenderDrawer';
-import { TrackManagerModal } from './components/TrackManagerModal';
-import { PortalHealthModal } from './components/PortalHealthModal';
-import { SettingsWorkspace } from './components/SettingsWorkspace';
+import { AppShell, Section } from './components/AppShell';
+import {
+  ThemePref,
+  readThemePref,
+  writeThemePref,
+  systemPrefersDark,
+  resolveDark,
+  applyDarkClass,
+  onSystemThemeChange,
+} from './theme';
+import { InboxScreen } from './components/InboxScreen';
+import { PipelineScreen } from './components/PipelineScreen';
+import { SourcesScreen } from './components/SourcesScreen';
 import { Tender, DomainTrack, PortalHealth, CorrigendumLog, ScanStatus, OpportunityStatus } from './types';
 
+const SECTION_KEY = 'tt_section';
+const OLD_KEYS = ['tender_tracker_currentView', 'tender_tracker_sortBy', 'tender_tracker_isDark'];
+
+/** Reads the saved section. Carries over the old view setting once, then clears leftover keys from earlier versions. */
+function readSection(): Section {
+  try {
+    let saved = localStorage.getItem(SECTION_KEY);
+    if (!saved) {
+      saved = localStorage.getItem('tender_tracker_currentView') === 'kanban' ? 'pipeline' : 'inbox';
+      localStorage.setItem(SECTION_KEY, saved);
+    }
+    for (const key of OLD_KEYS) localStorage.removeItem(key);
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('sentinel_')) localStorage.removeItem(key);
+    }
+    return saved === 'pipeline' || saved === 'sources' ? saved : 'inbox';
+  } catch {
+    return 'inbox';
+  }
+}
+
 export default function App() {
-  // Theme State with localStorage persistence
-  const [isDark, setIsDark] = useState<boolean>(() => {
-    const saved = localStorage.getItem('tender_tracker_isDark');
-    if (saved !== null) return saved === 'true';
-    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  });
+  // Theme: System (default), Light or Dark. System follows the computer and updates live.
+  const [themePref, setThemePref] = useState<ThemePref>(readThemePref);
+  const [systemDark, setSystemDark] = useState<boolean>(systemPrefersDark);
+  const isDark = resolveDark(themePref, systemDark);
+
+  useEffect(() => onSystemThemeChange(() => setSystemDark(systemPrefersDark())), []);
 
   useEffect(() => {
-    localStorage.setItem('tender_tracker_isDark', String(isDark));
-    if (isDark) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    applyDarkClass(isDark);
   }, [isDark]);
 
-  // Primary Workspace Tab: 'tenders' (Console) vs 'management' (Dedicated Keywords & Portals Tab)
-  const [activeTab, setActiveTab] = useState<'tenders' | 'management'>('tenders');
+  const changeThemePref = (pref: ThemePref) => {
+    writeThemePref(pref);
+    setThemePref(pref);
+  };
+
 
   // Data States
   const [tenders, setTenders] = useState<Tender[]>([]);
@@ -40,8 +65,8 @@ export default function App() {
     closingSoon: 0,
     inPipeline: 0,
     unackCorrigenda: 0,
-    totalPortals: 17,
-    onlinePortals: 17,
+    totalPortals: 18,
+    onlinePortals: 18,
     hitlRequiredCount: 0
   });
 
@@ -50,7 +75,7 @@ export default function App() {
     currentPortal: null,
     progressPercent: 0,
     completedPortals: 0,
-    totalPortals: 17,
+    totalPortals: 18,
     newTendersFound: 0,
     corrigendaFound: 0,
     lastScanTimestamp: null
@@ -60,17 +85,21 @@ export default function App() {
   const [selectedTrack, setSelectedTrack] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [debouncedSearch, setDebouncedSearch] = useState<string>('');
-  const [selectedStatus, setSelectedStatus] = useState<string>('All');
   const [bookmarkedOnly, setBookmarkedOnly] = useState<boolean>(false);
   const [corrigendumOnly, setCorrigendumOnly] = useState<boolean>(false);
-  const [currentView, setCurrentView] = useState<'split' | 'table' | 'kanban'>(() => {
-    return (localStorage.getItem('tender_tracker_currentView') as any) || 'split';
-  });
+  const [section, setSection] = useState<Section>(readSection);
+  // A tender to open when arriving from an alert banner.
+  const [focusTenderId, setFocusTenderId] = useState<string | null>(null);
 
-  const handleViewChange = (view: 'split' | 'table' | 'kanban') => {
-    setCurrentView(view);
-    localStorage.setItem('tender_tracker_currentView', view);
+  const handleNavigate = (next: Section) => {
+    setSection(next);
+    setFocusTenderId(null);
+    try { localStorage.setItem(SECTION_KEY, next); } catch { /* storage unavailable */ }
   };
+
+  // The Inbox only lists tenders that have not been reviewed yet.
+  const inboxMode = section === 'inbox';
+  const pipelineMode = section === 'pipeline';
 
   // Debounce search query to avoid laggy queries
   useEffect(() => {
@@ -79,11 +108,6 @@ export default function App() {
     }, 250);
     return () => clearTimeout(timer);
   }, [searchQuery]);
-
-  // Modal & Active Selected Opportunity States
-  const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
-  const [isTrackModalOpen, setIsTrackModalOpen] = useState<boolean>(false);
-  const [isPortalModalOpen, setIsPortalModalOpen] = useState<boolean>(false);
 
   // In-flight abort controller
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -97,11 +121,14 @@ export default function App() {
       abortControllerRef.current = new AbortController();
 
       const params = new URLSearchParams();
-      if (selectedTrack !== 'All') params.append('track', selectedTrack);
-      if (selectedStatus !== 'All') params.append('status', selectedStatus);
-      if (debouncedSearch.trim()) params.append('search', debouncedSearch.trim());
-      if (bookmarkedOnly) params.append('bookmarkedOnly', 'true');
-      if (corrigendumOnly) params.append('corrigendumOnly', 'true');
+      if (inboxMode) params.append('status', 'New Opportunity');
+      // The Pipeline shows every stage past the Inbox, so the Inbox filters do not apply.
+      if (!pipelineMode) {
+        if (selectedTrack !== 'All') params.append('track', selectedTrack);
+        if (debouncedSearch.trim()) params.append('search', debouncedSearch.trim());
+        if (bookmarkedOnly) params.append('bookmarkedOnly', 'true');
+        if (corrigendumOnly) params.append('corrigendumOnly', 'true');
+      }
 
       const res = await fetch(`/api/tenders?${params.toString()}`, {
         signal: abortControllerRef.current.signal
@@ -109,22 +136,13 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setTenders(data);
-        if (data.length > 0) {
-          setSelectedTender(prev => {
-            if (!prev) return data[0];
-            const found = data.find((t: Tender) => t.id === prev.id);
-            return found || data[0];
-          });
-        } else {
-          setSelectedTender(null);
-        }
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         console.error('Failed to fetch tenders:', err);
       }
     }
-  }, [selectedTrack, selectedStatus, debouncedSearch, bookmarkedOnly, corrigendumOnly]);
+  }, [inboxMode, pipelineMode, selectedTrack, debouncedSearch, bookmarkedOnly, corrigendumOnly]);
 
   const fetchTracks = useCallback(async () => {
     try {
@@ -245,10 +263,9 @@ export default function App() {
         setTenders(prev =>
           prev.map(t => (t.id === tenderId ? { ...t, pipeline_status: newStatus } : t))
         );
-        if (selectedTender?.id === tenderId) {
-          setSelectedTender(prev => prev ? { ...prev, pipeline_status: newStatus } : null);
-        }
         fetchKpis();
+        // Re-query so a tender that changed stage leaves the list it no longer belongs to.
+        fetchTenders();
       }
     } catch (err) {
       console.error('Failed to update status:', err);
@@ -263,9 +280,6 @@ export default function App() {
         setTenders(prev =>
           prev.map(t => (t.id === tenderId ? { ...t, is_bookmarked: data.is_bookmarked } : t))
         );
-        if (selectedTender?.id === tenderId) {
-          setSelectedTender(prev => prev ? { ...prev, is_bookmarked: data.is_bookmarked } : null);
-        }
       }
     } catch (err) {
       console.error('Failed to toggle bookmark:', err);
@@ -284,8 +298,20 @@ export default function App() {
     setTenders(prev =>
       prev.map(t => (t.id === tenderId ? { ...t, status_notes: notes } : t))
     );
-    if (selectedTender?.id === tenderId) {
-      setSelectedTender(prev => prev ? { ...prev, status_notes: notes } : null);
+  };
+
+  const handleSetResultDate = async (tenderId: string, date: string | null) => {
+    try {
+      const res = await fetch(`/api/tenders/${tenderId}/result-date`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date })
+      });
+      if (res.ok) {
+        setTenders(prev => prev.map(t => (t.id === tenderId ? { ...t, result_expected_date: date } : t)));
+      }
+    } catch (err) {
+      console.error('Failed to set result date:', err);
     }
   };
 
@@ -356,17 +382,6 @@ export default function App() {
     }
   };
 
-  const handleExportCsv = () => {
-    const params = new URLSearchParams();
-    if (selectedTrack !== 'All') params.append('track', selectedTrack);
-    if (selectedStatus !== 'All') params.append('status', selectedStatus);
-    if (debouncedSearch.trim()) params.append('search', debouncedSearch.trim());
-    if (bookmarkedOnly) params.append('bookmarkedOnly', 'true');
-    if (corrigendumOnly) params.append('corrigendumOnly', 'true');
-
-    window.location.href = `/api/export/csv?${params.toString()}`;
-  };
-
   const handleClearDatabase = async (unreviewedOnly: boolean) => {
     try {
       const res = await fetch('/api/tenders/clear', {
@@ -399,93 +414,71 @@ export default function App() {
     }
   };
 
-  const handleSelectTenderById = (tenderId: string) => {
-    const found = tenders.find(t => t.id === tenderId);
-    if (found) {
-      setSelectedTender(found);
-      setActiveTab('tenders');
+  const handleSelectTenderById = async (tenderId: string) => {
+    try {
+      const res = await fetch(`/api/tenders/${tenderId}`);
+      if (!res.ok) return;
+      const tender: Tender = await res.json();
+      handleNavigate(tender.pipeline_status === 'New Opportunity' ? 'inbox' : 'pipeline');
+      setFocusTenderId(tenderId);
+    } catch (err) {
+      console.error('Failed to open tender:', err);
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans transition-colors flex flex-col">
-      {/* 1. Top KPI & Status Bar */}
+    <AppShell
+      section={section}
+      onNavigate={handleNavigate}
+      scanStatus={scanStatus}
+      onRunScan={() => handleRunScan()}
+      themePref={themePref}
+      onThemePref={changeThemePref}
+    >
       <KpiHeader
         stats={kpiStats}
-        scanStatus={scanStatus}
         corrigenda={corrigenda}
         portals={portals}
-        isDark={isDark}
-        onToggleTheme={() => setIsDark(prev => !prev)}
-        onRunScan={() => handleRunScan()}
-        onOpenPortalModal={() => setIsPortalModalOpen(true)}
         onAcknowledgeCorrigendum={handleAcknowledgeCorrigendum}
         onLaunchHitl={handleLaunchHitl}
         onSelectTenderById={handleSelectTenderById}
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onOpenSources={() => handleNavigate('sources')}
       />
 
       {/* 2. TAB A: Tenders Pipeline View */}
-      {activeTab === 'tenders' ? (
-        <>
-          <TrackFilterBar
-            tracks={tracks}
-            selectedTrack={selectedTrack}
-            onSelectTrack={setSelectedTrack}
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            selectedStatus={selectedStatus}
-            onStatusChange={setSelectedStatus}
-            bookmarkedOnly={bookmarkedOnly}
-            onToggleBookmarked={() => setBookmarkedOnly(prev => !prev)}
-            corrigendumOnly={corrigendumOnly}
-            onToggleCorrigendum={() => setCorrigendumOnly(prev => !prev)}
-            currentView={currentView}
-            onViewChange={handleViewChange}
-            onOpenTrackModal={() => setIsTrackModalOpen(true)}
-            onExportCsv={handleExportCsv}
-            onClearDatabase={handleClearDatabase}
-            isScanning={scanStatus.isScanning}
-          />
-
-          <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
-            {currentView === 'split' ? (
-              <SplitPaneWorkspace
-                tenders={tenders}
-                selectedTender={selectedTender}
-                onSelectTender={setSelectedTender}
-                corrigenda={corrigenda}
-                onStatusChange={handleUpdateStatus}
-                onAcknowledgeCorrigendum={handleAcknowledgeCorrigendum}
-                onSaveNotes={handleSaveNotes}
-                onToggleBookmark={handleToggleBookmark}
-              />
-            ) : currentView === 'table' ? (
-              <div className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden transition-colors">
-                <TenderTable
-                  tenders={tenders}
-                  onSelectTender={setSelectedTender}
-                  onUpdateStatus={handleUpdateStatus}
-                  onToggleBookmark={handleToggleBookmark}
-                />
-              </div>
-            ) : (
-              <div className="bg-white dark:bg-slate-900 rounded-lg border border-slate-200/80 dark:border-slate-800 shadow-xs overflow-hidden transition-colors">
-                <TenderKanban
-                  tenders={tenders}
-                  onSelectTender={setSelectedTender}
-                  onUpdateStatus={handleUpdateStatus}
-                  onToggleBookmark={handleToggleBookmark}
-                />
-              </div>
-            )}
-          </main>
-        </>
+      {inboxMode ? (
+        <InboxScreen
+          tenders={tenders}
+          tracks={tracks}
+          corrigenda={corrigenda}
+          selectedTrack={selectedTrack}
+          onSelectTrack={setSelectedTrack}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          bookmarkedOnly={bookmarkedOnly}
+          onToggleBookmarked={() => setBookmarkedOnly(prev => !prev)}
+          corrigendumOnly={corrigendumOnly}
+          onToggleCorrigendum={() => setCorrigendumOnly(prev => !prev)}
+          onStatusChange={handleUpdateStatus}
+          onAcknowledgeCorrigendum={handleAcknowledgeCorrigendum}
+          onSaveNotes={handleSaveNotes}
+          onToggleBookmark={handleToggleBookmark}
+          focusId={focusTenderId}
+        />
+      ) : pipelineMode ? (
+        <PipelineScreen
+          tenders={tenders}
+          corrigenda={corrigenda}
+          onStatusChange={handleUpdateStatus}
+          onAcknowledgeCorrigendum={handleAcknowledgeCorrigendum}
+          onSaveNotes={handleSaveNotes}
+          onToggleBookmark={handleToggleBookmark}
+          onSetResultDate={handleSetResultDate}
+          focusId={focusTenderId}
+        />
       ) : (
-        /* TAB B: Dedicated Keywords & Portals Settings View */
-        <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
-          <SettingsWorkspace
+        <main className="flex-1">
+          <SourcesScreen
             tracks={tracks}
             portals={portals}
             onSaveTrack={handleSaveTrack}
@@ -494,38 +487,11 @@ export default function App() {
             onLaunchHitl={handleLaunchHitl}
             onVerifyHitl={handleVerifyHitl}
             onScanSinglePortal={handleRunScan}
+            onClearInbox={() => handleClearDatabase(true)}
+            onEraseAll={() => handleClearDatabase(false)}
           />
         </main>
       )}
-
-      {/* Slide-Over Tender Detail Drawer (only for table/kanban view inspection) */}
-      {currentView !== 'split' && activeTab === 'tenders' && selectedTender && (
-        <TenderDrawer
-          tender={selectedTender}
-          onClose={() => setSelectedTender(null)}
-          onUpdateStatus={handleUpdateStatus}
-          onSaveNotes={handleSaveNotes}
-        />
-      )}
-
-      {/* Modals */}
-      <TrackManagerModal
-        isOpen={isTrackModalOpen}
-        onClose={() => setIsTrackModalOpen(false)}
-        tracks={tracks}
-        onSaveTrack={handleSaveTrack}
-        onDeleteTrack={handleDeleteTrack}
-      />
-
-      <PortalHealthModal
-        isOpen={isPortalModalOpen}
-        onClose={() => setIsPortalModalOpen(false)}
-        portals={portals}
-        onLaunchHitl={handleLaunchHitl}
-        onVerifyHitl={handleVerifyHitl}
-        onScanSinglePortal={handleRunScan}
-        onUpdatePortal={handleUpdatePortal}
-      />
-    </div>
+    </AppShell>
   );
 }

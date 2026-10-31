@@ -13,3 +13,6 @@ data/*.db-shm
 data/backups/
 data/dossiers/
 data/sessions/
+
+# Sample data for redesign work
+data-sample/

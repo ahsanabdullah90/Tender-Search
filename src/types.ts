@@ -44,6 +44,7 @@ export interface Tender {
   has_corrigendum: number; // 0 or 1
   pipeline_status: OpportunityStatus;
   status_notes: string;
+  result_expected_date?: string | null; // optional: when the award result is expected
   is_bookmarked: number;
   viewed: number;
   created_at: string;

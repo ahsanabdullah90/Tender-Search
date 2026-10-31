@@ -3,14 +3,11 @@ import path from 'path';
 import crypto from 'crypto';
 import https from 'https';
 import http from 'http';
-import { fileURLToPath } from 'url';
 import { CachedDossier } from '../types.js';
+import { DOSSIERS_DIR } from './db.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-
-const DOSSIERS_ROOT = path.resolve(PROJECT_ROOT, 'data', 'dossiers');
+// Same folder the rest of the app uses (honours TENDER_DATA_DIR).
+const DOSSIERS_ROOT = DOSSIERS_DIR;
 if (!fs.existsSync(DOSSIERS_ROOT)) {
   fs.mkdirSync(DOSSIERS_ROOT, { recursive: true });
 }

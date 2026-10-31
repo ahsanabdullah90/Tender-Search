@@ -1,4 +1,4 @@
-import { db, getAllDomainTracks, updatePortalHealth, getPortalHealthList } from '../db.js';
+import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList } from '../db.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../deduplicator.js';
 import { getHumanJitterDelay, sleep, sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
@@ -579,7 +579,7 @@ export async function processAndSaveTender(
             const fs = await import('fs');
             const path = await import('path');
             const filename = path.basename(doc.localPath);
-            const diskPath = path.resolve(process.cwd(), 'data', 'dossiers', tenderId, filename);
+            const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
             if (fs.existsSync(diskPath)) {
               const imgBuffer = fs.readFileSync(diskPath);
               const ocrResult = await extractTenderFromImage(imgBuffer, doc.mimeType);

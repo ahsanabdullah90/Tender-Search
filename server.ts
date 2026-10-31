@@ -9,6 +9,7 @@ import {
   getTenderById,
   updateTenderStatus,
   updateTenderNotes,
+  updateTenderResultDate,
   toggleTenderBookmark,
   getAllDomainTracks,
   saveDomainTrack,
@@ -19,8 +20,13 @@ import {
   acknowledgeCorrigendum,
   getKpiStats,
   clearAllTenders,
+  listBackups,
+  backupNow,
+  getStorageStats,
+  pruneDossiersForPassed,
   savePortalCredentials,
   getPortalAuthCredentials,
+  DOSSIERS_DIR,
   db
 } from './src/server/db.js';
 import { authenticatePortal } from './src/server/scrapers/portalAuth.js';
@@ -90,6 +96,17 @@ const handleNotesUpdate = (req: any, res: any) => {
 };
 app.patch('/api/tenders/:id/notes', handleNotesUpdate);
 app.post('/api/tenders/:id/notes', handleNotesUpdate);
+
+app.patch('/api/tenders/:id/result-date', (req, res) => {
+  const { date } = req.body;
+  if (date && Number.isNaN(new Date(date).getTime())) {
+    return res.status(400).json({ error: 'Invalid date' });
+  }
+  if (!updateTenderResultDate(req.params.id, date || null)) {
+    return res.status(404).json({ error: 'Tender not found' });
+  }
+  res.json({ success: true, result_expected_date: date || null });
+});
 
 // Support both PATCH and POST for bookmarks, returning is_bookmarked state
 const handleBookmarkToggle = (req: any, res: any) => {
@@ -238,7 +255,6 @@ app.get('/api/scan/stream', handleScanSse);
 app.get('/api/scan/progress', handleScanSse);
 
 // 8. Serve Cached Local Dossiers (Static mount + direct route)
-const DOSSIERS_DIR = path.resolve(__dirname, 'data', 'dossiers');
 app.use('/dossiers', express.static(DOSSIERS_DIR));
 app.use('/data/dossiers', express.static(DOSSIERS_DIR));
 
@@ -267,14 +283,17 @@ app.post('/api/tenders/clear', (req, res) => {
 
 // 10. Export Tenders to CSV (supports active filtering & UTF-8 BOM for Excel)
 app.get('/api/export/csv', (req, res) => {
-  const { track, status, search, bookmarkedOnly, corrigendumOnly } = req.query;
-  const tenders = getAllTenders({
+  const { track, status, search, bookmarkedOnly, corrigendumOnly, scope } = req.query;
+  let tenders = getAllTenders({
     track: track as string,
     status: status as string,
     search: search as string,
     bookmarkedOnly: bookmarkedOnly === 'true',
     corrigendumOnly: corrigendumOnly === 'true'
   });
+  // scope: 'inbox' = unreviewed only, 'pipeline' = everything being worked on. Anything else = all.
+  if (scope === 'inbox') tenders = tenders.filter(t => t.pipeline_status === 'New Opportunity');
+  else if (scope === 'pipeline') tenders = tenders.filter(t => t.pipeline_status !== 'New Opportunity' && t.pipeline_status !== 'Passed');
 
   const headers = [
     'Reference No',
@@ -320,6 +339,19 @@ app.get('/api/export/csv', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="tender_tracker_tenders_' + new Date().toISOString().slice(0, 10) + '.csv"');
   res.send(csvContent);
 });
+
+// 11. Backups, storage and saved-document clean-up (Sources & Keywords > Data)
+app.get('/api/backups', (req, res) => res.json(listBackups()));
+
+app.post('/api/backups', async (req, res) => {
+  const backup = await backupNow();
+  if (!backup) return res.status(500).json({ error: 'Backup failed' });
+  res.json(backup);
+});
+
+app.get('/api/storage', (req, res) => res.json(getStorageStats()));
+
+app.post('/api/dossiers/prune-passed', (req, res) => res.json(pruneDossiersForPassed()));
 
 // Vite Integration & Server Startup
 async function startServer() {
