@@ -192,4 +192,27 @@ describe('matchTracks', () => {
     expect(result.matchedKeywords).toEqual([]);
     expect(result.matchScore).toBe(0);
   });
+
+  it('does not false-positive match on default portal names like Ministry of Federal Education', () => {
+    const unrelatedItem: RawScrapedItem = {
+      title: 'Hiring of Janitorial and Security Guard Services',
+      organization: 'Ministry of Federal Education & Professional Training',
+      directUrl: 'https://mofept.gov.pk/Tenders',
+      closingDate: null
+    };
+
+    const tracks = [
+      {
+        id: 'track-edu',
+        name: 'Education & Learning',
+        positive_keywords: ['education', 'training'],
+        negative_keywords: [],
+        is_active: 1
+      }
+    ];
+
+    const result = matchTracks(unrelatedItem, tracks);
+    expect(result.matchedTracks).toEqual([]);
+    expect(result.matchScore).toBe(0);
+  });
 });

@@ -468,6 +468,11 @@ describe('Server API Routes', () => {
 
       expect(getAllTenders().length).toBe(0);
     });
+
+    it('rejects path traversal on /api/dossiers/:tenderId/:filename with 400', async () => {
+      const res = await request(app).get('/api/dossiers/..%2F..%2Fsecret/file.pdf');
+      expect(res.status).toBe(400);
+    });
   });
 
   describe('Server SSE & Startup Integration', () => {

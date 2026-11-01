@@ -184,8 +184,8 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     tendersUrl: 'https://peef.org.pk/tenders',
     description: 'Educational endowment quotations, IT consumables & stationery',
     defaultKeywords: ['printing', 'paper', 'stationery', 'toner'],
-    accessMode: 'offline_broken',
-    verifiedStatus: 'Broken — Expired TLS certificate on host'
+    accessMode: 'public',
+    verifiedStatus: 'Working — Handled via SSL-tolerant agent'
   },
 
   // 4. International & Multilateral Agencies

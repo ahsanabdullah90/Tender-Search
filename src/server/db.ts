@@ -164,7 +164,7 @@ function seedDefaultDomainTracks() {
     {
       id: 'track-tvet',
       name: 'Vocational Training (TVET)',
-      positive: ['tvet', 'vocational', 'skill development', 'technical training', 'capacity building', 'youth skills', 'apprenticeship', 'employability', 'vocational courses'],
+      positive: ['tvet', 'vocational', 'skill development', 'technical training', 'capacity building', 'youth skills', 'apprenticeship', 'employability', 'vocational courses', 'training service provider', 'skills for', 'tool kits'],
       negative: []
     },
     {

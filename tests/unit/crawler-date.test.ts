@@ -41,7 +41,7 @@ describe('parseDateString - Pakistani Procurement Date Formats', () => {
     expect(res).toContain('2026-11-15T09:00:00.000Z');
   });
 
-  it('parses named month formats (15 Nov 2026, 15-November-2026)', () => {
+  it('parses named month formats (15 Nov 2026, 15-November-2026, 30 Oct, 2026, Month DD, YYYY, ordinals)', () => {
     const resShort = parseDateString('15 Nov 2026');
     expect(resShort).toBeDefined();
     expect(resShort).toContain('2026-11-15');
@@ -49,6 +49,23 @@ describe('parseDateString - Pakistani Procurement Date Formats', () => {
     const resLong = parseDateString('15-November-2026 15:00');
     expect(resLong).toBeDefined();
     expect(resLong).toContain('2026-11-15T10:00:00.000Z');
+
+    const resComma = parseDateString('30 Oct, 2026');
+    expect(resComma).toContain('2026-10-30');
+
+    const resMonthFirst = parseDateString('September 25, 2026');
+    expect(resMonthFirst).toContain('2026-09-25');
+
+    const resMonthFirstShort = parseDateString('Aug 17, 2026');
+    expect(resMonthFirstShort).toContain('2026-08-17');
+
+    const resOrdinal = parseDateString('Jun 30th 2026');
+    expect(resOrdinal).toContain('2026-06-30');
+
+    const resMonthFirstTwoDigitYear = parseDateString('Oct 10, 26 15:30:00');
+    expect(resMonthFirstTwoDigitYear).toContain('2026-10-10');
+
+    expect(parseDateString('Feb 31, 2026')).toBeNull();
   });
 
   it('parses ISO format YYYY-MM-DD and with T', () => {

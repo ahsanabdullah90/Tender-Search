@@ -216,13 +216,15 @@ export const crawlerDeps = {
   sleep: (ms: number) => sleep(ms)
 };
 
+const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?\\s+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
+
 /**
  * Extracts and disambiguates publish dates vs closing dates using labels and chronological sorting (Bug B7)
  */
 export function extractDatesFromText(rowText: string): { publishDate: string | null; closingDate: string | null } {
   // 1. Look for explicit labels
-  const closingLabelRegex = /(?:closing|submission|deadline|due|last)(?:[\s\w]{0,20}?)(?:[:\s-])\s*(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i;
-  const publishLabelRegex = /(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening)(?:[\s\w]{0,20}?)(?:[:\s-])\s*(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i;
+  const closingLabelRegex = new RegExp(`(?:closing|submission|deadline|due|last)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
+  const publishLabelRegex = new RegExp(`(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
 
   const closingMatch = rowText.match(closingLabelRegex);
   const publishMatch = rowText.match(publishLabelRegex);
@@ -235,7 +237,7 @@ export function extractDatesFromText(rowText: string): { publishDate: string | n
   }
 
   // 2. If no explicit closing label found, extract all candidate dates
-  const globalDateRegex = /(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/gi;
+  const globalDateRegex = new RegExp(DATE_CANDIDATE_PATTERN, 'gi');
   const matches = rowText.match(globalDateRegex) || [];
   const parsedDates: string[] = [];
   for (const m of matches) {
@@ -263,6 +265,22 @@ export function extractDatesFromText(rowText: string): { publishDate: string | n
   return { publishDate: null, closingDate: null };
 }
 
+const GENERIC_LINK_LABELS = /^(download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click\s+to\s+view|view(?:\s+details|\s+file)?|details|advertisement|tender\s+document|read\s+more|open|apply|corrigendum|asset\s+register|o&m\s+manuals|drawings)$/i;
+
+function resolvePortalUrl(href: string | undefined, portal: PortalDefinition): string {
+  if (!href || href.startsWith('#') || href.startsWith('javascript:')) return portal.tendersUrl;
+  try {
+    return href.startsWith('http') ? href : new URL(href, portal.baseUrl).toString();
+  } catch {
+    return portal.tendersUrl;
+  }
+}
+
+function extractRefFromText(text: string): string | undefined {
+  const refMatch = text.match(/(?:\bTS[-/]?\d{3,10}\b|\bPID\s*\([A-Z]+\)\s*\d+\b|\b[A-Z]{2,10}[-/][A-Z0-9/-]*\d[A-Z0-9/-]{1,20}\b)/i);
+  return refMatch && isValidReferenceNo(refMatch[0]) ? refMatch[0] : undefined;
+}
+
 /**
  * Parses raw HTML string from a portal into structured items or detects verification challenge.
  */
@@ -270,9 +288,9 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
   const $ = cheerio.load(html);
   const items: RawScrapedItem[] = [];
 
-  // Check for CAPTCHA or Cloudflare Turnstile blocking elements (Bug B4)
+  // Hard Cloudflare / challenge block checks (Bug B4)
   if (
-    $('iframe[src*="cloudflare"], #captcha, input[name*="captcha"]').length > 0 ||
+    $('iframe[src*="challenges.cloudflare.com"], #cf-browser-verification').length > 0 ||
     html.includes('cf-browser-verification') ||
     html.includes('challenges.cloudflare.com') ||
     html.includes('Just a moment...') ||
@@ -281,13 +299,127 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     return { items: [], hitlRequired: true };
   }
 
+  // Generic CAPTCHA check only triggers on small challenge pages without content (prevents false-positives on WP footer widgets)
+  if (
+    $('iframe[src*="cloudflare"], #captcha, input[name*="captcha"]').length > 0 &&
+    html.length < 50000 &&
+    !$('table, .tender-card, .package-title, .inner-advertisement-listing-box, a[href*=".pdf"]').length
+  ) {
+    return { items: [], hitlRequired: true };
+  }
+
   // Check for login forms or credentials requirement (Bug B5)
+  if (
+    portal.accessMode === 'login_required' &&
+    !(portal as any).sessionCookies &&
+    $('a[href*="login.php"], a[href*="/login"]').length > 0 &&
+    !$('.tender-item, .procurement-item').length
+  ) {
+    return { items: [], hitlRequired: true, isLoginRequired: true };
+  }
   const hasLoginForm = $('input[type="password"]').length > 0 ||
     /login to continue|enter credentials|sign in to access|session expired/i.test(html);
-  if (hasLoginForm && !$('table, .tender-row, .notice-item, .procurement-item').length) {
+  if (hasLoginForm && !$('table, .tender-row, .notice-item, .procurement-item, .tender-card, .package-title, .tender-item').length) {
     return { items: [], hitlRequired: true, isLoginRequired: true };
   }
 
+  // 1. Structured NDMA tender cards (.tender-card)
+  if ($('.tender-card').length > 0) {
+    $('.tender-card').each((_, el) => {
+      const titleLink = $(el).find('.tender-card__title a').first();
+      const title = (titleLink.text() || $(el).find('.tender-card__title').text()).replace(/\s+/g, ' ').trim();
+      if (title.length <= 5) return;
+
+      const href = titleLink.attr('href');
+      const fullUrl = resolvePortalUrl(href, portal);
+      const subText = $(el).find('[data-label*="Submission"], [data-label*="Closing"]').text().trim();
+      const openText = $(el).find('[data-label*="Opening"], [data-label*="Publish"]').text().trim();
+      const rowText = $(el).text().replace(/\s+/g, ' ').trim();
+
+      const fallbackDates = extractDatesFromText(rowText);
+      const closingDate = parseDateString(subText) || fallbackDates.closingDate;
+      const publishDate = parseDateString(openText) || fallbackDates.publishDate;
+
+      const attachmentUrls: string[] = [];
+      if (href && /\.(pdf|docx?|xlsx?|jpe?g|png)(\?|$)/i.test(href)) {
+        attachmentUrls.push(fullUrl);
+      }
+
+      items.push({
+        referenceNo: extractRefFromText(rowText),
+        title,
+        organization: portal.name,
+        directUrl: fullUrl,
+        publishDate: publishDate || undefined,
+        closingDate,
+        description: rowText.slice(0, 300),
+        attachmentUrls
+      });
+    });
+    if (items.length > 0) return { items, hitlRequired: false };
+  }
+
+  // 2. Structured WordPress Download Manager cards (FDE: h3.package-title)
+  if ($('h3.package-title').length > 0) {
+    $('h3.package-title').each((_, el) => {
+      const link = $(el).find('a').first();
+      const rawTitle = (link.text() || $(el).text()).replace(/\s+/g, ' ').trim();
+      if (rawTitle.length <= 5) return;
+
+      const fullUrl = resolvePortalUrl(link.attr('href'), portal);
+      const cardEl = $(el).closest('.card, .media, article');
+      const rowText = (cardEl.length ? cardEl.text() : rawTitle).replace(/\s+/g, ' ').trim();
+      const { publishDate, closingDate } = extractDatesFromText(rowText);
+
+      // Strip leading date prefix from title if present (e.g. "22-08-2026, RENOVATION OF...")
+      const cleanTitle = rawTitle.replace(/^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\s*[,:-]?\s*/, '').trim() || rawTitle;
+
+      items.push({
+        referenceNo: extractRefFromText(rowText),
+        title: cleanTitle,
+        organization: portal.name,
+        directUrl: fullUrl,
+        publishDate: publishDate || undefined,
+        closingDate,
+        description: rowText.slice(0, 300),
+        attachmentUrls: []
+      });
+    });
+    if (items.length > 0) return { items, hitlRequired: false };
+  }
+
+  // 3. Structured PSDF advertisement listing boxes (.inner-advertisement-listing-box)
+  if ($('.inner-advertisement-listing-box').length > 0) {
+    const seenTitles = new Set<string>();
+    $('.inner-advertisement-listing-box').each((_, el) => {
+      const title = $(el).find('h4, h3, .listingadver-title1').first().text().replace(/\s+/g, ' ').trim();
+      if (title.length <= 5 || seenTitles.has(title.toLowerCase())) return;
+      seenTitles.add(title.toLowerCase());
+
+      const imgSrc = $(el).find('img.adver-thumbnail').attr('src');
+      const attachmentUrls: string[] = [];
+      if (imgSrc && /\.(jpe?g|png|pdf)(\?|$)/i.test(imgSrc)) {
+        attachmentUrls.push(resolvePortalUrl(imgSrc, portal));
+      }
+
+      const rowText = $(el).text().replace(/\s+/g, ' ').trim();
+      const { publishDate, closingDate } = extractDatesFromText(rowText);
+
+      items.push({
+        referenceNo: extractRefFromText(title),
+        title,
+        organization: portal.name,
+        directUrl: attachmentUrls[0] || portal.tendersUrl,
+        publishDate: publishDate || undefined,
+        closingDate,
+        description: title,
+        attachmentUrls
+      });
+    });
+    if (items.length > 0) return { items, hitlRequired: false };
+  }
+
+  // 4. Standard & Drupal / NinjaTable / GridView rows
   const selector = [
     'table tbody tr',
     'table#ContentPlaceHolder1_GridView1 tr',
@@ -305,42 +437,79 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     // Skip table header rows
     if ($(el).is('th') || $(el).closest('thead').length > 0 || $(el).find('th').length > $(el).find('td').length) return;
 
-    const rowText = $(el).text().trim();
+    const rowText = $(el).text().replace(/\s+/g, ' ').trim();
     if (!rowText || rowText.length < 20) return;
 
-    const link = $(el).find('a').first();
-    const href = link.attr('href') || portal.tendersUrl;
-    let fullUrl = href;
-    try {
-      fullUrl = href.startsWith('http') ? href : new URL(href, portal.baseUrl).toString();
-    } catch {
-      fullUrl = portal.tendersUrl;
+    // Choose the best link (prefer non-generic title links over "Download" buttons)
+    let chosenHref: string | undefined;
+    let chosenLinkText = '';
+    $(el).find('a[href]').each((__, aEl) => {
+      const aText = $(aEl).text().replace(/\s+/g, ' ').trim();
+      const aHref = $(aEl).attr('href');
+      if (!chosenHref && aHref) chosenHref = aHref;
+      if (!chosenLinkText && aText.length > 5 && !GENERIC_LINK_LABELS.test(aText) && !parseDateString(aText)) {
+        chosenLinkText = aText;
+        if (aHref) chosenHref = aHref;
+      }
+    });
+
+    const fullUrl = resolvePortalUrl(chosenHref, portal);
+
+    // Determine clean title from structured cells or non-generic link text
+    let title = chosenLinkText;
+    if (!title) {
+      const candidateCells = [
+        $(el).find('.views-field-title').first().text(),
+        $(el).find('h3, h4').first().text(),
+        $(el).find('td:nth-child(2)').first().text(),
+        $(el).find('td:nth-child(1)').first().text()
+      ];
+      for (const c of candidateCells) {
+        const cleaned = c.replace(/\s+/g, ' ').trim();
+        if (
+          cleaned.length > 5 &&
+          !/^\d+$/.test(cleaned) &&
+          !GENERIC_LINK_LABELS.test(cleaned) &&
+          !parseDateString(cleaned)
+        ) {
+          title = cleaned;
+          break;
+        }
+      }
+    }
+    if (!title) {
+      title = rowText.slice(0, 100);
     }
 
-    const title = link.text().trim() || $(el).find('td:nth-child(2), h3, h4').first().text().trim() || rowText.slice(0, 100);
+    const referenceNo = extractRefFromText(rowText);
 
-    // Extract genuine procurement reference number pattern (must contain at least one digit)
-    const refMatch = rowText.match(/(?:\bTS[-/]?\d{3,10}\b|\bPID\s*\([A-Z]+\)\s*\d+\b|\b[A-Z]{2,10}[-/][A-Z0-9/-]*\d[A-Z0-9/-]{1,20}\b)/i);
-    const referenceNo = refMatch && isValidReferenceNo(refMatch[0]) ? refMatch[0] : null;
-
-    // Disambiguate dates using labels (closing vs publish) (Bug B7)
-    const { publishDate, closingDate } = extractDatesFromText(rowText);
+    // Disambiguate dates using explicit Drupal/table cells, <time datetime>, or row text (Bug B7)
+    let { publishDate, closingDate } = extractDatesFromText(rowText);
+    if (!closingDate) {
+      const closingCellText = $(el).find('.views-field-field-tender-closing-date, td:nth-child(4), td:nth-child(3)').text().trim();
+      closingDate = parseDateString(closingCellText);
+    }
+    if (!publishDate) {
+      const openingCellText = $(el).find('.views-field-field-tender-opening-date, td:nth-child(3), td:nth-child(2)').text().trim();
+      const candidatePub = parseDateString(openingCellText);
+      if (candidatePub && candidatePub !== closingDate) {
+        publishDate = candidatePub;
+      }
+    }
 
     // Collect any file attachments in row
     const attachmentUrls: string[] = [];
     $(el).find('a[href]').each((__, aEl) => {
       const aHref = $(aEl).attr('href');
       if (aHref && /\.(pdf|docx?|xlsx?|jpe?g|png)(\?|$)/i.test(aHref)) {
-        try {
-          const absUrl = aHref.startsWith('http') ? aHref : new URL(aHref, portal.baseUrl).toString();
-          attachmentUrls.push(absUrl);
-        } catch {}
+        const absUrl = resolvePortalUrl(aHref, portal);
+        if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
       }
     });
 
     if (title.length > 5) {
       items.push({
-        referenceNo: referenceNo || undefined,
+        referenceNo,
         title,
         organization: portal.name,
         directUrl: fullUrl,
@@ -351,6 +520,40 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       });
     }
   });
+
+  // 5. Fallback for Elementor / WordPress direct PDF procurement listings (e.g. PSEB TechDestination)
+  if (items.length === 0) {
+    const seenUrls = new Set<string>();
+    $('a[href*="/wp-content/uploads/"][href$=".pdf"], a[href*="/Tender"][href$=".pdf"]').each((_, aEl) => {
+      const href = $(aEl).attr('href');
+      if (!href) return;
+      const fullUrl = resolvePortalUrl(href, portal);
+      if (seenUrls.has(fullUrl)) return;
+
+      const fileSlug = decodeURIComponent(fullUrl.split('/').pop() || '').replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim();
+      // Skip non-procurement marketing/drawings files
+      if (/tech destination of the year|floor plans|asset register|approval mechanism/i.test(fileSlug)) return;
+
+      seenUrls.add(fullUrl);
+      const aText = $(aEl).text().replace(/\s+/g, ' ').trim();
+      const title = (!aText || GENERIC_LINK_LABELS.test(aText)) ? fileSlug : aText;
+      if (title.length <= 5) return;
+
+      const containerText = $(aEl).closest('.e-con, tr, article, li, div').text().replace(/\s+/g, ' ').trim();
+      const { publishDate, closingDate } = extractDatesFromText(containerText);
+
+      items.push({
+        referenceNo: extractRefFromText(title),
+        title,
+        organization: portal.name,
+        directUrl: fullUrl,
+        publishDate: publishDate || undefined,
+        closingDate,
+        description: title,
+        attachmentUrls: [fullUrl]
+      });
+    });
+  }
 
   return { items, hitlRequired: false };
 }
@@ -458,6 +661,15 @@ function isValidCalendarDay(year: number, month: number, day: number): boolean {
   return day <= maxDays;
 }
 
+const MONTH_NAMES: Record<string, number> = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+  apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+  aug: 8, august: 8, sep: 9, september: 9, oct: 10, october: 10,
+  nov: 11, november: 11, dec: 12, december: 12
+};
+
+const DEFAULT_PORTAL_NAMES = new Set(PORTAL_DEFINITIONS.map(p => p.name.toLowerCase()));
+
 export function parseDateString(raw: string): string | null {
   if (!raw || !raw.trim()) return null;
   const str = raw.trim();
@@ -465,9 +677,16 @@ export function parseDateString(raw: string): string | null {
   // Exclude known non-date text noise
   if (/^(not available|n\/a|none|null|undefined|-+)$/i.test(str)) return null;
 
+  // Strip ordinal suffixes (1st, 2nd, 3rd, 4th..31st) and commas for uniform matching
+  const cleanStr = str
+    .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1')
+    .replace(/,/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   try {
     // 1. Check numeric DD/MM/YYYY or DD-MM-YYYY with optional time
-    const dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    const dmyMatch = cleanStr.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
     if (dmyMatch) {
       const day = parseInt(dmyMatch[1], 10);
       const month = parseInt(dmyMatch[2], 10);
@@ -495,21 +714,13 @@ export function parseDateString(raw: string): string | null {
       return null;
     }
 
-    // 2. Named month format: e.g. 15 Nov 2026, 15-November-2026 with optional time
-    const namedMonthMatch = str.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
+    // 2. Named month format (Day first): e.g. 15 Nov 2026, 30 Oct, 2026, 15-November-2026
+    const namedMonthMatch = cleanStr.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
     if (namedMonthMatch) {
       const day = parseInt(namedMonthMatch[1], 10);
-      const monthName = namedMonthMatch[2].toLowerCase();
+      const month = MONTH_NAMES[namedMonthMatch[2].toLowerCase()];
       let year = parseInt(namedMonthMatch[3], 10);
       if (year < 100) year += 2000;
-
-      const monthNames: Record<string, number> = {
-        jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
-        apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
-        aug: 8, august: 8, sep: 9, september: 9, oct: 10, october: 10,
-        nov: 11, november: 11, dec: 12, december: 12
-      };
-      const month = monthNames[monthName];
 
       const hour = namedMonthMatch[4] ? parseInt(namedMonthMatch[4], 10) : 14;
       const minute = namedMonthMatch[5] ? parseInt(namedMonthMatch[5], 10) : 0;
@@ -533,8 +744,38 @@ export function parseDateString(raw: string): string | null {
       return null;
     }
 
+    // 2b. Named month format (Month first): e.g. September 25, 2026, Jun 30th 2026, Aug 17, 2026
+    const monthFirstMatch = cleanStr.match(/^([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{1,2})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/i);
+    if (monthFirstMatch) {
+      const month = MONTH_NAMES[monthFirstMatch[1].toLowerCase()];
+      const day = parseInt(monthFirstMatch[2], 10);
+      let year = parseInt(monthFirstMatch[3], 10);
+      if (year < 100) year += 2000;
+
+      const hour = monthFirstMatch[4] ? parseInt(monthFirstMatch[4], 10) : 14;
+      const minute = monthFirstMatch[5] ? parseInt(monthFirstMatch[5], 10) : 0;
+      const second = monthFirstMatch[6] ? parseInt(monthFirstMatch[6], 10) : 0;
+
+      if (
+        month &&
+        isValidCalendarDay(year, month, day) &&
+        hour >= 0 && hour < 24 &&
+        minute >= 0 && minute < 60 &&
+        second >= 0 && second < 60
+      ) {
+        const hStr = String(hour).padStart(2, '0');
+        const mStr = String(minute).padStart(2, '0');
+        const sStr = String(second).padStart(2, '0');
+        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
+        if (!isNaN(d.getTime())) {
+          return d.toISOString();
+        }
+      }
+      return null;
+    }
+
     // 3. ISO format YYYY-MM-DD with optional time
-    const isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    const isoMatch = cleanStr.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
     if (isoMatch) {
       const year = parseInt(isoMatch[1], 10);
       const month = parseInt(isoMatch[2], 10);
@@ -598,7 +839,10 @@ export function matchTracks(
   item: RawScrapedItem,
   activeTracks: any[]
 ): { matchedTracks: string[]; matchedKeywords: string[]; matchScore: number } {
-  const combinedText = `${item.title} ${item.description || ''} ${item.organization} ${item.referenceNo || ''}`.toLowerCase();
+  // Exclude generic portal name from keyword matching to prevent 100% false-positive matches on education/skills portals
+  const orgLower = (item.organization || '').toLowerCase();
+  const orgForMatching = DEFAULT_PORTAL_NAMES.has(orgLower) ? '' : orgLower;
+  const combinedText = `${item.title} ${item.description || ''} ${orgForMatching} ${item.referenceNo || ''}`.toLowerCase();
 
   const matchedTracks: string[] = [];
   const matchedKeywords: string[] = [];

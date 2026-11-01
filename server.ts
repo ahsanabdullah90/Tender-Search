@@ -261,7 +261,12 @@ app.use('/data/dossiers', express.static(DOSSIERS_DIR));
 
 app.get('/api/dossiers/:tenderId/:filename', (req, res) => {
   const { tenderId, filename } = req.params;
+  const resolvedRoot = path.resolve(DOSSIERS_DIR);
   const filePath = path.resolve(DOSSIERS_DIR, tenderId, filename);
+
+  if (!filePath.startsWith(resolvedRoot + path.sep)) {
+    return res.status(400).send('Invalid dossier path');
+  }
 
   if (!fs.existsSync(filePath)) {
     return res.status(404).send('Dossier file not found on disk');

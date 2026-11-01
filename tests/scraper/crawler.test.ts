@@ -155,6 +155,99 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(result.isLoginRequired).toBe(true);
       expect(result.items.length).toBe(0);
     });
+
+    it('parses NDMA .tender-card, FDE h3.package-title, PSDF .inner-advertisement-listing-box, and PSEB PDF links', () => {
+      // 1. NDMA .tender-card
+      const ndmaPortal = PORTAL_DEFINITIONS.find(p => p.id === 'ndma')!;
+      const ndmaHtml = `
+        <div class="tender-card">
+          <div class="tender-card__title">
+            <a href="/storage/tenders/Solar_System_RFP.pdf">Provision and Installation of Solar System</a>
+          </div>
+          <div class="tender-card__meta" data-label="Opening Date">15 Oct, 2026</div>
+          <div class="tender-card__meta" data-label="Submission Date">30 Oct, 2026</div>
+        </div>
+      `;
+      const ndmaRes = parsePortalHtml(ndmaHtml, ndmaPortal);
+      expect(ndmaRes.items.length).toBe(1);
+      expect(ndmaRes.items[0].title).toBe('Provision and Installation of Solar System');
+      expect(ndmaRes.items[0].closingDate).toContain('2026-10-30');
+      expect(ndmaRes.items[0].publishDate).toContain('2026-10-15');
+      expect(ndmaRes.items[0].attachmentUrls).toContain('https://ndma.gov.pk/storage/tenders/Solar_System_RFP.pdf');
+
+      // 2. FDE h3.package-title
+      const fdePortal = PORTAL_DEFINITIONS.find(p => p.id === 'fde')!;
+      const fdeHtml = `
+        <div class="card">
+          <h3 class="package-title">
+            <a href="https://fde.gov.pk/download/renovation-labs/">22-08-2026, RENOVATION OF LABORATORIES IN EDUCATIONAL INSTITUTIONS</a>
+          </h3>
+        </div>
+      `;
+      const fdeRes = parsePortalHtml(fdeHtml, fdePortal);
+      expect(fdeRes.items.length).toBe(1);
+      expect(fdeRes.items[0].title).toBe('RENOVATION OF LABORATORIES IN EDUCATIONAL INSTITUTIONS');
+      expect(fdeRes.items[0].closingDate).toContain('2026-08-22');
+
+      // 3. PSDF .inner-advertisement-listing-box
+      const psdfPortal = PORTAL_DEFINITIONS.find(p => p.id === 'psdf')!;
+      const psdfHtml = `
+        <div class="inner-advertisement-listing-box">
+          <img class="adver-thumbnail" src="https://psdf.org.pk/wp-content/uploads/2026/10/Notice.png" />
+          <h4 class="listingadver-title1">Hiring of Training Service Providers for Youth Skills</h4>
+        </div>
+      `;
+      const psdfRes = parsePortalHtml(psdfHtml, psdfPortal);
+      expect(psdfRes.items.length).toBe(1);
+      expect(psdfRes.items[0].title).toBe('Hiring of Training Service Providers for Youth Skills');
+      expect(psdfRes.items[0].attachmentUrls?.[0]).toContain('Notice.png');
+
+      // 4. PSEB Elementor PDF links with generic "Click to view" label
+      const psebPortal = PORTAL_DEFINITIONS.find(p => p.id === 'pseb')!;
+      const psebHtml = `
+        <div class="e-con">
+          <span>Submission Deadline: September 25, 2026</span>
+          <a href="https://techdestination.com/wp-content/uploads/2026/10/RFP-for-Purchase-of-Stationery-Items.pdf">Click to view</a>
+          <a href="https://techdestination.com/wp-content/uploads/2025/01/Pakistan-Recognized-as-the-Tech-Destination-of-the-Year-1.pdf">READ MORE</a>
+        </div>
+      `;
+      const psebRes = parsePortalHtml(psebHtml, psebPortal);
+      expect(psebRes.items.length).toBe(1);
+      expect(psebRes.items[0].title).toBe('RFP for Purchase of Stationery Items');
+      expect(psebRes.items[0].closingDate).toContain('2026-09-25');
+
+      // 5. Ignite / PEEF table rows where first link is "Download" and dates use ordinals/Month DD, YYYY
+      const ignitePortal = PORTAL_DEFINITIONS.find(p => p.id === 'ignite')!;
+      const igniteHtml = `
+        <table>
+          <tbody>
+            <tr>
+              <td>Tender Notice - Provision of Solar Inverters</td>
+              <td>Jun 30th 2026</td>
+              <td>Jul 16th 2026</td>
+              <td><a href="/wp-content/uploads/solar_rfp.pdf">Download</a></td>
+            </tr>
+          </tbody>
+        </table>
+      `;
+      const igniteRes = parsePortalHtml(igniteHtml, ignitePortal);
+      expect(igniteRes.items.length).toBe(1);
+      expect(igniteRes.items[0].title).toBe('Tender Notice - Provision of Solar Inverters');
+      expect(igniteRes.items[0].publishDate).toContain('2026-06-30');
+      expect(igniteRes.items[0].closingDate).toContain('2026-07-16');
+
+      // 6. Unauthenticated login_required portal with login.php link
+      const tsPortal = PORTAL_DEFINITIONS.find(p => p.id === 'tender_services')!;
+      const tsUnauthHtml = `
+        <html><body>
+          <a href="https://tenderservice.pk/permits/login.php">Login</a>
+          <table><tbody><tr><td>Some marketing directory row text here</td></tr></tbody></table>
+        </body></html>
+      `;
+      const tsRes = parsePortalHtml(tsUnauthHtml, tsPortal);
+      expect(tsRes.hitlRequired).toBe(true);
+      expect(tsRes.isLoginRequired).toBe(true);
+    });
   });
 
   describe('processAndSaveTender', () => {
