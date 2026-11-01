@@ -16,6 +16,12 @@ export interface HitlLaunchResult {
   isHeadlessFallback?: boolean;
 }
 
+export const playwrightDeps = {
+  importPlaywright: async (): Promise<any> => {
+    return (Function('m', 'return import(m)')('playwright') as Promise<any>).catch(() => null);
+  }
+};
+
 // Active HITL browser contexts tracked to prevent multiple hanging processes
 const activeHitlContexts = new Map<string, any>();
 
@@ -37,8 +43,7 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
   }
 
   try {
-    const modName = 'playwright';
-    const playwright: any = await (Function('m', 'return import(m)')(modName) as Promise<any>).catch(() => null);
+    const playwright: any = await playwrightDeps.importPlaywright();
 
     if (playwright && (process.env.DISPLAY || process.platform === 'win32' || process.platform === 'darwin')) {
       // Close any already open context for this portal

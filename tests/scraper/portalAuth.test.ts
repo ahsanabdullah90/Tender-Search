@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
@@ -104,5 +104,51 @@ describe('portalAuth', () => {
 
     const epads = getPortalHealthList().find(p => p.portal_id === 'epads');
     expect(epads?.status).toBe('online');
+  });
+
+  it('extracts cookies via fallback set-cookie header when getSetCookie is unavailable', async () => {
+    const originalFetch = global.fetch;
+    try {
+      global.fetch = vi.fn().mockResolvedValue({
+        text: async () => '<html><body>Welcome to Dashboard</body></html>',
+        headers: {
+          get: (name: string) => name.toLowerCase() === 'set-cookie' ? 'FALLBACK_SESS=secret; path=/' : null
+        }
+      } as any);
+
+      const result = await authenticatePortal(
+        'tender_services',
+        'user@example.com',
+        'pass'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.cookies).toBe('FALLBACK_SESS=secret');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('handles successful response with no cookies gracefully', async () => {
+    const originalFetch = global.fetch;
+    try {
+      global.fetch = vi.fn().mockResolvedValue({
+        text: async () => '<html><body>Welcome to Dashboard</body></html>',
+        headers: {
+          get: () => null
+        }
+      } as any);
+
+      const result = await authenticatePortal(
+        'tender_services',
+        'user@example.com',
+        'pass'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.cookies).toBe('');
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });

@@ -151,5 +151,65 @@ describe('KpiHeader component', () => {
     const reviewBtn = screen.getByRole('button', { name: /Review portals/ });
     await user.click(reviewBtn);
     expect(handleOpenSources).toHaveBeenCalledTimes(1);
+
+    // Clicking the Portals online KPI card also calls onOpenSources
+    const portalsCard = screen.getByRole('button', { name: /Portals online/ });
+    await user.click(portalsCard);
+    expect(handleOpenSources).toHaveBeenCalledTimes(2);
+  });
+
+  it('handles tender selection from corrigendum banner, scope revisions, and multiple items', async () => {
+    const user = userEvent.setup();
+    const handleSelectTender = vi.fn();
+
+    const multiCorrigenda = [
+      {
+        id: 'corr-scope',
+        tender_id: 't-scope-1',
+        tender_title: 'Water Filtration Plant',
+        change_type: 'scope_revision',
+        previous_value: null,
+        new_value: 'Scope amended',
+        is_acknowledged: 0,
+        detected_at: '2026-05-10T12:00:00+05:00'
+      },
+      {
+        id: 'corr-extra',
+        tender_id: 't-extra',
+        tender_title: 'Extra Tender',
+        change_type: 'attachment_update',
+        previous_value: null,
+        new_value: 'Addendum 1',
+        is_acknowledged: 0,
+        detected_at: '2026-05-10T12:00:00+05:00'
+      }
+    ];
+
+    const fourBrokenPortals: any[] = [
+      { portal_id: 'p1', portal_name: 'P1', status: 'error', last_scan_at: null, last_items_found: 0, consecutive_zero_yields: 1, last_error_message: 'err' },
+      { portal_id: 'p2', portal_name: 'P2', status: 'error', last_scan_at: null, last_items_found: 0, consecutive_zero_yields: 1, last_error_message: 'err' },
+      { portal_id: 'p3', portal_name: 'P3', status: 'error', last_scan_at: null, last_items_found: 0, consecutive_zero_yields: 1, last_error_message: 'err' },
+      { portal_id: 'p4', portal_name: 'P4', status: 'error', last_scan_at: null, last_items_found: 0, consecutive_zero_yields: 1, last_error_message: 'err' },
+    ];
+
+    render(
+      <KpiHeader
+        stats={{ ...baseStats, closingSoon: 5, unackCorrigenda: 2 }}
+        corrigenda={multiCorrigenda as any}
+        portals={fourBrokenPortals}
+        onSelectTenderById={handleSelectTender}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onLaunchHitl={vi.fn()}
+        onOpenSources={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(/Dossier BOQ updated/)).toBeInTheDocument();
+    expect(screen.getByText(/\+1 more/)).toBeInTheDocument();
+    expect(screen.getByText(/\+1\)/)).toBeInTheDocument(); // +1 more for 4 broken portals
+
+    const tenderLink = screen.getByRole('button', { name: '"Water Filtration Plant"' });
+    await user.click(tenderLink);
+    expect(handleSelectTender).toHaveBeenCalledWith('t-scope-1');
   });
 });

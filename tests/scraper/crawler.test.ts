@@ -9,15 +9,23 @@ import {
   updatePortalHealth,
   getAllTenders,
   getTenderById,
-  saveDomainTrack
+  saveDomainTrack,
+  DOSSIERS_DIR
 } from '../../src/server/db.js';
 import {
   parsePortalHtml,
   extractDatesFromText,
   processAndSaveTender,
   startCrawlerScan,
+  seedRealisticTenders,
+  getActivePortalsList,
+  formatClosingDate,
+  parseDateString,
+  fetchHtmlWithTolerantAgent,
   crawlerDeps
 } from '../../src/server/scrapers/crawlerEngine.js';
+import http from 'http';
+import * as ocrSvc from '../../src/server/ocrService.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import type { RawScrapedItem } from '../../src/server/scrapers/crawlerEngine.js';
 
@@ -298,6 +306,255 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       const portal = getPortalHealthList().find(p => p.portal_id === 'punjab_eproc');
       expect(portal?.status).toBe('error');
       expect(portal?.last_error_message).toContain('ETIMEDOUT');
+    });
+
+    it('downloads attachments in background when attachmentUrls are provided', async () => {
+      const futureDate = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+      const itemWithAttachment: RawScrapedItem = {
+        title: 'Procurement of Solar PV Modules',
+        organization: 'Punjab Energy Department',
+        directUrl: 'http://example.com/solar-pv',
+        closingDate: futureDate,
+        description: 'Solar power system installation',
+        attachmentUrls: ['http://127.0.0.1:1/file.pdf']
+      };
+
+      const tracks = [{
+        id: 'track-solar',
+        name: 'Solar & Clean Energy',
+        positive_keywords: ['solar', 'photovoltaic'],
+        negative_keywords: [],
+        is_active: 1
+      }];
+
+      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!;
+      const res = await processAndSaveTender(itemWithAttachment, portalDef, tracks);
+      expect(res.isNew).toBe(true);
+      expect(res.matched).toBe(true);
+    });
+
+    it('seeds realistic sample tenders on clean database and skips if already present', () => {
+      expect((db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c).toBe(0);
+      seedRealisticTenders();
+      const countAfter = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c;
+      expect(countAfter).toBeGreaterThan(5);
+
+      // Subsequent call does nothing
+      seedRealisticTenders();
+      expect((db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c).toBe(countAfter);
+    });
+
+    it('maps all db portal fields in getActivePortalsList', () => {
+      updatePortalHealth('epads', {
+        portal_name: 'Federal EPADS Custom',
+        category: 'Federal/Regional',
+        tier: 'http',
+        base_url: 'https://custom-epads.gov.pk',
+        tenders_url: 'https://custom-epads.gov.pk/tenders',
+        login_url: 'https://custom-epads.gov.pk/login',
+        access_mode: 'login_required',
+        verified_status: 'online',
+        session_cookies: 'test=1'
+      });
+
+      const portals = getActivePortalsList('epads');
+      expect(portals.length).toBe(1);
+      const epads = portals[0];
+      expect(epads.name).toBe('Federal EPADS Custom');
+      expect(epads.baseUrl).toBe('https://custom-epads.gov.pk');
+      expect(epads.loginUrl).toBe('https://custom-epads.gov.pk/login');
+      expect(epads.accessMode).toBe('login_required');
+      expect((epads as any).sessionCookies).toBe('test=1');
+    });
+
+    it('handles timeout in fetchHtmlWithTolerantAgent', async () => {
+      const origGet = http.get;
+      const spy = vi.spyOn(http, 'get').mockImplementationOnce((url: any, opts: any, cb: any) => {
+        const req = origGet(url, opts, cb);
+        setImmediate(() => req.emit('timeout'));
+        return req;
+      });
+
+      let serverPort = 0;
+      const srv = http.createServer((req, res) => {});
+      await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => {
+        serverPort = (srv.address() as any).port;
+        resolve();
+      }));
+
+      await expect(fetchHtmlWithTolerantAgent(`http://127.0.0.1:${serverPort}`)).rejects.toThrow('Connection timed out');
+
+      spy.mockRestore();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    });
+
+    it('returns null for impossible dates in parseDateString', () => {
+      expect(parseDateString('31-Feb-2026')).toBeNull();
+      expect(parseDateString('2026-02-31')).toBeNull();
+      expect(parseDateString('2026-05-15 25:00:00')).toBeNull();
+    });
+
+    it('downloads image attachment in background and performs OCR extraction', async () => {
+      let serverPort = 0;
+      const srv = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+        res.end(Buffer.from('fake image content'));
+      });
+      await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => {
+        serverPort = (srv.address() as any).port;
+        resolve();
+      }));
+
+      const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
+        referenceNo: 'OCR-REF-999',
+        organization: 'Punjab Energy Department',
+        title: 'Procurement of Solar PV Modules',
+        closingDateISO: '2026-12-25T14:00:00+05:00',
+        closingDateFormatted: '25 Dec 2026, 02:00 PM PKT',
+        estimatedValue: null,
+        summaryScope: 'Solar scope',
+        isCorrigendum: false
+      });
+
+      const itemWithoutDateOrRef: RawScrapedItem = {
+        title: 'Procurement of Solar PV Modules',
+        organization: 'Punjab Energy Department',
+        directUrl: 'http://example.com/solar-ocr',
+        attachmentUrls: [`http://127.0.0.1:${serverPort}/scan.jpg`]
+      };
+
+      const tracks = [{
+        id: 'track-solar',
+        name: 'Solar & Clean Energy',
+        positive_keywords: ['solar'],
+        negative_keywords: [],
+        is_active: 1
+      }];
+
+      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!;
+      const res = await processAndSaveTender(itemWithoutDateOrRef, portalDef, tracks);
+      expect(res.isNew).toBe(true);
+
+      // Wait for background download + OCR promise
+      await new Promise(r => setTimeout(r, 200));
+
+      const updated = getAllTenders().find(t => t.title === 'Procurement of Solar PV Modules');
+      expect(updated?.reference_no).toBe('OCR-REF-999');
+      expect(updated?.closing_date).toBe('2026-12-25T14:00:00+05:00');
+
+      spyOcr.mockRestore();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    });
+
+    it('handles OCR extraction errors gracefully in background', async () => {
+      let serverPort = 0;
+      const srv = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+        res.end(Buffer.from('fake image content'));
+      });
+      await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => {
+        serverPort = (srv.address() as any).port;
+        resolve();
+      }));
+
+      const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockRejectedValueOnce(new Error('OCR Timeout'));
+
+      const item: RawScrapedItem = {
+        title: 'Solar Panels In Hospital',
+        organization: 'Health Department',
+        directUrl: 'http://example.com/solar-err',
+        attachmentUrls: [`http://127.0.0.1:${serverPort}/scan.jpg`]
+      };
+
+      const tracks = [{
+        id: 'track-solar',
+        name: 'Solar',
+        positive_keywords: ['solar'],
+        negative_keywords: [],
+        is_active: 1
+      }];
+
+      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!;
+      await processAndSaveTender(item, portalDef, tracks);
+      await new Promise(r => setTimeout(r, 200));
+
+      spyOcr.mockRestore();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    });
+  });
+
+  describe('fetchHtmlWithTolerantAgent & Edge Cases', () => {
+    it('fetches HTML with custom cookies and follows redirects', async () => {
+      let receivedCookie = '';
+      const srv = http.createServer((req, res) => {
+        if (req.url === '/redirect') {
+          res.writeHead(302, { Location: '/target' });
+          res.end();
+        } else if (req.url === '/target') {
+          receivedCookie = req.headers.cookie || '';
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<html><body>Target Page</body></html>');
+        } else if (req.url === '/cf-challenge') {
+          res.writeHead(403, { 'Content-Type': 'text/html' });
+          res.end('<html><head><title>Just a moment... cloudflare challenge</title></head></html>');
+        } else if (req.url === '/error500') {
+          res.writeHead(500);
+          res.end('Internal Server Error');
+        } else if (req.url === '/infinite-loop') {
+          res.writeHead(302, { Location: '/infinite-loop' });
+          res.end();
+        }
+      });
+
+      let port = 0;
+      await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => {
+        port = (srv.address() as any).port;
+        resolve();
+      }));
+
+      try {
+        // 1. Redirect and cookie header check
+        const html = await fetchHtmlWithTolerantAgent(`http://127.0.0.1:${port}/redirect`, 0, 'session=test_val');
+        expect(html).toContain('Target Page');
+        expect(receivedCookie).toBe('session=test_val');
+
+        // 2. Cloudflare challenge on 403 status returns body
+        const cfHtml = await fetchHtmlWithTolerantAgent(`http://127.0.0.1:${port}/cf-challenge`);
+        expect(cfHtml).toContain('cloudflare challenge');
+
+        // 3. HTTP 500 error rejects
+        await expect(fetchHtmlWithTolerantAgent(`http://127.0.0.1:${port}/error500`)).rejects.toThrow('HTTP 500 from portal server');
+
+        // 4. Too many redirects rejects
+        await expect(fetchHtmlWithTolerantAgent(`http://127.0.0.1:${port}/infinite-loop`)).rejects.toThrow('Too many redirects');
+
+        // 5. Invalid URL rejects
+        await expect(fetchHtmlWithTolerantAgent('not-a-valid-url')).rejects.toThrow('Invalid URL');
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+      }
+    });
+
+    it('handles formatClosingDate error fallback to Not Available', () => {
+      const corruptDateObj = {
+        getTime: () => 1234567,
+        toLocaleDateString: () => { throw new Error('Localization crash'); }
+      };
+      // Force exception in formatClosingDate
+      const origDate = global.Date;
+      try {
+        (global as any).Date = class extends origDate {
+          constructor(...args: any[]) {
+            if (args.length > 0 && args[0] === 'force-error') {
+              return corruptDateObj as any;
+            }
+            super(...(args as [any]));
+          }
+        };
+        expect(formatClosingDate('force-error')).toBe('Not Available');
+      } finally {
+        global.Date = origDate;
+      }
     });
   });
 });

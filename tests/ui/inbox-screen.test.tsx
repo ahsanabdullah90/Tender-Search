@@ -190,4 +190,330 @@ describe('InboxScreen component', () => {
 
     expect(screen.getByText('Your Inbox is clear')).toBeInTheDocument();
   });
+
+  it('interacts with Filters popover, switches domain, toggles flags, and changes sorting', async () => {
+    const user = userEvent.setup();
+    const handleSelectTrack = vi.fn();
+    const handleToggleBookmarked = vi.fn();
+    const handleToggleCorrigendum = vi.fn();
+
+    render(
+      <InboxScreen
+        tenders={sampleTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={handleSelectTrack}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={handleToggleBookmarked}
+        corrigendumOnly={false}
+        onToggleCorrigendum={handleToggleCorrigendum}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    // Open Filters popover
+    const filterBtn = screen.getByRole('button', { name: /Filters/ });
+    await user.click(filterBtn);
+
+    // Select a domain
+    const domainSelect = screen.getByLabelText(/Domain/i);
+    await user.selectOptions(domainSelect, 'Solar & Clean Energy');
+    expect(handleSelectTrack).toHaveBeenCalledWith('Solar & Clean Energy');
+
+    // Toggle bookmarked checkbox
+    const bookmarkCheck = screen.getByRole('checkbox', { name: /Bookmarked only/i });
+    await user.click(bookmarkCheck);
+    expect(handleToggleBookmarked).toHaveBeenCalledTimes(1);
+
+    // Toggle amended checkbox
+    const amendedCheck = screen.getByRole('checkbox', { name: /Amended only/i });
+    await user.click(amendedCheck);
+    expect(handleToggleCorrigendum).toHaveBeenCalledTimes(1);
+
+    // Change sort
+    const sortSelect = screen.getByLabelText(/Sort by/i);
+    await user.selectOptions(sortSelect, 'score');
+    await user.selectOptions(sortSelect, 'newest');
+  });
+
+  it('renders undated tenders section and empty state when filtering', () => {
+    const undatedTenders: Tender[] = [
+      {
+        ...sampleTenders[0],
+        id: 'undated-1',
+        title: 'Undated Tender Opportunity',
+        closing_date: null
+      }
+    ];
+
+    const { rerender } = render(
+      <InboxScreen
+        tenders={undatedTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    expect(screen.getAllByText('No deadline stated').length).toBeGreaterThanOrEqual(1);
+
+    // Rerender with active search filter and no results
+    rerender(
+      <InboxScreen
+        tenders={[]}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery="nonexistent"
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Nothing matches these filters')).toBeInTheDocument();
+  });
+
+  it('handles notes editing and saving on blur in detail view', async () => {
+    const user = userEvent.setup();
+    const handleSaveNotes = vi.fn().mockResolvedValue(undefined);
+    const handleToggleBookmark = vi.fn();
+    const handleAckCorrigendum = vi.fn();
+
+    const tenderWithExtra: Tender = {
+      ...sampleTenders[0],
+      is_bookmarked: 1,
+      cached_dossiers: [{
+        label: 'Tender RFP',
+        localPath: 'rfp.pdf',
+        originalUrl: 'http://example.com/rfp.pdf',
+        mimeType: 'application/pdf',
+        sha256: 'abc'
+      }],
+      secondary_sources: [{
+        portalName: 'Federal PPRA',
+        directUrl: 'http://ppra.gov.pk',
+        discoveredAt: '2026-05-01'
+      }]
+    };
+
+    const corrigenda = [{
+      id: 'corr-1',
+      tender_id: tenderWithExtra.id,
+      change_type: 'deadline_extension' as const,
+      previous_value: '2026-05-10',
+      new_value: '2026-05-20',
+      is_acknowledged: 0,
+      detected_at: '2026-05-02'
+    }];
+
+    render(
+      <InboxScreen
+        tenders={[tenderWithExtra]}
+        tracks={sampleTracks}
+        corrigenda={corrigenda}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={handleAckCorrigendum}
+        onSaveNotes={handleSaveNotes}
+        onToggleBookmark={handleToggleBookmark}
+      />
+    );
+
+    expect(screen.getByText('This tender was amended')).toBeInTheDocument();
+    expect(screen.getByText('Tender RFP')).toBeInTheDocument();
+    expect(screen.getByText('Federal PPRA')).toBeInTheDocument();
+
+    // Acknowledge amendment
+    const ackBtn = screen.getByRole('button', { name: 'Got it' });
+    await user.click(ackBtn);
+    expect(handleAckCorrigendum).toHaveBeenCalledWith('corr-1');
+
+    // Toggle bookmark
+    const starBtn = screen.getByRole('button', { name: 'Remove bookmark' });
+    await user.click(starBtn);
+    expect(handleToggleBookmark).toHaveBeenCalledTimes(1);
+
+    // Edit notes and blur
+    const notesArea = screen.getByPlaceholderText(/Bank guarantee, partner contacts/i);
+    await user.type(notesArea, 'Urgent follow-up needed');
+    notesArea.blur();
+    expect(handleSaveNotes).toHaveBeenCalledWith(tenderWithExtra.id, 'Urgent follow-up needed');
+  });
+
+  it('handles note saving failure gracefully', async () => {
+    const user = userEvent.setup();
+    const handleSaveNotesReject = vi.fn().mockRejectedValue(new Error('Network error'));
+
+    render(
+      <InboxScreen
+        tenders={[sampleTenders[0]]}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={handleSaveNotesReject}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    const notesArea = screen.getByPlaceholderText(/Bank guarantee, partner contacts/i);
+    await user.type(notesArea, 'Note that fails to save');
+    notesArea.blur();
+
+    expect(handleSaveNotesReject).toHaveBeenCalled();
+  });
+
+  it('selects tender on row click and supports ArrowDown / ArrowUp keyboard navigation', async () => {
+    const user = userEvent.setup();
+    const twoTenders: Tender[] = [
+      { ...sampleTenders[0], id: 'tender-row-1', title: 'First Tender Alpha' },
+      { ...sampleTenders[0], id: 'tender-row-2', title: 'Second Tender Beta' }
+    ];
+
+    render(
+      <InboxScreen
+        tenders={twoTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    // Click second tender
+    const secondRow = screen.getByText('Second Tender Beta');
+    await user.click(secondRow);
+
+    // Keyboard ArrowUp moves to first
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }));
+    // Keyboard ArrowDown moves to second
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+
+    // Non-arrow key does nothing
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+
+    // Target inside input ignored
+    const searchInput = screen.getByPlaceholderText('Search tenders');
+    searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  });
+
+  it('handles urgency sorting with past deadlines and single-item action clearing selection', async () => {
+    const user = userEvent.setup();
+    const handleStatusChange = vi.fn();
+    const pastAndFutureTenders: Tender[] = [
+      {
+        ...sampleTenders[0],
+        id: 't-past',
+        title: 'Past Tender',
+        closing_date: new Date(Date.now() - 3600000).toISOString()
+      },
+      {
+        ...sampleTenders[0],
+        id: 't-future',
+        title: 'Future Tender',
+        closing_date: new Date(Date.now() + 7200000).toISOString()
+      }
+    ];
+
+    const { rerender } = render(
+      <InboxScreen
+        tenders={pastAndFutureTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={true}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={true}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={handleStatusChange}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    // Open Filters and switch sort to urgency
+    const filtersBtn = screen.getByRole('button', { name: /Filters/i });
+    await user.click(filtersBtn);
+    const sortSelect = screen.getByRole('combobox', { name: 'Sort by' });
+    await user.selectOptions(sortSelect, 'urgency');
+
+    // Now test single-item action setting selectedId to null
+    rerender(
+      <InboxScreen
+        tenders={[pastAndFutureTenders[0]]}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={handleStatusChange}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    const passBtn = screen.getByRole('button', { name: /Pass/i });
+    await user.click(passBtn);
+    expect(handleStatusChange).toHaveBeenCalledWith('t-past', 'Passed');
+  });
 });

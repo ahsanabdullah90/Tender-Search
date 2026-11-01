@@ -112,4 +112,66 @@ describe('AppShell component', () => {
     const runScanBtn = screen.getByRole('button', { name: /Scanning/ });
     expect(runScanBtn).toBeDisabled();
   });
+
+  it('handles scanning when currentPortal is null and handles not synced yet state', async () => {
+    const user = userEvent.setup();
+    const handleRunScan = vi.fn();
+    const handleThemePref = vi.fn();
+
+    const notSyncedScan: ScanStatus = {
+      isScanning: false,
+      currentPortal: null,
+      progressPercent: 0,
+      completedPortals: 0,
+      totalPortals: 18,
+      newTendersFound: 0,
+      corrigendaFound: 0,
+      lastScanTimestamp: null
+    };
+
+    const { rerender } = render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={notSyncedScan}
+        onRunScan={handleRunScan}
+        themePref="system"
+        onThemePref={handleThemePref}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByText('Not synced yet')).toBeInTheDocument();
+
+    // Trigger run scan
+    const scanBtn = screen.getByRole('button', { name: /Scan now/i });
+    await user.click(scanBtn);
+    expect(handleRunScan).toHaveBeenCalledTimes(1);
+
+    // Click light theme radio
+    const lightRadio = screen.getByRole('radio', { name: 'Light' });
+    await user.click(lightRadio);
+    expect(handleThemePref).toHaveBeenCalledWith('light');
+
+    // Scanning with null currentPortal
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...notSyncedScan,
+          isScanning: true,
+          progressPercent: 20
+        }}
+        onRunScan={handleRunScan}
+        themePref="system"
+        onThemePref={handleThemePref}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByText(/Scanning \(20%\)/)).toBeInTheDocument();
+  });
 });

@@ -412,6 +412,7 @@ const isDirectRun = Boolean(
    process.argv[1].endsWith('server.js'))
 );
 
+/* v8 ignore next 3 - direct execution branch is impossible by construction when imported by Vitest */
 if (isDirectRun) {
   startServer();
 }

@@ -103,6 +103,82 @@ describe('PortalCredentialsModal component', () => {
     await waitFor(() => {
       expect(screen.getByText('Authentication successful!')).toBeInTheDocument();
     });
+
+    // Advance timer past the 1200ms auto-close delay
+    await waitFor(() => {
+      expect(handleSuccess).toHaveBeenCalledTimes(1);
+      expect(handleClose).toHaveBeenCalledTimes(1);
+    }, { timeout: 2000 });
+  });
+
+  it('toggles password visibility, updates loginUrl, and handles escape key', async () => {
+    const user = userEvent.setup();
+    const handleClose = vi.fn();
+
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ username: 'user1', loginUrl: 'https://example.com/login', hasPassword: false })
+    } as any);
+
+    render(
+      <PortalCredentialsModal
+        portal={samplePortal}
+        isOpen={true}
+        onClose={handleClose}
+        onSuccess={vi.fn()}
+      />
+    );
+
+    const userInput = await screen.findByPlaceholderText('e.g. yourname@company.com');
+    expect(userInput).toBeInTheDocument();
+
+    // Toggle password visibility
+    const passInput = screen.getByPlaceholderText(/Enter password or access key/i) as HTMLInputElement;
+    expect(passInput.type).toBe('password');
+
+    const toggleBtn = passInput.parentElement?.querySelector('button') as HTMLButtonElement;
+    await user.click(toggleBtn);
+    expect(passInput.type).toBe('text');
+
+    await user.click(toggleBtn);
+    expect(passInput.type).toBe('password');
+
+    // Change Login URL
+    const urlInput = screen.getByDisplayValue('https://example.com/login');
+    await user.clear(urlInput);
+    await user.type(urlInput, 'https://newlogin.pk');
+    expect(screen.getByDisplayValue('https://newlogin.pk')).toBeInTheDocument();
+
+    // Press Escape to close modal
+    const event = new KeyboardEvent('keydown', { key: 'Escape' });
+    window.dispatchEvent(event);
+    expect(handleClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to portal defaults when credentials fetch fails', async () => {
+    vi.spyOn(global, 'fetch').mockRejectedValueOnce(new Error('Network error'));
+
+    const otherPortal: PortalHealth = {
+      ...samplePortal,
+      portal_id: 'epads',
+      portal_name: 'Federal PPRA',
+      auth_username: 'fed_user',
+      login_url: 'https://epms.ppra.gov.pk/login',
+      has_credentials: true
+    };
+
+    render(
+      <PortalCredentialsModal
+        portal={otherPortal}
+        isOpen={true}
+        onClose={vi.fn()}
+        onSuccess={vi.fn()}
+      />
+    );
+
+    await screen.findByDisplayValue('fed_user');
+    expect(screen.getByDisplayValue('https://epms.ppra.gov.pk/login')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/leave blank to keep current/i)).toBeInTheDocument();
   });
 
   it('displays error message when authentication fails', async () => {
@@ -138,6 +214,66 @@ describe('PortalCredentialsModal component', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Invalid credentials provided')).toBeInTheDocument();
+    });
+  });
+
+  it('handles credential fetch failure on mount and uses default portal fallback URLs', async () => {
+    vi.spyOn(global, 'fetch').mockRejectedValueOnce(new Error('Fetch failed'));
+
+    const portalWithoutLoginUrl: PortalHealth = {
+      ...samplePortal,
+      portal_id: 'punjab_eproc',
+      portal_name: 'Punjab PPRA',
+      login_url: undefined,
+      tenders_url: 'https://eproc.punjab.gov.pk/tenders'
+    };
+
+    render(
+      <PortalCredentialsModal
+        portal={portalWithoutLoginUrl}
+        isOpen={true}
+        onClose={vi.fn()}
+        onSuccess={vi.fn()}
+      />
+    );
+
+    const loginInput = await screen.findByDisplayValue('https://eproc.punjab.gov.pk/tenders');
+    expect(loginInput).toBeInTheDocument();
+  });
+
+  it('handles authentication error without message string', async () => {
+    const user = userEvent.setup();
+
+    vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({})
+      } as any)
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({ success: false }) // no message
+      } as any);
+
+    render(
+      <PortalCredentialsModal
+        portal={samplePortal}
+        isOpen={true}
+        onClose={vi.fn()}
+        onSuccess={vi.fn()}
+      />
+    );
+
+    const userInput = await screen.findByPlaceholderText('e.g. yourname@company.com');
+    const passInput = screen.getByPlaceholderText(/Enter password or access key/i);
+
+    await user.type(userInput, 'test@example.com');
+    await user.type(passInput, 'pass');
+
+    const submitBtn = screen.getByRole('button', { name: /Save & Log In/i });
+    await user.click(submitBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to authenticate portal credentials')).toBeInTheDocument();
     });
   });
 });

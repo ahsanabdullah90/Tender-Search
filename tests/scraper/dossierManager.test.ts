@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
@@ -21,6 +21,12 @@ describe('dossierManager', () => {
         } else if (req.url === '/redirect') {
           res.writeHead(302, { Location: '/download/rfp.pdf' });
           res.end();
+        } else if (req.url === '/infinite-redirect') {
+          res.writeHead(302, { Location: '/infinite-redirect' });
+          res.end();
+        } else if (req.url?.startsWith('/download/file.')) {
+          res.writeHead(200);
+          res.end(Buffer.from('dummy file'));
         } else if (req.url === '/error500') {
           res.writeHead(500);
           res.end('Server Error');
@@ -101,5 +107,49 @@ describe('dossierManager', () => {
   it('returns null on invalid URL', async () => {
     const dossier = await downloadAndCacheDossier('t-fail', 'invalid-not-a-url', 'Invalid');
     expect(dossier).toBeNull();
+  });
+
+  it('handles infinite redirects and aborts after 5 redirects', async () => {
+    const dossier = await downloadAndCacheDossier('t-redirect-loop', `${serverBaseUrl}/infinite-redirect`, 'Loop');
+    expect(dossier).toBeNull();
+  });
+
+  it('handles timeout when download times out', async () => {
+    const origGet = http.get;
+    const spy = vi.spyOn(http, 'get').mockImplementationOnce((url: any, opts: any, cb: any) => {
+      const req = origGet(url, opts, cb);
+      setImmediate(() => req.emit('timeout'));
+      return req;
+    });
+
+    const dossier = await downloadAndCacheDossier('t-timeout', `${serverBaseUrl}/download/rfp.pdf`, 'TimeoutDoc');
+    expect(dossier).toBeNull();
+    spy.mockRestore();
+  });
+
+  it('determines appropriate MIME types for various file formats', async () => {
+    const tenderId = 't-mime-types';
+    const formats = ['jpg', 'png', 'doc', 'docx', 'xls', 'xlsx', 'bin'];
+
+    for (const fmt of formats) {
+      const dossier = await downloadAndCacheDossier(tenderId, `${serverBaseUrl}/download/file.${fmt}`, `document.${fmt}`);
+      expect(dossier).not.toBeNull();
+      if (fmt === 'jpg') expect(dossier?.mimeType).toBe('image/jpeg');
+      if (fmt === 'png') expect(dossier?.mimeType).toBe('image/png');
+      if (fmt === 'doc') expect(dossier?.mimeType).toBe('application/msword');
+      if (fmt === 'docx') expect(dossier?.mimeType).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      if (fmt === 'xls') expect(dossier?.mimeType).toBe('application/vnd.ms-excel');
+      if (fmt === 'xlsx') expect(dossier?.mimeType).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      if (fmt === 'bin') expect(dossier?.mimeType).toBe('application/octet-stream');
+    }
+  });
+
+  it('creates DOSSIERS_ROOT directory if it does not exist on module load', async () => {
+    if (fs.existsSync(DOSSIERS_DIR)) {
+      fs.rmSync(DOSSIERS_DIR, { recursive: true, force: true });
+    }
+    vi.resetModules();
+    await import('../../src/server/dossierManager.js');
+    expect(fs.existsSync(DOSSIERS_DIR)).toBe(true);
   });
 });

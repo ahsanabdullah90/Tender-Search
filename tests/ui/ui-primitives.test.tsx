@@ -145,6 +145,10 @@ describe('UI Primitives (src/ui/index.tsx)', () => {
       await user.click(closeBtn);
       expect(handleClose).toHaveBeenCalledTimes(1);
 
+      // Press non-Escape key, should not trigger close
+      fireEvent.keyDown(window, { key: 'Tab' });
+      expect(handleClose).toHaveBeenCalledTimes(1);
+
       // Press Escape key
       fireEvent.keyDown(window, { key: 'Escape' });
       expect(handleClose).toHaveBeenCalledTimes(2);
@@ -210,6 +214,42 @@ describe('UI Primitives (src/ui/index.tsx)', () => {
 
       await user.click(screen.getByText('Action 1'));
       expect(screen.queryByText('Action 1')).not.toBeInTheDocument();
+    });
+
+    it('closes Popover on Escape key and supports align="end"', async () => {
+      const user = userEvent.setup();
+
+      render(
+        <div>
+          <button>Outside</button>
+          <Popover
+            align="end"
+            trigger={({ toggle }) => (
+              <button onClick={toggle}>AlignedMenu</button>
+            )}
+          >
+            {() => <span>Dropdown Content</span>}
+          </Popover>
+        </div>
+      );
+
+      const trigger = screen.getByText('AlignedMenu');
+      await user.click(trigger);
+      expect(screen.getByText('Dropdown Content')).toBeInTheDocument();
+
+      // Press non-Escape key, should not close
+      fireEvent.keyDown(document, { key: 'ArrowDown' });
+      expect(screen.getByText('Dropdown Content')).toBeInTheDocument();
+
+      // Press Escape
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.queryByText('Dropdown Content')).not.toBeInTheDocument();
+
+      // Reopen and click outside
+      await user.click(trigger);
+      expect(screen.getByText('Dropdown Content')).toBeInTheDocument();
+      fireEvent.mouseDown(screen.getByText('Outside'));
+      expect(screen.queryByText('Dropdown Content')).not.toBeInTheDocument();
     });
   });
 });

@@ -154,7 +154,7 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
             {/* Login URL */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                <label htmlFor="portal-cred-login-url" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                   Login Page URL
                 </label>
                 <a
@@ -168,6 +168,7 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
                 </a>
               </div>
               <input
+                id="portal-cred-login-url"
                 type="url"
                 value={loginUrl}
                 onChange={e => setLoginUrl(e.target.value)}
@@ -179,10 +180,11 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
 
             {/* Username / Email */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+              <label htmlFor="portal-cred-username" className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                 {portal.portal_id === 'tender_services' ? 'Registered Email / Username' : 'Username / Email'}
               </label>
               <input
+                id="portal-cred-username"
                 type="text"
                 value={username}
                 onChange={e => setUsername(e.target.value)}
@@ -200,7 +202,7 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
             {/* Password / Access Key */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                <label htmlFor="portal-cred-password" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                   Password / Key
                 </label>
                 {hasExistingPassword && !password && (
@@ -211,6 +213,7 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
               </div>
               <div className="relative">
                 <input
+                  id="portal-cred-password"
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={e => setPassword(e.target.value)}

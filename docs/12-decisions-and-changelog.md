@@ -41,4 +41,5 @@
   - Implemented strict safety guard preventing tests from touching the production `data/` directory.
 - **Documentation**:
   - Authored comprehensive documentation in `docs/` (`01-overview.md` through `12-decisions-and-changelog.md`).
+  - Archived earlier redesign notes to [`docs/archive/REDESIGN-HANDOVER.md`](archive/REDESIGN-HANDOVER.md).
   - Updated root `README.md`.

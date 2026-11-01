@@ -32,7 +32,7 @@ export function calculateStringSimilarity(str1: string, str2: string): number {
   }
 
   const total = (s1.length - 1) + (s2.length - 1);
-  return total > 0 ? (2.0 * intersection) / total : 0;
+  return (2.0 * intersection) / total;
 }
 
 export function normalizeText(text: string): string {
@@ -60,13 +60,12 @@ export function isValidReferenceNo(ref?: string | null): boolean {
   const trimmed = ref.trim();
   if (trimmed.length < 4 || trimmed.length > 40) return false;
 
-  // Must contain at least one digit (genuine procurement references almost universally contain numbers)
-  if (!/\d/.test(trimmed)) return false;
-
-  // Blacklist common generic terms that accidentally match regex
   const lower = trimmed.toLowerCase();
   const genericWords = ['tender', 'notice', 'procurement', 'tenders', 'quotation', 'corrigendum', 'advertisement', 'bidding'];
   if (genericWords.includes(lower)) return false;
+
+  // Must contain at least one digit (genuine procurement references almost universally contain numbers)
+  if (!/\d/.test(trimmed)) return false;
 
   return true;
 }

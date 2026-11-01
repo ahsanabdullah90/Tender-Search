@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -279,6 +279,30 @@ describe('Database and Repository Layer', () => {
       acknowledgeCorrigendum('corr-1');
       expect(getUnacknowledgedCorrigenda().length).toBe(0);
     });
+
+    it('handles multiple corrigenda and only clears tender flag when all are acknowledged', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, has_corrigendum)
+        VALUES ('t-corr-multi', 't-corr-multi', 'epads', 'Federal PPRA', 'REF-M', 'Multi Corr', 'Gov Org', 'https://example.com', 1)
+      `).run();
+      db.prepare(`
+        INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
+        VALUES ('corr-m1', 't-corr-multi', 'closing_date', '2026-05-10', '2026-05-20', 0),
+               ('corr-m2', 't-corr-multi', 'document', 'old.pdf', 'new.pdf', 0)
+      `).run();
+
+      expect(acknowledgeCorrigendum('non-existent-corr')).toBe(false);
+
+      // Acknowledge first corrigendum
+      expect(acknowledgeCorrigendum('corr-m1')).toBe(true);
+      const tenderMid = getTenderById('t-corr-multi');
+      expect(tenderMid?.has_corrigendum).toBe(1);
+
+      // Acknowledge second corrigendum
+      expect(acknowledgeCorrigendum('corr-m2')).toBe(true);
+      const tenderAfter = getTenderById('t-corr-multi');
+      expect(tenderAfter?.has_corrigendum).toBe(0);
+    });
   });
 
   describe('Domain Tracks Management & Rescoring', () => {
@@ -435,6 +459,88 @@ describe('Database and Repository Layer', () => {
       expect(result.tenders).toBeGreaterThanOrEqual(1);
       expect(result.freed_bytes).toBeGreaterThan(0);
       expect(fs.existsSync(tenderDossierDir)).toBe(false);
+
+      // Passed tender without directory, nested directory, and path traversal attempt
+      const nestedDir = path.join(DOSSIERS_DIR, 't-passed-nested', 'sub');
+      fs.mkdirSync(nestedDir, { recursive: true });
+      fs.writeFileSync(path.join(nestedDir, 'spec.pdf'), 'nested content');
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, pipeline_status)
+        VALUES ('t-passed-nested', 't-passed-nested', 'epads', 'PPRA', 'REF-PN', 'Nested', 'Org', 'http://1', 'Passed'),
+               ('t-passed-nodir', 't-passed-nodir', 'epads', 'PPRA', 'REF-P0', 'No Dir', 'Org', 'http://2', 'Passed'),
+               ('../escape-id', '../escape-id', 'epads', 'PPRA', 'REF-PE', 'Escape', 'Org', 'http://3', 'Passed')
+      `).run();
+
+      const stats = getStorageStats();
+      expect(stats.passed_bytes).toBeGreaterThan(0);
+
+      const result2 = pruneDossiersForPassed();
+      expect(result2.tenders).toBeGreaterThanOrEqual(1);
+    });
+
+    it('handles backup failures gracefully', async () => {
+      const originalBackup = db.backup;
+      (db as any).backup = vi.fn().mockRejectedValue(new Error('Disk full'));
+      const backupResult = await backupNow();
+      expect(backupResult).toBeNull();
+      (db as any).backup = originalBackup;
+    });
+
+    it('prunes daily backups older than 14 days in backupDatabase', async () => {
+      const oldBackupPath = path.join(BACKUPS_DIR, 'tender_tracker_backup_old.db');
+      fs.writeFileSync(oldBackupPath, 'old backup');
+      const fifteenDaysAgo = Date.now() - 15 * 24 * 60 * 60 * 1000;
+      fs.utimesSync(oldBackupPath, new Date(fifteenDaysAgo), new Date(fifteenDaysAgo));
+
+      const res = await backupDatabase();
+      expect(res.success).toBe(true);
+      expect(fs.existsSync(oldBackupPath)).toBe(false);
+    });
+
+    it('skips daily backup if today already has a backup', async () => {
+      const first = await backupDatabase();
+      expect(first.success).toBe(true);
+      const second = await backupDatabase();
+      expect(second.success).toBe(true);
+      expect(second.skipped).toBe(true);
+    });
+
+    it('sorts listBackups in descending order of created_at', async () => {
+      const b1 = path.join(BACKUPS_DIR, 'tender_tracker_20261010_manual.db');
+      const b2 = path.join(BACKUPS_DIR, 'tender_tracker_20261020_manual.db');
+      fs.writeFileSync(b1, 'backup 1');
+      fs.writeFileSync(b2, 'backup 2');
+      fs.utimesSync(b1, new Date('2026-10-10T10:00:00Z'), new Date('2026-10-10T10:00:00Z'));
+      fs.utimesSync(b2, new Date('2026-10-20T10:00:00Z'), new Date('2026-10-20T10:00:00Z'));
+
+      const backups = listBackups();
+      expect(backups.length).toBeGreaterThanOrEqual(2);
+      expect(backups[0].created_at >= backups[1].created_at).toBe(true);
+    });
+
+    it('handles corrupted JSON safely in safeJsonParse', () => {
+      db.prepare(`
+        INSERT INTO domain_tracks (id, name, positive_keywords, negative_keywords, is_active)
+        VALUES ('track-corrupt', 'Corrupt Track', '{invalid-json', '["bad"]', 1)
+      `).run();
+
+      const tracks = getAllDomainTracks();
+      const corrupt = tracks.find(t => t.id === 'track-corrupt');
+      expect(corrupt).toBeDefined();
+      expect(corrupt?.positive_keywords).toEqual([]);
+    });
+
+    it('returns success: false when backupDatabase throws', async () => {
+      const originalBackup = db.backup;
+      (db as any).backup = vi.fn().mockRejectedValue(new Error('Database locked'));
+      // Remove today's backup file if it exists so it doesn't skip
+      const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 8);
+      const todayBackup = path.resolve(BACKUPS_DIR, `tender_tracker_${timestamp}.db`);
+      if (fs.existsSync(todayBackup)) fs.unlinkSync(todayBackup);
+
+      const res = await backupDatabase();
+      expect(res.success).toBe(false);
+      (db as any).backup = originalBackup;
     });
   });
 
@@ -490,6 +596,23 @@ describe('Database and Repository Layer', () => {
 
       expect(match.isDuplicate).toBe(false);
       expect(match.similarity).toBe(0);
+    });
+
+    it('matches undated tenders with similar title when closingDate is null', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, closing_date, created_at)
+        VALUES ('canon-4', 'canon-4', 'wapda', 'WAPDA', 'REF-44', 'Grid Substation Automation System', 'WAPDA', 'http://4', NULL, datetime('now', '-2 days'))
+      `).run();
+
+      const match = findCanonicalMatch({
+        referenceNo: null,
+        title: 'Grid Substation Automation System Procurement',
+        organization: 'WAPDA',
+        closingDate: null
+      });
+
+      expect(match.isDuplicate).toBe(true);
+      expect(match.canonicalId).toBe('canon-4');
     });
   });
 });

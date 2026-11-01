@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
@@ -467,6 +467,120 @@ describe('Server API Routes', () => {
       expect(res.body.message).toContain('All tenders wiped');
 
       expect(getAllTenders().length).toBe(0);
+    });
+  });
+
+  describe('Server SSE & Startup Integration', () => {
+    it('serves SSE scan progress and closes cleanly', async () => {
+      const http = await import('http');
+
+      await new Promise<void>((resolve) => {
+        const srv = app.listen(0, '127.0.0.1', () => {
+          const port = (srv.address() as any).port;
+          const req = http.get(`http://127.0.0.1:${port}/api/scan/progress`, (res: any) => {
+            expect(res.headers['content-type']).toBe('text/event-stream');
+            res.on('data', (chunk: any) => {
+              const str = chunk.toString();
+              expect(str).toContain('data:');
+              req.destroy();
+              srv.close(() => resolve());
+            });
+          });
+        });
+      });
+    });
+
+    it('returns 500 when backup creation fails', async () => {
+      const dbModule = await import('../../src/server/db.js');
+      const orig = dbModule.db.backup;
+      (dbModule.db as any).backup = vi.fn().mockRejectedValue(new Error('fail'));
+
+      const res = await request(app).post('/api/backups');
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Backup failed');
+
+      (dbModule.db as any).backup = orig;
+    });
+
+    it('starts server in production mode, serves fallback SPA index, and handles clean exit', async () => {
+      const { startServer } = await import('../../server.js');
+      const http = await import('http');
+      const prevEnv = process.env.NODE_ENV;
+      const prevPort = process.env.PORT;
+      process.env.NODE_ENV = 'production';
+      process.env.PORT = '0';
+
+      const srv = await startServer();
+      await new Promise<void>((resolve) => srv.on('listening', resolve));
+      expect(srv.listening).toBe(true);
+
+      const port = (srv.address() as any).port;
+      await new Promise<void>((resolve) => {
+        http.get(`http://127.0.0.1:${port}/client-spa-route`, (res: any) => {
+          expect(res.statusCode).toBe(200);
+          expect(res.headers['content-type']).toContain('text/html');
+          resolve();
+        });
+      });
+
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+
+      process.env.NODE_ENV = prevEnv;
+      process.env.PORT = prevPort;
+    });
+
+    it('starts server in development mode and integrates Vite middleware', async () => {
+      const { startServer } = await import('../../server.js');
+      const prevEnv = process.env.NODE_ENV;
+      const prevPort = process.env.PORT;
+      process.env.NODE_ENV = 'development';
+      process.env.PORT = '0';
+
+      const srv = await startServer();
+      await new Promise<void>((resolve) => srv.on('listening', resolve));
+      expect(srv.listening).toBe(true);
+
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+      process.env.NODE_ENV = prevEnv;
+      process.env.PORT = prevPort;
+    });
+
+    it('executes graceful shutdown on SIGINT', async () => {
+      const { startServer } = await import('../../server.js');
+      const dbModule = await import('../../src/server/db.js');
+      const prevEnv = process.env.NODE_ENV;
+      const prevPort = process.env.PORT;
+      process.env.NODE_ENV = 'production';
+      process.env.PORT = '0';
+
+      const srv = await startServer();
+      await new Promise<void>((resolve) => srv.on('listening', resolve));
+
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as any);
+      const closeSpy = vi.spyOn(dbModule.db, 'close').mockImplementation(() => dbModule.db);
+
+      const sigintListeners = process.listeners('SIGINT');
+      const handler = sigintListeners[sigintListeners.length - 1];
+      expect(handler).toBeDefined();
+
+      await new Promise<void>((resolve) => {
+        const origSrvClose = srv.close.bind(srv);
+        srv.close = ((cb: any) => {
+          origSrvClose(() => {
+            if (cb) cb();
+            resolve();
+          });
+          return srv;
+        }) as any;
+        handler('SIGINT');
+      });
+
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      process.removeListener('SIGINT', handler);
+      closeSpy.mockRestore();
+      exitSpy.mockRestore();
+      process.env.NODE_ENV = prevEnv;
+      process.env.PORT = prevPort;
     });
   });
 });
