@@ -475,6 +475,111 @@ describe('Server API Routes', () => {
     });
   });
 
+  describe('AI Configuration, Manual Tenders & Attachments API', () => {
+    it('saves, masks, and clears Google AI Studio API key via /api/ai/config and /api/ai/status', async () => {
+      const saveRes = await request(app)
+        .post('/api/ai/config')
+        .send({ apiKey: 'AIzaSyTestKey1234567890' });
+      expect(saveRes.status).toBe(200);
+      expect(saveRes.body.configured).toBe(true);
+      expect(saveRes.body.maskedKey).toBe('AIza••••7890');
+
+      const statusRes = await request(app).get('/api/ai/status');
+      expect(statusRes.status).toBe(200);
+      expect(statusRes.body.configured).toBe(true);
+      expect(statusRes.body.maskedKey).toBe('AIza••••7890');
+
+      const clearRes = await request(app)
+        .post('/api/ai/config')
+        .send({ apiKey: '' });
+      expect(clearRes.status).toBe(200);
+      expect(clearRes.body.configured).toBe(false);
+    });
+
+    it('creates a manual tender via POST /api/tenders with automatic track matching and attachment', async () => {
+      const fakePdfBase64 = Buffer.from('%PDF-1.4 Manual Tender Document').toString('base64');
+      const res = await request(app)
+        .post('/api/tenders')
+        .send({
+          title: 'Procurement of Solar Photovoltaic Inverter Systems',
+          organization: 'Punjab Energy Department',
+          reference_no: 'PED-SOLAR-2026-09',
+          closing_date: '2026-12-15',
+          estimated_value: 'PKR 32,000,000',
+          description: 'Supply and installation of 150kW hybrid solar inverters.',
+          fileBase64: fakePdfBase64,
+          filename: 'solar_notice.pdf',
+          mimeType: 'application/pdf'
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.tender.title).toContain('Solar Photovoltaic Inverter');
+      expect(res.body.tender.closing_date_formatted).toContain('15 Dec 2026');
+      expect(res.body.tender.domain_tracks.length).toBeGreaterThan(0);
+      expect(res.body.tender.cached_dossiers.length).toBe(1);
+    });
+
+    it('updates tender fields via PATCH /api/tenders/:id', async () => {
+      insertTestTender('t-edit-1', { title: 'Initial Title', description: '' });
+
+      const res = await request(app)
+        .patch('/api/tenders/t-edit-1')
+        .send({
+          title: 'Updated Tender Title',
+          organization: 'Updated Dept',
+          reference_no: 'REF-UPD-99',
+          closing_date: '2026-11-30',
+          estimated_value: 'PKR 12,500,000',
+          description: '• Scope: Updated scope details\n• Eligibility: PEC C4 required'
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.tender.title).toBe('Updated Tender Title');
+      expect(res.body.tender.reference_no).toBe('REF-UPD-99');
+      expect(res.body.tender.closing_date_formatted).toContain('30 Nov 2026');
+      expect(res.body.tender.description).toContain('Updated scope details');
+    });
+
+    it('uploads manual attachment to existing tender via POST /api/tenders/:id/attachments', async () => {
+      insertTestTender('t-attach-1', { title: 'Tender needing notice image' });
+
+      const fakePngBase64 = Buffer.from('fake-png-image-bytes').toString('base64');
+      const res = await request(app)
+        .post('/api/tenders/t-attach-1/attachments')
+        .send({
+          filename: 'notice_scan.png',
+          mimeType: 'image/png',
+          dataBase64: fakePngBase64,
+          label: 'Scanned Newspaper Notice',
+          runAi: false
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.tender.cached_dossiers.length).toBe(1);
+      expect(res.body.tender.cached_dossiers[0].label).toBe('Scanned Newspaper Notice');
+    });
+
+    it('returns helpful 400 when AI analyze or extract-file is called without API key configured', async () => {
+      await request(app).post('/api/ai/config').send({ apiKey: '' });
+      insertTestTender('t-ai-no-key', { title: 'Tender for AI check' });
+
+      const analyzeRes = await request(app).post('/api/tenders/t-ai-no-key/analyze');
+      expect(analyzeRes.status).toBe(400);
+      expect(analyzeRes.body.error).toContain('Google AI Studio API key is not configured');
+
+      const extractRes = await request(app)
+        .post('/api/ai/extract-file')
+        .send({
+          dataBase64: Buffer.from('test').toString('base64'),
+          mimeType: 'image/png'
+        });
+      expect(extractRes.status).toBe(400);
+      expect(extractRes.body.error).toContain('Google AI Studio API key is not configured');
+    });
+  });
+
   describe('Server SSE & Startup Integration', () => {
     it('serves SSE scan progress and closes cleanly', async () => {
       const http = await import('http');

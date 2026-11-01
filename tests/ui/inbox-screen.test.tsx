@@ -516,4 +516,115 @@ describe('InboxScreen component', () => {
     await user.click(passBtn);
     expect(handleStatusChange).toHaveBeenCalledWith('t-past', 'Passed');
   });
+
+  it('supports AI extraction, inline detail editing, inline image/PDF preview, and manual tender creation', async () => {
+    const user = userEvent.setup();
+    const onTenderUpdated = vi.fn();
+    const onTenderCreated = vi.fn();
+
+    const tenderWithMedia: Tender = {
+      ...sampleTenders[0],
+      description: '',
+      cached_dossiers: [
+        {
+          label: 'Notice Image',
+          localPath: '/api/dossiers/tender-1/notice.png',
+          originalUrl: 'manual://notice.png',
+          mimeType: 'image/png',
+          sha256: 'img123'
+        },
+        {
+          label: 'Bidding Document PDF',
+          localPath: '/api/dossiers/tender-1/bid.pdf',
+          originalUrl: 'manual://bid.pdf',
+          mimeType: 'application/pdf',
+          sha256: 'pdf123'
+        }
+      ]
+    };
+
+    const fetchSpy = vi.spyOn(global, 'fetch')
+      // 1. Extract with AI response
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          message: 'Tender summary extracted with AI.',
+          tender: { ...tenderWithMedia, description: '• Scope: 500kW Solar PV\n• Eligibility: PEC C3' }
+        })
+      } as any)
+      // 2. Edit details PATCH response
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          tender: { ...tenderWithMedia, title: 'Edited Solar Tender', description: '• Scope: Updated manually' }
+        })
+      } as any)
+      // 3. Create manual tender POST response
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          tender: { ...sampleTenders[0], id: 'manual-new-1', title: 'Manual Hospital Generator Tender' }
+        })
+      } as any);
+
+    render(
+      <InboxScreen
+        tenders={[tenderWithMedia]}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+        onTenderUpdated={onTenderUpdated}
+        onTenderCreated={onTenderCreated}
+      />
+    );
+
+    // Honest fallback message when description is empty
+    expect(screen.getByText(/No detailed scope was provided on the portal listing page/i)).toBeInTheDocument();
+
+    // Inline image preview is rendered
+    expect(screen.getByAltText('Notice Image')).toBeInTheDocument();
+
+    // Toggle PDF preview
+    const previewPdfBtn = screen.getByRole('button', { name: 'Preview PDF' });
+    await user.click(previewPdfBtn);
+    expect(screen.getByTitle('Bidding Document PDF')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Hide preview' }));
+
+    // Trigger Extract with AI
+    const aiBtn = screen.getByRole('button', { name: /Extract with AI/i });
+    await user.click(aiBtn);
+    expect(onTenderUpdated).toHaveBeenCalled();
+
+    // Open inline Edit details form and save
+    const editBtn = screen.getByRole('button', { name: /Edit details/i });
+    await user.click(editBtn);
+    const saveEditBtn = screen.getByRole('button', { name: /Save changes/i });
+    await user.click(saveEditBtn);
+    expect(onTenderUpdated).toHaveBeenCalledTimes(2);
+
+    // Open Add tender modal and create a manual tender
+    const addTenderBtn = screen.getByRole('button', { name: /Add tender/i });
+    await user.click(addTenderBtn);
+    const titleInput = screen.getByPlaceholderText(/Procurement of Solar PV System/i);
+    await user.type(titleInput, 'Manual Hospital Generator Tender');
+    const createBtn = screen.getByRole('button', { name: /Create tender/i });
+    await user.click(createBtn);
+    expect(onTenderCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'manual-new-1' }));
+
+    fetchSpy.mockRestore();
+  });
 });

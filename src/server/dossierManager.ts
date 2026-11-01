@@ -77,6 +77,52 @@ export async function downloadAndCacheDossier(
   }
 }
 
+/**
+ * Saves an uploaded or pasted file buffer directly to data/dossiers/{tenderId}/
+ */
+export function saveManualDossier(
+  tenderId: string,
+  originalFilename: string,
+  buffer: Buffer,
+  label?: string,
+  explicitMimeType?: string
+): CachedDossier {
+  const tenderDir = path.resolve(DOSSIERS_ROOT, tenderId);
+  if (!fs.existsSync(tenderDir)) {
+    fs.mkdirSync(tenderDir, { recursive: true });
+  }
+
+  let safeFilename = (originalFilename || 'attachment.png').replace(/[^a-zA-Z0-9._-]/g, '_');
+  if (!safeFilename.includes('.')) {
+    const ext = explicitMimeType === 'application/pdf' ? '.pdf' : explicitMimeType === 'image/png' ? '.png' : '.jpg';
+    safeFilename += ext;
+  }
+
+  let finalPath = path.resolve(tenderDir, safeFilename);
+  const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+
+  if (fs.existsSync(finalPath)) {
+    const ext = path.extname(safeFilename);
+    const base = path.basename(safeFilename, ext);
+    safeFilename = `${base}_${Date.now()}${ext}`;
+    finalPath = path.resolve(tenderDir, safeFilename);
+  }
+
+  fs.writeFileSync(finalPath, buffer);
+
+  const mimeType = explicitMimeType || getMimeType(safeFilename);
+  const webUrl = `/api/dossiers/${encodeURIComponent(tenderId)}/${encodeURIComponent(safeFilename)}`;
+
+  return {
+    label: label?.trim() || path.basename(safeFilename, path.extname(safeFilename)).replace(/[_-]+/g, ' '),
+    localPath: webUrl,
+    originalUrl: webUrl,
+    mimeType,
+    sha256: hash,
+    sizeBytes: buffer.length
+  };
+}
+
 function fetchFileBuffer(url: string, cookie?: string, redirectCount: number = 0): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {

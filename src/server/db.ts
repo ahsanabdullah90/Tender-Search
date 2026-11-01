@@ -129,6 +129,11 @@ export function initDatabase() {
       access_mode TEXT DEFAULT 'public',
       verified_status TEXT
     );
+    -- 6. App Settings (Google AI Studio API Key & Preferences)
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
   `);
 
   seedDefaultDomainTracks();
@@ -136,6 +141,39 @@ export function initDatabase() {
   try { db.prepare('ALTER TABLE tenders ADD COLUMN result_expected_date TEXT').run(); } catch {}
 
   seedPortalHealth();
+}
+
+export function getAppSetting(key: string): string | null {
+  try {
+    const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setAppSetting(key: string, value: string | null): void {
+  db.exec('CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)');
+  if (value === null || !value.trim()) {
+    db.prepare('DELETE FROM app_settings WHERE key = ?').run(key);
+  } else {
+    db.prepare(`
+      INSERT INTO app_settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value.trim());
+  }
+}
+
+export function getGeminiApiKey(): string | null {
+  const dbKey = getAppSetting('gemini_api_key');
+  if (dbKey && dbKey.trim() && dbKey !== 'MY_GEMINI_API_KEY') {
+    return dbKey.trim();
+  }
+  const envKey = process.env.GEMINI_API_KEY;
+  if (envKey && envKey.trim() && envKey !== 'MY_GEMINI_API_KEY') {
+    return envKey.trim();
+  }
+  return null;
 }
 
 function seedDefaultDomainTracks() {
@@ -346,6 +384,103 @@ export function updateTenderResultDate(id: string, date: string | null): boolean
     UPDATE tenders SET result_expected_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
   `).run(date || null, id);
   return res.changes > 0;
+}
+
+export function updateTenderFields(
+  id: string,
+  fields: Partial<{
+    title: string;
+    organization: string;
+    reference_no: string | null;
+    closing_date: string | null;
+    closing_date_formatted: string;
+    estimated_value: string | null;
+    description: string;
+    direct_url: string;
+    location: string | null;
+    cached_dossiers: any[];
+  }>
+): Tender | null {
+  const existing = getTenderById(id);
+  if (!existing) return null;
+
+  db.prepare(`
+    UPDATE tenders
+    SET title = ?,
+        organization = ?,
+        reference_no = ?,
+        closing_date = ?,
+        closing_date_formatted = ?,
+        estimated_value = ?,
+        description = ?,
+        direct_url = ?,
+        location = ?,
+        cached_dossiers = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    fields.title !== undefined ? fields.title : existing.title,
+    fields.organization !== undefined ? fields.organization : existing.organization,
+    fields.reference_no !== undefined ? fields.reference_no : existing.reference_no,
+    fields.closing_date !== undefined ? fields.closing_date : existing.closing_date,
+    fields.closing_date_formatted !== undefined ? fields.closing_date_formatted : existing.closing_date_formatted,
+    fields.estimated_value !== undefined ? fields.estimated_value : existing.estimated_value,
+    fields.description !== undefined ? fields.description : existing.description,
+    fields.direct_url !== undefined ? fields.direct_url : existing.direct_url,
+    fields.location !== undefined ? fields.location : existing.location,
+    fields.cached_dossiers !== undefined ? JSON.stringify(fields.cached_dossiers) : JSON.stringify(existing.cached_dossiers || []),
+    id
+  );
+
+  return getTenderById(id);
+}
+
+export function createManualTender(input: {
+  title: string;
+  organization: string;
+  reference_no?: string | null;
+  portal_name?: string;
+  direct_url?: string;
+  closing_date?: string | null;
+  closing_date_formatted?: string;
+  estimated_value?: string | null;
+  location?: string | null;
+  description?: string;
+  domain_tracks?: string[];
+  matched_keywords?: string[];
+  match_score?: number;
+  cached_dossiers?: any[];
+}): Tender {
+  const id = `tender-manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const today = new Date().toISOString().slice(0, 10);
+
+  db.prepare(`
+    INSERT INTO tenders (
+      id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
+      domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
+      estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status
+    ) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'New Opportunity')
+  `).run(
+    id,
+    id,
+    input.reference_no || null,
+    input.title.trim(),
+    input.organization.trim(),
+    input.portal_name?.trim() || 'Manual Entry',
+    input.direct_url?.trim() || '#',
+    JSON.stringify(input.domain_tracks || []),
+    JSON.stringify(input.matched_keywords || []),
+    input.match_score ?? 80,
+    today,
+    input.closing_date || null,
+    input.closing_date_formatted || 'Not Available',
+    input.estimated_value || null,
+    input.location || 'Pakistan',
+    input.description ?? '',
+    JSON.stringify(input.cached_dossiers || [])
+  );
+
+  return getTenderById(id)!;
 }
 
 export function getAllDomainTracks(): DomainTrack[] {

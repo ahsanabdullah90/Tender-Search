@@ -73,9 +73,7 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, themePref
     <div className="flex min-h-screen bg-bg text-ink">
       <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-6 border-r border-line bg-surface p-4">
         <div className="flex items-center gap-2.5 px-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-accent-ink">
-            <Shield className="h-4 w-4" />
-          </div>
+          <img src="/favicon.png" alt="Tender Tracker" className="h-7 w-7 rounded-lg object-contain shadow-xs" />
           <span className="text-sm font-bold tracking-tight">Tender Tracker</span>
         </div>
 

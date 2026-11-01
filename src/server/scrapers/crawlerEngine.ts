@@ -1,10 +1,10 @@
-import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList } from '../db.js';
+import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields } from '../db.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../deduplicator.js';
 import { getHumanJitterDelay, sleep, sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, Tender } from '../../types.js';
 import { downloadAndCacheDossier } from '../dossierManager.js';
-import { extractTenderFromImage } from '../ocrService.js';
+import { extractTenderFromImage, summarizeTenderTextWithAI } from '../ocrService.js';
 import * as cheerio from 'cheerio';
 import https from 'https';
 import http from 'http';
@@ -282,6 +282,72 @@ function extractRefFromText(text: string): string | undefined {
 }
 
 /**
+ * Strips repeated titles, dates, serial numbers, and generic button words from raw table/card text
+ * so the summary never displays noisy table garbage. Returns empty string if no genuine scope text remains.
+ */
+export function cleanRowSummary(rowText: string, title: string, $el?: cheerio.Cheerio<any>): string {
+  if ($el) {
+    const paragraphs: string[] = [];
+    $el.find('p').each((_, p) => {
+      const pText = $el.find(p).text().replace(/\s+/g, ' ').trim();
+      if (
+        pText.length >= 20 &&
+        !/^(reference|organization|submission deadline|published|closing date|opening date)\s*:/i.test(pText) &&
+        pText.toLowerCase() !== title.toLowerCase()
+      ) {
+        paragraphs.push(pText);
+      }
+    });
+    if (paragraphs.length > 0) {
+      return paragraphs.join('\n').slice(0, 500);
+    }
+  }
+
+  let cleaned = rowText.replace(/\s+/g, ' ').trim();
+  if (title) {
+    cleaned = cleaned.split(title).join(' ');
+  }
+  // Remove dates, standalone row numbers, and generic action button labels
+  cleaned = cleaned
+    .replace(new RegExp(DATE_CANDIDATE_PATTERN, 'gi'), ' ')
+    .replace(/\b(?:download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click\s+to\s+view|view(?:\s+details|\s+file)?|details|advertisement|tender\s+document|read\s+more|open|apply|submission\s+date|opening\s+date|closing\s+date|publish\s+date|published|due\s+date|closed|active)\b/gi, ' ')
+    .replace(/^\s*\d+\s*/, '')
+    .replace(/[|•:,-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (cleaned.length < 25 || cleaned.toLowerCase() === title.toLowerCase()) {
+    return '';
+  }
+  return cleaned.slice(0, 350);
+}
+
+function collectRowAttachments($: cheerio.CheerioAPI, el: any, portal: PortalDefinition): string[] {
+  const attachmentUrls: string[] = [];
+  $(el).find('a[href]').each((__, aEl) => {
+    const aHref = $(aEl).attr('href');
+    if (aHref && /\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(aHref)) {
+      const absUrl = resolvePortalUrl(aHref, portal);
+      if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
+    }
+  });
+  $(el).find('img[src]').each((__, imgEl) => {
+    const src = $(imgEl).attr('src');
+    const cls = ($(imgEl).attr('class') || '').toLowerCase();
+    if (
+      src &&
+      /\.(jpe?g|png|webp)(\?|$)/i.test(src) &&
+      !/logo|icon|avatar|spinner|zoom-onhover|banner|flag|placeholder/i.test(src) &&
+      !cls.includes('on-hover-image')
+    ) {
+      const absUrl = resolvePortalUrl(src, portal);
+      if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
+    }
+  });
+  return attachmentUrls;
+}
+
+/**
  * Parses raw HTML string from a portal into structured items or detects verification challenge.
  */
 export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeResult {
@@ -340,9 +406,9 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const closingDate = parseDateString(subText) || fallbackDates.closingDate;
       const publishDate = parseDateString(openText) || fallbackDates.publishDate;
 
-      const attachmentUrls: string[] = [];
-      if (href && /\.(pdf|docx?|xlsx?|jpe?g|png)(\?|$)/i.test(href)) {
-        attachmentUrls.push(fullUrl);
+      const attachmentUrls = collectRowAttachments($, el, portal);
+      if (href && /\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(href) && !attachmentUrls.includes(fullUrl)) {
+        attachmentUrls.unshift(fullUrl);
       }
 
       items.push({
@@ -352,7 +418,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         directUrl: fullUrl,
         publishDate: publishDate || undefined,
         closingDate,
-        description: rowText.slice(0, 300),
+        description: cleanRowSummary(rowText, title, $(el)),
         attachmentUrls
       });
     });
@@ -373,6 +439,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 
       // Strip leading date prefix from title if present (e.g. "22-08-2026, RENOVATION OF...")
       const cleanTitle = rawTitle.replace(/^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\s*[,:-]?\s*/, '').trim() || rawTitle;
+      const attachmentUrls = cardEl.length ? collectRowAttachments($, cardEl.get(0), portal) : [];
 
       items.push({
         referenceNo: extractRefFromText(rowText),
@@ -381,8 +448,8 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         directUrl: fullUrl,
         publishDate: publishDate || undefined,
         closingDate,
-        description: rowText.slice(0, 300),
-        attachmentUrls: []
+        description: cleanRowSummary(rowText, cleanTitle, cardEl.length ? cardEl : undefined),
+        attachmentUrls
       });
     });
     if (items.length > 0) return { items, hitlRequired: false };
@@ -396,12 +463,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       if (title.length <= 5 || seenTitles.has(title.toLowerCase())) return;
       seenTitles.add(title.toLowerCase());
 
-      const imgSrc = $(el).find('img.adver-thumbnail').attr('src');
-      const attachmentUrls: string[] = [];
-      if (imgSrc && /\.(jpe?g|png|pdf)(\?|$)/i.test(imgSrc)) {
-        attachmentUrls.push(resolvePortalUrl(imgSrc, portal));
-      }
-
+      const attachmentUrls = collectRowAttachments($, el, portal);
       const rowText = $(el).text().replace(/\s+/g, ' ').trim();
       const { publishDate, closingDate } = extractDatesFromText(rowText);
 
@@ -412,7 +474,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         directUrl: attachmentUrls[0] || portal.tendersUrl,
         publishDate: publishDate || undefined,
         closingDate,
-        description: title,
+        description: '',
         attachmentUrls
       });
     });
@@ -497,15 +559,8 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       }
     }
 
-    // Collect any file attachments in row
-    const attachmentUrls: string[] = [];
-    $(el).find('a[href]').each((__, aEl) => {
-      const aHref = $(aEl).attr('href');
-      if (aHref && /\.(pdf|docx?|xlsx?|jpe?g|png)(\?|$)/i.test(aHref)) {
-        const absUrl = resolvePortalUrl(aHref, portal);
-        if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
-      }
-    });
+    // Collect any file or notice image attachments in row
+    const attachmentUrls = collectRowAttachments($, el, portal);
 
     if (title.length > 5) {
       items.push({
@@ -515,7 +570,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         directUrl: fullUrl,
         publishDate: publishDate || undefined,
         closingDate,
-        description: rowText.slice(0, 300),
+        description: cleanRowSummary(rowText, title, $(el)),
         attachmentUrls
       });
     }
@@ -549,7 +604,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         directUrl: fullUrl,
         publishDate: publishDate || undefined,
         closingDate,
-        description: title,
+        description: '',
         attachmentUrls: [fullUrl]
       });
     });
@@ -984,7 +1039,7 @@ export async function processAndSaveTender(
       formattedDate,
       item.estimatedValue || null,
       item.location || 'Pakistan',
-      item.description || item.title,
+      item.description ?? '',
       item.isCorrigendum ? 1 : 0
     );
   });
@@ -994,16 +1049,17 @@ export async function processAndSaveTender(
   // If tender notice has downloadable attachments, cache first attachment in background
   if (item.attachmentUrls && item.attachmentUrls.length > 0) {
     const firstUrl = item.attachmentUrls[0];
-    const label = `${item.title.slice(0, 30)}_Doc`;
+    const isImage = /\.(jpe?g|png|webp)(\?|$)/i.test(firstUrl);
+    const label = isImage ? 'Tender Notice Image' : `${item.title.slice(0, 30)}_Doc`;
     downloadAndCacheDossier(tenderId, firstUrl, label).then(async (doc) => {
       if (doc) {
         db.prepare('UPDATE tenders SET cached_dossiers = ? WHERE id = ?').run(JSON.stringify([doc]), tenderId);
-        // If document is an image and tender lacks date or reference, attempt Gemini OCR extraction
-        if (doc.mimeType.startsWith('image/') && (!item.closingDate || !item.referenceNo)) {
+        // If document is an image or PDF and tender lacks date, reference, or summary, attempt Gemini extraction
+        if ((doc.mimeType.startsWith('image/') || doc.mimeType === 'application/pdf') && (!item.closingDate || !item.referenceNo || !item.description)) {
           try {
             const fs = await import('fs');
             const path = await import('path');
-            const filename = path.basename(doc.localPath);
+            const filename = decodeURIComponent(path.basename(doc.localPath));
             const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
             if (fs.existsSync(diskPath)) {
               const imgBuffer = fs.readFileSync(diskPath);
@@ -1019,6 +1075,12 @@ export async function processAndSaveTender(
                     tenderId
                   );
                 }
+                if (ocrResult.summaryScope && !item.description) {
+                  db.prepare('UPDATE tenders SET description = ? WHERE id = ?').run(ocrResult.summaryScope, tenderId);
+                }
+                if (ocrResult.estimatedValue && !item.estimatedValue) {
+                  db.prepare('UPDATE tenders SET estimated_value = ? WHERE id = ?').run(ocrResult.estimatedValue, tenderId);
+                }
               }
             }
           } catch (ocrErr: any) {
@@ -1030,6 +1092,95 @@ export async function processAndSaveTender(
   }
 
   return { isNew: true, hasCorrigendum: Boolean(item.isCorrigendum), matched: true };
+}
+
+/**
+ * On-demand detail-page fetcher + Gemini AI analyzer for a single tender
+ */
+export async function analyzeTenderById(tenderId: string): Promise<Tender | null> {
+  const tender = getTenderById(tenderId);
+  if (!tender) return null;
+
+  const fs = await import('fs');
+  const path = await import('path');
+  const dossiers = Array.isArray(tender.cached_dossiers) ? [...tender.cached_dossiers] : [];
+  let detailText = '';
+
+  // 1. If no cached files exist yet, try downloading from direct_url or scraping detail page for images/PDFs
+  if (dossiers.length === 0 && tender.direct_url && tender.direct_url.startsWith('http')) {
+    if (/\.(pdf|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url)) {
+      const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(tender.direct_url);
+      const doc = await downloadAndCacheDossier(tender.id, tender.direct_url, isImg ? 'Tender Notice Image' : 'Tender Document');
+      if (doc) dossiers.push(doc);
+    } else {
+      try {
+        const html = await crawlerDeps.fetchHtml(tender.direct_url);
+        const $ = cheerio.load(html);
+        $('script, style, nav, header, footer').remove();
+        detailText = $('main, article, .content, .card, body').first().text().replace(/\s+/g, ' ').trim();
+
+        const portalDef = PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) || {
+          id: tender.portal_id,
+          name: tender.portal_name,
+          baseUrl: new URL(tender.direct_url).origin,
+          tendersUrl: tender.direct_url
+        } as PortalDefinition;
+
+        const discoveredUrls = collectRowAttachments($, $('body').get(0), portalDef);
+        for (const u of discoveredUrls.slice(0, 2)) {
+          const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(u);
+          const doc = await downloadAndCacheDossier(tender.id, u, isImg ? 'Tender Notice Image' : 'Bidding Document');
+          if (doc) dossiers.push(doc);
+        }
+      } catch (err: any) {
+        console.warn(`[Analyze] Could not fetch detail page for ${tender.id}:`, err.message);
+      }
+    }
+  }
+
+  // 2. Run Gemini AI on the first cached image/PDF if available
+  let aiResult = null;
+  for (const doc of dossiers) {
+    if (doc.mimeType?.startsWith('image/') || doc.mimeType === 'application/pdf') {
+      const filename = decodeURIComponent(path.basename(doc.localPath));
+      const diskPath = path.resolve(DOSSIERS_DIR, tender.id, filename);
+      if (fs.existsSync(diskPath)) {
+        const buf = fs.readFileSync(diskPath);
+        aiResult = await extractTenderFromImage(buf, doc.mimeType);
+        if (aiResult) break;
+      }
+    }
+  }
+
+  // 3. Fallback: summarize detail page text (or existing title/description) with Gemini AI
+  if (!aiResult) {
+    const textToAnalyze = detailText || tender.description || tender.title;
+    aiResult = await summarizeTenderTextWithAI({
+      title: tender.title,
+      organization: tender.organization,
+      rawText: textToAnalyze
+    });
+  }
+
+  // 4. Persist any newly discovered dossiers and extracted fields
+  const updates: Parameters<typeof updateTenderFields>[1] = {
+    cached_dossiers: dossiers
+  };
+
+  if (aiResult) {
+    if (aiResult.summaryScope) updates.description = aiResult.summaryScope;
+    if (aiResult.referenceNo && !tender.reference_no) updates.reference_no = aiResult.referenceNo;
+    if (aiResult.estimatedValue && !tender.estimated_value) updates.estimated_value = aiResult.estimatedValue;
+    if (aiResult.closingDateISO && !tender.closing_date) {
+      const parsedIso = parseDateString(aiResult.closingDateISO) || aiResult.closingDateISO;
+      updates.closing_date = parsedIso;
+      updates.closing_date_formatted = aiResult.closingDateFormatted || formatClosingDate(parsedIso);
+    }
+  } else if (detailText && !tender.description) {
+    updates.description = cleanRowSummary(detailText, tender.title);
+  }
+
+  return updateTenderFields(tender.id, updates);
 }
 
 /**

@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Bookmark, ExternalLink, FileText, Inbox, Search, SlidersHorizontal, TriangleAlert } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Bookmark, ExternalLink, FileText, Inbox, Pencil, Plus, Search, SlidersHorizontal, Sparkles, TriangleAlert, Upload } from 'lucide-react';
 import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus } from '../types';
-import { Button, Chip, DeadlineChip, EmptyState, Panel, Popover } from '../ui';
+import { Button, Chip, DeadlineChip, Dialog, EmptyState, Panel, Popover } from '../ui';
 
 type SortBy = 'urgency' | 'score' | 'newest';
 
@@ -23,6 +23,8 @@ interface InboxScreenProps {
   onToggleBookmark: (tenderId: string) => void;
   /** Tender to select when the screen opens, for example from an alert banner. */
   focusId?: string | null;
+  onTenderUpdated?: (tender: Tender) => void;
+  onTenderCreated?: (tender: Tender) => void;
 }
 
 /** Older rows may hold these fields as JSON text. */
@@ -56,6 +58,19 @@ function formatCountdown(closingDate: string | null) {
   const pad = (n: number) => String(n).padStart(2, '0');
   const clock = `${pad(Math.floor((s % 86400) / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
   return d > 0 ? `${d}d ${clock}` : clock;
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const base64 = result.includes(',') ? result.split(',')[1] : result;
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
 }
 
 function TenderRow({ tender, selected, onSelect }: { tender: Tender; selected: boolean; onSelect: () => void }) {
@@ -97,6 +112,8 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-ink-muted">{children}</h3>;
 }
 
+const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
+
 /** Shared by the Inbox and the Pipeline slide-over. `stageActions` replaces the Track / Pass buttons. */
 export function Detail({
   tender,
@@ -108,6 +125,7 @@ export function Detail({
   onAcknowledgeCorrigendum,
   onSaveNotes,
   onToggleBookmark,
+  onTenderUpdated,
 }: {
   tender: Tender;
   corrigenda: CorrigendumLog[];
@@ -118,31 +136,157 @@ export function Detail({
   onAcknowledgeCorrigendum: (logId: string) => Promise<void>;
   onSaveNotes: (tenderId: string, notes: string) => Promise<void>;
   onToggleBookmark: () => void;
+  onTenderUpdated?: (tender: Tender) => void;
 }) {
   useTick(1000);
+  const [currentTender, setCurrentTender] = useState<Tender>(tender);
   const [notes, setNotes] = useState(tender.status_notes || '');
   const [noteState, setNoteState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [aiStatusMessage, setAiStatusMessage] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [editingDetails, setEditingDetails] = useState(false);
+  const [savingDetails, setSavingDetails] = useState(false);
+  const [previewPdfIndex, setPreviewPdfIndex] = useState<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [editForm, setEditForm] = useState({
+    title: tender.title || '',
+    organization: tender.organization || '',
+    reference_no: tender.reference_no || '',
+    closing_date: tender.closing_date ? tender.closing_date.slice(0, 10) : '',
+    estimated_value: tender.estimated_value || '',
+    direct_url: tender.direct_url || '',
+    description: tender.description || '',
+  });
 
   useEffect(() => {
+    setCurrentTender(tender);
     setNotes(tender.status_notes || '');
     setNoteState('idle');
-  }, [tender.id]);
+    setAiStatusMessage(null);
+    setEditingDetails(false);
+    setPreviewPdfIndex(null);
+    setEditForm({
+      title: tender.title || '',
+      organization: tender.organization || '',
+      reference_no: tender.reference_no || '',
+      closing_date: tender.closing_date ? tender.closing_date.slice(0, 10) : '',
+      estimated_value: tender.estimated_value || '',
+      direct_url: tender.direct_url || '',
+      description: tender.description || '',
+    });
+  }, [tender]);
 
-  const keywords = asList<string>(tender.matched_keywords);
-  const files = asList<{ label?: string; localPath: string }>(tender.cached_dossiers);
-  const otherSources = asList<{ portalName: string; directUrl: string }>(tender.secondary_sources);
-  const amendments = corrigenda.filter(c => c.tender_id === tender.id);
-  const countdown = formatCountdown(tender.closing_date);
-  const urgent = tender.closing_date ? new Date(tender.closing_date).getTime() - Date.now() < 86_400_000 : false;
+  const keywords = asList<string>(currentTender.matched_keywords);
+  const files = asList<{ label?: string; localPath: string; mimeType?: string }>(currentTender.cached_dossiers);
+  const otherSources = asList<{ portalName: string; directUrl: string }>(currentTender.secondary_sources);
+  const amendments = corrigenda.filter(c => c.tender_id === currentTender.id);
+  const countdown = formatCountdown(currentTender.closing_date);
+  const urgent = currentTender.closing_date ? new Date(currentTender.closing_date).getTime() - Date.now() < 86_400_000 : false;
+
+  const hasCleanDescription = Boolean(
+    currentTender.description &&
+      currentTender.description.trim() !== '' &&
+      currentTender.description.trim().toLowerCase() !== currentTender.title.trim().toLowerCase()
+  );
 
   const saveNotes = async () => {
-    if (notes === (tender.status_notes || '')) return;
+    if (notes === (currentTender.status_notes || '')) return;
     setNoteState('saving');
     try {
-      await onSaveNotes(tender.id, notes);
+      await onSaveNotes(currentTender.id, notes);
       setNoteState('saved');
     } catch {
       setNoteState('failed');
+    }
+  };
+
+  const handleAnalyzeWithAi = async () => {
+    setAnalyzing(true);
+    setAiStatusMessage(null);
+    try {
+      const res = await fetch(`/api/tenders/${currentTender.id}/analyze`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        setCurrentTender(data.tender);
+        onTenderUpdated?.(data.tender);
+        setAiStatusMessage({ text: data.message || 'Tender summary extracted with AI.' });
+      } else {
+        setAiStatusMessage({ text: data.error || 'Could not analyze tender with AI.', isError: true });
+      }
+    } catch {
+      setAiStatusMessage({ text: 'Failed to reach AI extraction service.', isError: true });
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const handleFileUpload = async (file: File) => {
+    setUploadingFile(true);
+    setAiStatusMessage(null);
+    try {
+      const dataBase64 = await fileToBase64(file);
+      const res = await fetch(`/api/tenders/${currentTender.id}/attachments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name,
+          mimeType: file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'),
+          dataBase64,
+          label: file.name,
+          runAi: true,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        setCurrentTender(data.tender);
+        onTenderUpdated?.(data.tender);
+        setAiStatusMessage({
+          text: data.aiExtracted
+            ? 'Tender file saved and summarized with Google AI.'
+            : 'Tender file saved to dossier.',
+        });
+      } else {
+        setAiStatusMessage({ text: data.error || 'Failed to upload file.', isError: true });
+      }
+    } catch {
+      setAiStatusMessage({ text: 'Failed to upload file.', isError: true });
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
+  const handleSaveDetails = async () => {
+    setSavingDetails(true);
+    setAiStatusMessage(null);
+    try {
+      const res = await fetch(`/api/tenders/${currentTender.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: editForm.title,
+          organization: editForm.organization,
+          reference_no: editForm.reference_no,
+          closing_date: editForm.closing_date || null,
+          estimated_value: editForm.estimated_value || null,
+          direct_url: editForm.direct_url,
+          description: editForm.description,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        setCurrentTender(data.tender);
+        onTenderUpdated?.(data.tender);
+        setEditingDetails(false);
+        setAiStatusMessage({ text: 'Tender details updated.' });
+      } else {
+        setAiStatusMessage({ text: data.error || 'Could not save details.', isError: true });
+      }
+    } catch {
+      setAiStatusMessage({ text: 'Could not save details.', isError: true });
+    } finally {
+      setSavingDetails(false);
     }
   };
 
@@ -150,16 +294,16 @@ export function Detail({
     <div className="flex h-full flex-col">
       <div className="border-b border-line p-6">
         <div className="text-[13px] text-ink-muted">
-          {tender.portal_name} · <span className="font-mono">{tender.reference_no || 'No reference'}</span>
-          {tender.location && <> · {tender.location}</>}
+          {currentTender.portal_name} · <span className="font-mono">{currentTender.reference_no || 'No reference'}</span>
+          {currentTender.location && <> · {currentTender.location}</>}
         </div>
-        <h2 className="mt-1 text-lg font-bold leading-snug">{tender.title}</h2>
-        <div className="mt-1 text-sm text-ink-muted">{tender.organization}</div>
+        <h2 className="mt-1 text-lg font-bold leading-snug">{currentTender.title}</h2>
+        <div className="mt-1 text-sm text-ink-muted">{currentTender.organization}</div>
 
         <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2">
           <div>
             <div className="text-xs text-ink-muted">Closes</div>
-            <div className="text-sm font-semibold">{tender.closing_date_formatted || 'No deadline stated'}</div>
+            <div className="text-sm font-semibold">{currentTender.closing_date_formatted || 'No deadline stated'}</div>
           </div>
           {countdown && (
             <div>
@@ -172,7 +316,7 @@ export function Detail({
               <div className="text-xs text-ink-muted">Result expected</div>
               <input
                 type="date"
-                value={tender.result_expected_date?.slice(0, 10) ?? ''}
+                value={currentTender.result_expected_date?.slice(0, 10) ?? ''}
                 onChange={e => onSetResultDate(e.target.value || null)}
                 className="h-8 rounded-lg border border-line bg-surface px-2 font-mono text-sm"
               />
@@ -190,14 +334,14 @@ export function Detail({
           <Button
             variant="ghost"
             onClick={onToggleBookmark}
-            aria-pressed={Boolean(tender.is_bookmarked)}
-            aria-label={tender.is_bookmarked ? 'Remove bookmark' : 'Bookmark'}
+            aria-pressed={Boolean(currentTender.is_bookmarked)}
+            aria-label={currentTender.is_bookmarked ? 'Remove bookmark' : 'Bookmark'}
             className="px-3"
           >
-            <Bookmark className={`h-4 w-4 ${tender.is_bookmarked ? 'fill-current text-accent' : ''}`} />
+            <Bookmark className={`h-4 w-4 ${currentTender.is_bookmarked ? 'fill-current text-accent' : ''}`} />
           </Button>
           <a
-            href={tender.direct_url}
+            href={currentTender.direct_url}
             target="_blank"
             rel="noopener noreferrer"
             className="ml-auto inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-semibold text-accent hover:bg-accent-soft"
@@ -208,6 +352,20 @@ export function Detail({
       </div>
 
       <div className="flex-1 space-y-6 overflow-y-auto p-6">
+        {aiStatusMessage && (
+          <div
+            role="status"
+            className={`flex items-center justify-between rounded-lg px-3 py-2 text-xs font-medium ${
+              aiStatusMessage.isError ? 'bg-danger-soft text-danger' : 'bg-accent-soft text-accent'
+            }`}
+          >
+            <span>{aiStatusMessage.text}</span>
+            <button onClick={() => setAiStatusMessage(null)} className="ml-3 cursor-pointer font-semibold underline">
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {amendments.length > 0 && (
           <div className="rounded-xl bg-warn-soft p-4">
             <div className="mb-2 flex items-center gap-2 text-sm font-bold text-warn">
@@ -233,44 +391,212 @@ export function Detail({
         )}
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <Fact label="Estimated value" value={tender.estimated_value || 'Not disclosed'} mono />
-          <Fact label="Published" value={tender.publish_date ? new Date(tender.publish_date).toLocaleDateString('en-GB') : 'Not stated'} mono />
-          <Fact label="Match" value={`${tender.match_score || 0}%`} mono />
+          <Fact label="Estimated value" value={currentTender.estimated_value || 'Not disclosed'} mono />
+          <Fact label="Published" value={currentTender.publish_date ? new Date(currentTender.publish_date).toLocaleDateString('en-GB') : 'Not stated'} mono />
+          <Fact label="Match" value={`${currentTender.match_score || 0}%`} mono />
         </div>
 
         <div>
           <SectionTitle>Why it matched</SectionTitle>
           <div className="flex flex-wrap gap-1.5">
-            {asList<string>(tender.domain_tracks).map(t => <Chip key={t} tone="accent">{t}</Chip>)}
+            {asList<string>(currentTender.domain_tracks).map(t => <Chip key={t} tone="accent">{t}</Chip>)}
             {keywords.map(k => <Chip key={k}>{k}</Chip>)}
           </div>
         </div>
 
-        {tender.description && (
-          <div>
-            <SectionTitle>Summary</SectionTitle>
-            <p className="whitespace-pre-wrap leading-relaxed">{tender.description}</p>
-          </div>
-        )}
-
         <div>
-          <SectionTitle>Saved documents ({files.length})</SectionTitle>
-          {files.length === 0 ? (
-            <p className="text-ink-muted">No documents saved yet. They are fetched during scans.</p>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted">Summary</h3>
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" onClick={() => void handleAnalyzeWithAi()} disabled={analyzing}>
+                <Sparkles className="h-3.5 w-3.5" />
+                {analyzing ? 'Analyzing…' : 'Extract with AI'}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setEditForm({
+                    title: currentTender.title || '',
+                    organization: currentTender.organization || '',
+                    reference_no: currentTender.reference_no || '',
+                    closing_date: currentTender.closing_date ? currentTender.closing_date.slice(0, 10) : '',
+                    estimated_value: currentTender.estimated_value || '',
+                    direct_url: currentTender.direct_url || '',
+                    description: currentTender.description || '',
+                  });
+                  setEditingDetails(v => !v);
+                }}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                {editingDetails ? 'Cancel edit' : 'Edit details'}
+              </Button>
+            </div>
+          </div>
+
+          {editingDetails ? (
+            <div className="space-y-3 rounded-xl border border-line bg-surface-2 p-4">
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold text-ink-muted">Title</span>
+                <input
+                  value={editForm.title}
+                  onChange={e => setEditForm({ ...editForm, title: e.target.value })}
+                  className={fieldInputClass}
+                />
+              </label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-ink-muted">Organization</span>
+                  <input
+                    value={editForm.organization}
+                    onChange={e => setEditForm({ ...editForm, organization: e.target.value })}
+                    className={fieldInputClass}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-ink-muted">Reference No</span>
+                  <input
+                    value={editForm.reference_no}
+                    onChange={e => setEditForm({ ...editForm, reference_no: e.target.value })}
+                    className={`${fieldInputClass} font-mono`}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-ink-muted">Closing Date</span>
+                  <input
+                    type="date"
+                    value={editForm.closing_date}
+                    onChange={e => setEditForm({ ...editForm, closing_date: e.target.value })}
+                    className={`${fieldInputClass} font-mono`}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-ink-muted">Estimated Value</span>
+                  <input
+                    value={editForm.estimated_value}
+                    onChange={e => setEditForm({ ...editForm, estimated_value: e.target.value })}
+                    placeholder="e.g. PKR 25,000,000"
+                    className={fieldInputClass}
+                  />
+                </label>
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold text-ink-muted">Summary / Scope</span>
+                <textarea
+                  rows={4}
+                  value={editForm.description}
+                  onChange={e => setEditForm({ ...editForm, description: e.target.value })}
+                  placeholder="Enter tender scope, eligibility requirements, or summary bullets…"
+                  className={fieldInputClass}
+                />
+              </label>
+              <div className="flex justify-end gap-2">
+                <Button size="sm" onClick={() => setEditingDetails(false)}>Cancel</Button>
+                <Button size="sm" variant="primary" disabled={savingDetails} onClick={() => void handleSaveDetails()}>
+                  {savingDetails ? 'Saving…' : 'Save changes'}
+                </Button>
+              </div>
+            </div>
+          ) : hasCleanDescription ? (
+            <p className="whitespace-pre-wrap leading-relaxed">{currentTender.description}</p>
           ) : (
-            <div className="space-y-2">
-              {files.map((file, i) => (
-                <a
-                  key={i}
-                  href={file.localPath.startsWith('/') ? file.localPath : `/api/dossiers/${tender.id}/${encodeURIComponent(file.localPath.replace(/\\/g, '/').split('/').pop() || '')}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 rounded-lg border border-line p-3 hover:bg-surface-2"
-                >
-                  <FileText className="h-4 w-4 shrink-0 text-ink-muted" />
-                  <span className="truncate font-semibold">{file.label || `Document ${i + 1}`}</span>
-                </a>
-              ))}
+            <div className="rounded-lg border border-dashed border-line bg-surface-2 px-4 py-3 text-sm text-ink-muted">
+              No detailed scope was provided on the portal listing page. Click <span className="font-semibold text-ink">Extract with AI</span> to analyze the portal page, or upload a tender notice image/PDF below.
+            </div>
+          )}
+        </div>
+
+        <div
+          onPaste={e => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            for (let i = 0; i < items.length; i++) {
+              if (items[i].type.startsWith('image/') || items[i].type === 'application/pdf') {
+                const f = items[i].getAsFile();
+                if (f) {
+                  e.preventDefault();
+                  void handleFileUpload(f);
+                  break;
+                }
+              }
+            }
+          }}
+        >
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted">Saved documents ({files.length})</h3>
+            <div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,.pdf"
+                aria-label="Upload tender notice image or PDF"
+                className="hidden"
+                onChange={e => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleFileUpload(f);
+                  e.target.value = '';
+                }}
+              />
+              <Button size="sm" onClick={() => fileInputRef.current?.click()} disabled={uploadingFile}>
+                <Upload className="h-3.5 w-3.5" />
+                {uploadingFile ? 'Uploading…' : 'Upload image / PDF'}
+              </Button>
+            </div>
+          </div>
+          {files.length === 0 ? (
+            <p className="text-ink-muted">No documents saved yet. They are fetched during scans, or you can upload a tender image/PDF manually.</p>
+          ) : (
+            <div className="space-y-3">
+              {files.map((file, i) => {
+                const fileUrl = file.localPath.startsWith('/')
+                  ? file.localPath
+                  : `/api/dossiers/${currentTender.id}/${encodeURIComponent(file.localPath.replace(/\\/g, '/').split('/').pop() || '')}`;
+                const isImage =
+                  file.mimeType?.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(file.localPath);
+                const isPdf = file.mimeType === 'application/pdf' || /\.pdf$/i.test(file.localPath);
+
+                return (
+                  <div key={i} className="rounded-lg border border-line p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <a
+                        href={fileUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex min-w-0 flex-1 items-center gap-3 hover:underline"
+                      >
+                        <FileText className="h-4 w-4 shrink-0 text-ink-muted" />
+                        <span className="truncate font-semibold">{file.label || `Document ${i + 1}`}</span>
+                      </a>
+                      {isPdf && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setPreviewPdfIndex(previewPdfIndex === i ? null : i)}
+                        >
+                          {previewPdfIndex === i ? 'Hide preview' : 'Preview PDF'}
+                        </Button>
+                      )}
+                    </div>
+                    {isImage && (
+                      <a href={fileUrl} target="_blank" rel="noopener noreferrer" className="mt-3 block">
+                        <img
+                          src={fileUrl}
+                          alt={file.label || `Tender notice ${i + 1}`}
+                          className="max-h-96 w-full rounded-lg border border-line bg-surface-2 object-contain"
+                          loading="lazy"
+                        />
+                      </a>
+                    )}
+                    {isPdf && previewPdfIndex === i && (
+                      <iframe
+                        src={fileUrl}
+                        title={file.label || `PDF Preview ${i + 1}`}
+                        className="mt-3 h-96 w-full rounded-lg border border-line bg-surface"
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -314,6 +640,21 @@ export function InboxScreen(props: InboxScreenProps) {
   const { tenders, tracks, corrigenda, selectedTrack, searchQuery, bookmarkedOnly, corrigendumOnly } = props;
   const [sortBy, setSortBy] = useState<SortBy>('urgency');
   const [selectedId, setSelectedId] = useState<string | null>(props.focusId ?? null);
+  const [addingManual, setAddingManual] = useState(false);
+  const [creatingManual, setCreatingManual] = useState(false);
+  const [extractingManualAi, setExtractingManualAi] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualFile, setManualFile] = useState<{ filename: string; mimeType: string; dataBase64: string } | null>(null);
+  const [manualForm, setManualForm] = useState({
+    title: '',
+    organization: '',
+    reference_no: '',
+    closing_date: '',
+    estimated_value: '',
+    portal_name: 'Manual Entry',
+    direct_url: '',
+    description: '',
+  });
   useTick(60_000);
 
   const sorted = useMemo(() => {
@@ -370,6 +711,90 @@ export function InboxScreen(props: InboxScreenProps) {
 
   const firstNoDeadlineId = sortBy === 'urgency' ? noDeadline[0]?.id : undefined;
 
+  const handleManualFilePicked = async (file: File) => {
+    setManualError(null);
+    try {
+      const dataBase64 = await fileToBase64(file);
+      const mimeType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
+      setManualFile({ filename: file.name, mimeType, dataBase64 });
+    } catch {
+      setManualError('Failed to read selected file.');
+    }
+  };
+
+  const handleAutoFillManualWithAi = async () => {
+    if (!manualFile) return;
+    setExtractingManualAi(true);
+    setManualError(null);
+    try {
+      const res = await fetch('/api/ai/extract-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataBase64: manualFile.dataBase64, mimeType: manualFile.mimeType }),
+      });
+      const data = await res.json();
+      if (res.ok && data.extracted) {
+        const ext = data.extracted;
+        setManualForm(prev => ({
+          ...prev,
+          title: ext.title || prev.title,
+          organization: ext.organization || prev.organization,
+          reference_no: ext.referenceNo || prev.reference_no,
+          closing_date: ext.closingDate && /^\d{4}-\d{2}-\d{2}/.test(ext.closingDate) ? ext.closingDate.slice(0, 10) : prev.closing_date,
+          estimated_value: ext.estimatedValue || prev.estimated_value,
+          description: ext.summaryScope || prev.description,
+        }));
+      } else {
+        setManualError(data.error || 'Could not extract fields from file.');
+      }
+    } catch {
+      setManualError('Failed to reach AI extraction service.');
+    } finally {
+      setExtractingManualAi(false);
+    }
+  };
+
+  const handleCreateManualTender = async () => {
+    if (!manualForm.title.trim()) return;
+    setCreatingManual(true);
+    setManualError(null);
+    try {
+      const res = await fetch('/api/tenders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...manualForm,
+          fileBase64: manualFile?.dataBase64,
+          filename: manualFile?.filename,
+          mimeType: manualFile?.mimeType,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        props.onTenderCreated?.(data.tender);
+        setSelectedId(data.tender.id);
+        setAddingManual(false);
+        setManualFile(null);
+        setManualForm({
+          title: '',
+          organization: '',
+          reference_no: '',
+          closing_date: '',
+          estimated_value: '',
+          portal_name: 'Manual Entry',
+          direct_url: '',
+          description: '',
+        });
+      } else {
+        setManualError(data.error || 'Failed to create tender.');
+      }
+    } catch {
+      setManualError('Failed to create tender.');
+    } finally {
+      setCreatingManual(false);
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col p-6">
       <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -386,6 +811,11 @@ export function InboxScreen(props: InboxScreenProps) {
             className="h-10 w-full rounded-lg border border-line bg-surface pl-9 pr-3 placeholder:text-ink-muted"
           />
         </div>
+
+        <Button onClick={() => { setManualError(null); setAddingManual(true); }}>
+          <Plus className="h-4 w-4" />
+          Add tender
+        </Button>
 
         <Popover align="end" trigger={({ toggle }) => (
           <Button onClick={toggle}>
@@ -459,11 +889,121 @@ export function InboxScreen(props: InboxScreenProps) {
                 onAcknowledgeCorrigendum={props.onAcknowledgeCorrigendum}
                 onSaveNotes={props.onSaveNotes}
                 onToggleBookmark={() => props.onToggleBookmark(selected.id)}
+                onTenderUpdated={props.onTenderUpdated}
               />
             )}
           </Panel>
         </div>
       )}
+
+      <Dialog
+        open={addingManual}
+        onClose={() => setAddingManual(false)}
+        title="Add tender manually"
+        footer={
+          <>
+            <Button onClick={() => setAddingManual(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={creatingManual || !manualForm.title.trim()}
+              onClick={() => void handleCreateManualTender()}
+            >
+              {creatingManual ? 'Saving…' : 'Create tender'}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          {manualError && (
+            <div role="alert" className="rounded-lg bg-danger-soft px-3 py-2 text-xs font-medium text-danger">
+              {manualError}
+            </div>
+          )}
+
+          <div className="rounded-lg border border-dashed border-line bg-surface-2 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="cursor-pointer text-xs font-semibold text-accent hover:underline">
+                <input
+                  type="file"
+                  accept="image/*,.pdf"
+                  className="hidden"
+                  onChange={e => {
+                    const f = e.target.files?.[0];
+                    if (f) void handleManualFilePicked(f);
+                  }}
+                />
+                {manualFile ? `Attached: ${manualFile.filename}` : 'Attach tender notice image or PDF (optional)'}
+              </label>
+              {manualFile && (
+                <Button size="sm" onClick={() => void handleAutoFillManualWithAi()} disabled={extractingManualAi}>
+                  <Sparkles className="h-3.5 w-3.5" />
+                  {extractingManualAi ? 'Extracting…' : 'Auto-fill with AI'}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-ink-muted">Tender title *</span>
+            <input
+              value={manualForm.title}
+              onChange={e => setManualForm({ ...manualForm, title: e.target.value })}
+              placeholder="e.g. Procurement of Solar PV System for DHQ Hospital"
+              className={fieldInputClass}
+            />
+          </label>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold text-ink-muted">Organization</span>
+              <input
+                value={manualForm.organization}
+                onChange={e => setManualForm({ ...manualForm, organization: e.target.value })}
+                placeholder="Procuring agency"
+                className={fieldInputClass}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold text-ink-muted">Reference No</span>
+              <input
+                value={manualForm.reference_no}
+                onChange={e => setManualForm({ ...manualForm, reference_no: e.target.value })}
+                placeholder="e.g. PPRA-2026-104"
+                className={`${fieldInputClass} font-mono`}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold text-ink-muted">Closing Date</span>
+              <input
+                type="date"
+                value={manualForm.closing_date}
+                onChange={e => setManualForm({ ...manualForm, closing_date: e.target.value })}
+                className={`${fieldInputClass} font-mono`}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold text-ink-muted">Estimated Value</span>
+              <input
+                value={manualForm.estimated_value}
+                onChange={e => setManualForm({ ...manualForm, estimated_value: e.target.value })}
+                placeholder="e.g. PKR 15,000,000"
+                className={fieldInputClass}
+              />
+            </label>
+          </div>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-ink-muted">Summary / Scope</span>
+            <textarea
+              rows={3}
+              value={manualForm.description}
+              onChange={e => setManualForm({ ...manualForm, description: e.target.value })}
+              placeholder="Key deliverables, eligibility criteria, bid security…"
+              className={fieldInputClass}
+            />
+          </label>
+        </div>
+      </Dialog>
     </div>
   );
 }

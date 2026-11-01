@@ -464,6 +464,11 @@ export default function App() {
           onSaveNotes={handleSaveNotes}
           onToggleBookmark={handleToggleBookmark}
           focusId={focusTenderId}
+          onTenderUpdated={updated => setTenders(prev => prev.map(t => (t.id === updated.id ? updated : t)))}
+          onTenderCreated={created => {
+            setTenders(prev => [created, ...prev]);
+            fetchKpis();
+          }}
         />
       ) : pipelineMode ? (
         <PipelineScreen

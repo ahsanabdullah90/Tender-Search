@@ -257,7 +257,14 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
 /* --------------------------------- Data -------------------------------- */
 
 interface Backup { name: string; created_at: string; size_bytes: number }
-interface Storage { total_bytes: number; passed_bytes: number; passed_tenders: number; tenders_with_documents: number }
+interface Storage {
+  total_bytes: number;
+  passed_bytes: number;
+  passed_tenders: number;
+  tenders_with_documents: number;
+  ai_configured?: boolean;
+  ai_masked_key?: string | null;
+}
 
 function bytes(n: number) {
   if (n < 1024) return `${n} B`;
@@ -281,6 +288,8 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const [backups, setBackups] = useState<Backup[]>([]);
   const [storage, setStorage] = useState<Storage | null>(null);
   const [busy, setBusy] = useState(false);
+  const [aiKeyInput, setAiKeyInput] = useState('');
+  const [aiSaving, setAiSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<'inbox' | 'prune' | 'erase' | null>(null);
   const [typed, setTyped] = useState('');
@@ -298,6 +307,29 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   useEffect(() => { void load(); }, [load]);
 
   const closeConfirm = () => { setConfirm(null); setTyped(''); };
+
+  const saveAiKey = async (keyToSave: string) => {
+    setAiSaving(true);
+    try {
+      const res = await fetch('/api/ai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: keyToSave.trim() })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setStorage(prev => prev ? { ...prev, ai_configured: Boolean(data.configured), ai_masked_key: data.maskedKey } : prev);
+        setAiKeyInput('');
+        setMessage(data.message || 'Google AI Studio settings updated.');
+      } else {
+        setMessage('Could not save API key.');
+      }
+    } catch {
+      setMessage('Could not save API key.');
+    } finally {
+      setAiSaving(false);
+    }
+  };
 
   const backUp = async () => {
     setBusy(true);
@@ -330,6 +362,47 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
           <button onClick={() => setMessage(null)} className="cursor-pointer text-sm font-semibold underline">Dismiss</button>
         </div>
       )}
+
+      <DataSection
+        title="Google AI Studio (Gemini API)"
+        description="Extracts clean First-Look summaries, deadlines, and scope from tender notice images, PDFs, and portal pages."
+      >
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-ink-muted">Status:</span>
+            {storage?.ai_configured ? (
+              <Chip tone="ok">Connected ({storage.ai_masked_key || 'Active'}) · gemini-2.5-flash</Chip>
+            ) : (
+              <Chip>Not configured</Chip>
+            )}
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[260px] flex-1">
+              <Field label="Gemini API key">
+                <input
+                  type="password"
+                  value={aiKeyInput}
+                  onChange={e => setAiKeyInput(e.target.value)}
+                  placeholder={storage?.ai_configured ? 'Enter a new key to replace current key…' : 'Paste AIzaSy… key from aistudio.google.com'}
+                  className={`${inputClass} font-mono text-[13px]`}
+                />
+              </Field>
+            </div>
+            <Button
+              variant="primary"
+              disabled={aiSaving || !aiKeyInput.trim()}
+              onClick={() => void saveAiKey(aiKeyInput)}
+            >
+              {aiSaving ? 'Saving…' : 'Save API key'}
+            </Button>
+            {storage?.ai_configured && (
+              <Button disabled={aiSaving} onClick={() => void saveAiKey('')}>
+                Remove key
+              </Button>
+            )}
+          </div>
+        </div>
+      </DataSection>
 
       <DataSection title="Export to Excel" description="Downloads a spreadsheet file you can open in Excel.">
         <div className="flex flex-wrap items-end gap-3">
