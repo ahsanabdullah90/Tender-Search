@@ -3,6 +3,7 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import { createApp } from '../../server.js';
+import { crawlerDeps } from '../../src/server/scrapers/crawlerEngine.js';
 import {
   db,
   initDatabase,
@@ -559,6 +560,30 @@ describe('Server API Routes', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.tender.cached_dossiers.length).toBe(1);
       expect(res.body.tender.cached_dossiers[0].label).toBe('Scanned Newspaper Notice');
+    });
+
+    it('refreshes tender information via POST /api/tenders/:id/refresh', async () => {
+      const origFetch = crawlerDeps.fetchHtml;
+      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(`
+        <html><body>
+          <h1>Solar Hospital Power System Tender</h1>
+          <p>Detailed Scope: Supply, installation, and commissioning of rooftop solar PV plant.</p>
+        </body></html>
+      `);
+
+      insertTestTender('t-refresh-1', {
+        title: 'Initial Tender for Refresh',
+        direct_url: 'https://example.com/tenders/101',
+        description: ''
+      });
+
+      const res = await request(app).post('/api/tenders/t-refresh-1/refresh');
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.tender.id).toBe('t-refresh-1');
+      expect(res.body.message).toContain('Tender information refreshed');
+
+      crawlerDeps.fetchHtml = origFetch;
     });
 
     it('returns helpful 400 when AI analyze or extract-file is called without API key configured', async () => {

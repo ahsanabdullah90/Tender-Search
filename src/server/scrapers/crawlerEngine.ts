@@ -1,4 +1,4 @@
-import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields } from '../db.js';
+import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields, getGeminiApiKey } from '../db.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../deduplicator.js';
 import { getHumanJitterDelay, sleep, sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
@@ -1095,9 +1095,10 @@ export async function processAndSaveTender(
 }
 
 /**
- * On-demand detail-page fetcher + Gemini AI analyzer for a single tender
+ * On-demand detail-page fetcher + Gemini AI analyzer for a single tender.
+ * When forceRefresh is true, re-fetches the live portal page and updates attachments/summary.
  */
-export async function analyzeTenderById(tenderId: string): Promise<Tender | null> {
+export async function analyzeTenderById(tenderId: string, options: { forceRefresh?: boolean } = {}): Promise<Tender | null> {
   const tender = getTenderById(tenderId);
   if (!tender) return null;
 
@@ -1105,13 +1106,16 @@ export async function analyzeTenderById(tenderId: string): Promise<Tender | null
   const path = await import('path');
   const dossiers = Array.isArray(tender.cached_dossiers) ? [...tender.cached_dossiers] : [];
   let detailText = '';
+  const shouldFetchLive = Boolean(options.forceRefresh || dossiers.length === 0);
 
-  // 1. If no cached files exist yet, try downloading from direct_url or scraping detail page for images/PDFs
-  if (dossiers.length === 0 && tender.direct_url && tender.direct_url.startsWith('http')) {
+  // 1. Fetch from direct_url or scrape detail page for images/PDFs
+  if (shouldFetchLive && tender.direct_url && tender.direct_url.startsWith('http')) {
     if (/\.(pdf|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url)) {
       const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(tender.direct_url);
       const doc = await downloadAndCacheDossier(tender.id, tender.direct_url, isImg ? 'Tender Notice Image' : 'Tender Document');
-      if (doc) dossiers.push(doc);
+      if (doc && !dossiers.some(d => d.localPath === doc.localPath)) {
+        dossiers.unshift(doc);
+      }
     } else {
       try {
         const html = await crawlerDeps.fetchHtml(tender.direct_url);
@@ -1127,10 +1131,12 @@ export async function analyzeTenderById(tenderId: string): Promise<Tender | null
         } as PortalDefinition;
 
         const discoveredUrls = collectRowAttachments($, $('body').get(0), portalDef);
-        for (const u of discoveredUrls.slice(0, 2)) {
+        for (const u of discoveredUrls.slice(0, 3)) {
           const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(u);
           const doc = await downloadAndCacheDossier(tender.id, u, isImg ? 'Tender Notice Image' : 'Bidding Document');
-          if (doc) dossiers.push(doc);
+          if (doc && !dossiers.some(d => d.localPath === doc.localPath)) {
+            dossiers.push(doc);
+          }
         }
       } catch (err: any) {
         console.warn(`[Analyze] Could not fetch detail page for ${tender.id}:`, err.message);
@@ -1138,43 +1144,64 @@ export async function analyzeTenderById(tenderId: string): Promise<Tender | null
     }
   }
 
-  // 2. Run Gemini AI on the first cached image/PDF if available
+  // 2. Run Gemini AI on the first cached image/PDF if available and Gemini API key exists
   let aiResult = null;
-  for (const doc of dossiers) {
-    if (doc.mimeType?.startsWith('image/') || doc.mimeType === 'application/pdf') {
-      const filename = decodeURIComponent(path.basename(doc.localPath));
-      const diskPath = path.resolve(DOSSIERS_DIR, tender.id, filename);
-      if (fs.existsSync(diskPath)) {
-        const buf = fs.readFileSync(diskPath);
-        aiResult = await extractTenderFromImage(buf, doc.mimeType);
-        if (aiResult) break;
+  if (getGeminiApiKey()) {
+    for (const doc of dossiers) {
+      if (doc.mimeType?.startsWith('image/') || doc.mimeType === 'application/pdf') {
+        const filename = decodeURIComponent(path.basename(doc.localPath));
+        const diskPath = path.resolve(DOSSIERS_DIR, tender.id, filename);
+        if (fs.existsSync(diskPath)) {
+          const buf = fs.readFileSync(diskPath);
+          aiResult = await extractTenderFromImage(buf, doc.mimeType);
+          if (aiResult) break;
+        }
       }
+    }
+
+    // 3. Fallback: summarize detail page text (or existing title/description) with Gemini AI
+    if (!aiResult) {
+      const textToAnalyze = detailText || tender.description || tender.title;
+      aiResult = await summarizeTenderTextWithAI({
+        title: tender.title,
+        organization: tender.organization,
+        rawText: textToAnalyze
+      });
     }
   }
 
-  // 3. Fallback: summarize detail page text (or existing title/description) with Gemini AI
-  if (!aiResult) {
-    const textToAnalyze = detailText || tender.description || tender.title;
-    aiResult = await summarizeTenderTextWithAI({
-      title: tender.title,
-      organization: tender.organization,
-      rawText: textToAnalyze
-    });
-  }
-
-  // 4. Persist any newly discovered dossiers and extracted fields
+  // 4. Persist newly discovered dossiers and extracted fields
   const updates: Parameters<typeof updateTenderFields>[1] = {
     cached_dossiers: dossiers
   };
 
   if (aiResult) {
     if (aiResult.summaryScope) updates.description = aiResult.summaryScope;
-    if (aiResult.referenceNo && !tender.reference_no) updates.reference_no = aiResult.referenceNo;
-    if (aiResult.estimatedValue && !tender.estimated_value) updates.estimated_value = aiResult.estimatedValue;
-    if (aiResult.closingDateISO && !tender.closing_date) {
+    if (aiResult.referenceNo) updates.reference_no = aiResult.referenceNo;
+    if (aiResult.estimatedValue) updates.estimated_value = aiResult.estimatedValue;
+    if (aiResult.closingDateISO) {
       const parsedIso = parseDateString(aiResult.closingDateISO) || aiResult.closingDateISO;
+      const formatted = aiResult.closingDateFormatted || formatClosingDate(parsedIso);
+      
+      // Check if closing date was extended
+      if (tender.closing_date && parsedIso !== tender.closing_date) {
+        const oldTime = new Date(tender.closing_date).getTime();
+        const newTime = new Date(parsedIso).getTime();
+        if (!isNaN(oldTime) && !isNaN(newTime) && newTime > oldTime) {
+          const logId = `corr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          try {
+            db.prepare(`
+              INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
+              VALUES (?, ?, 'deadline_extension', ?, ?, 0)
+            `).run(logId, tender.id, tender.closing_date_formatted || tender.closing_date, formatted);
+            updates.has_corrigendum = 1;
+          } catch (e) {
+            console.warn('[Refresh] Could not insert corrigendum log:', e);
+          }
+        }
+      }
       updates.closing_date = parsedIso;
-      updates.closing_date_formatted = aiResult.closingDateFormatted || formatClosingDate(parsedIso);
+      updates.closing_date_formatted = formatted;
     }
   } else if (detailText && !tender.description) {
     updates.description = cleanRowSummary(detailText, tender.title);

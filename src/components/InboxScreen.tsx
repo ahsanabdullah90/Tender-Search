@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bookmark, ExternalLink, FileText, Inbox, Pencil, Plus, Search, SlidersHorizontal, Sparkles, TriangleAlert, Upload } from 'lucide-react';
+import { Bookmark, ExternalLink, FileText, Inbox, Pencil, Plus, RotateCw, Search, SlidersHorizontal, Sparkles, TriangleAlert, Upload } from 'lucide-react';
 import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus } from '../types';
 import { Button, Chip, DeadlineChip, Dialog, EmptyState, Panel, Popover } from '../ui';
 
@@ -143,6 +143,7 @@ export function Detail({
   const [notes, setNotes] = useState(tender.status_notes || '');
   const [noteState, setNoteState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
   const [analyzing, setAnalyzing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [aiStatusMessage, setAiStatusMessage] = useState<{ text: string; isError?: boolean } | null>(null);
   const [editingDetails, setEditingDetails] = useState(false);
@@ -219,6 +220,26 @@ export function Detail({
       setAiStatusMessage({ text: 'Failed to reach AI extraction service.', isError: true });
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  const handleRefreshTender = async () => {
+    setRefreshing(true);
+    setAiStatusMessage(null);
+    try {
+      const res = await fetch(`/api/tenders/${currentTender.id}/refresh`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        setCurrentTender(data.tender);
+        onTenderUpdated?.(data.tender);
+        setAiStatusMessage({ text: data.message || 'Tender information refreshed from portal.' });
+      } else {
+        setAiStatusMessage({ text: data.error || 'Could not refresh tender from portal.', isError: true });
+      }
+    } catch {
+      setAiStatusMessage({ text: 'Failed to refresh tender from portal.', isError: true });
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -339,6 +360,16 @@ export function Detail({
             className="px-3"
           >
             <Bookmark className={`h-4 w-4 ${currentTender.is_bookmarked ? 'fill-current text-accent' : ''}`} />
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void handleRefreshTender()}
+            disabled={refreshing}
+            aria-label="Refresh info"
+            title="Re-query portal and refresh tender info with AI"
+          >
+            <RotateCw className={`h-4 w-4 ${refreshing ? 'animate-spin text-accent' : ''}`} />
+            {refreshing ? 'Refreshing…' : 'Refresh info'}
           </Button>
           <a
             href={currentTender.direct_url}

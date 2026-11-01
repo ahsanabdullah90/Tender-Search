@@ -544,7 +544,16 @@ describe('InboxScreen component', () => {
     };
 
     const fetchSpy = vi.spyOn(global, 'fetch')
-      // 1. Extract with AI response
+      // 1. Refresh tender response
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          message: 'Tender information refreshed from portal.',
+          tender: { ...tenderWithMedia, description: '• Scope: Refreshed from portal' }
+        })
+      } as any)
+      // 2. Extract with AI response
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -553,7 +562,7 @@ describe('InboxScreen component', () => {
           tender: { ...tenderWithMedia, description: '• Scope: 500kW Solar PV\n• Eligibility: PEC C3' }
         })
       } as any)
-      // 2. Edit details PATCH response
+      // 3. Edit details PATCH response
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -561,7 +570,7 @@ describe('InboxScreen component', () => {
           tender: { ...tenderWithMedia, title: 'Edited Solar Tender', description: '• Scope: Updated manually' }
         })
       } as any)
-      // 3. Create manual tender POST response
+      // 4. Create manual tender POST response
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -604,17 +613,22 @@ describe('InboxScreen component', () => {
     expect(screen.getByTitle('Bidding Document PDF')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Hide preview' }));
 
+    // Click Refresh info
+    const refreshBtn = screen.getByRole('button', { name: /Refresh info/i });
+    await user.click(refreshBtn);
+    expect(onTenderUpdated).toHaveBeenCalledWith(expect.objectContaining({ description: '• Scope: Refreshed from portal' }));
+
     // Trigger Extract with AI
     const aiBtn = screen.getByRole('button', { name: /Extract with AI/i });
     await user.click(aiBtn);
-    expect(onTenderUpdated).toHaveBeenCalled();
+    expect(onTenderUpdated).toHaveBeenCalledTimes(2);
 
     // Open inline Edit details form and save
     const editBtn = screen.getByRole('button', { name: /Edit details/i });
     await user.click(editBtn);
     const saveEditBtn = screen.getByRole('button', { name: /Save changes/i });
     await user.click(saveEditBtn);
-    expect(onTenderUpdated).toHaveBeenCalledTimes(2);
+    expect(onTenderUpdated).toHaveBeenCalledTimes(3);
 
     // Open Add tender modal and create a manual tender
     const addTenderBtn = screen.getByRole('button', { name: /Add tender/i });

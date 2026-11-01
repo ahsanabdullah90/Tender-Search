@@ -399,6 +399,7 @@ export function updateTenderFields(
     direct_url: string;
     location: string | null;
     cached_dossiers: any[];
+    has_corrigendum: number;
   }>
 ): Tender | null {
   const existing = getTenderById(id);
@@ -416,6 +417,7 @@ export function updateTenderFields(
         direct_url = ?,
         location = ?,
         cached_dossiers = ?,
+        has_corrigendum = ?,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(
@@ -429,6 +431,7 @@ export function updateTenderFields(
     fields.direct_url !== undefined ? fields.direct_url : existing.direct_url,
     fields.location !== undefined ? fields.location : existing.location,
     fields.cached_dossiers !== undefined ? JSON.stringify(fields.cached_dossiers) : JSON.stringify(existing.cached_dossiers || []),
+    fields.has_corrigendum !== undefined ? fields.has_corrigendum : existing.has_corrigendum,
     id
   );
 

@@ -431,7 +431,7 @@ app.post('/api/ai/extract-file', async (req, res) => {
   res.json({ success: true, extracted });
 });
 
-// 13. On-Demand Tender AI Analysis, Manual Edit, File Upload & Manual Tender Creation
+// 13. On-Demand Tender AI Analysis, Live Refresh, Manual Edit, File Upload & Manual Tender Creation
 app.post('/api/tenders/:id/analyze', async (req, res) => {
   if (!getGeminiApiKey()) {
     return res.status(400).json({ error: 'Google AI Studio API key is not configured. Add it in Sources & Keywords > Data.' });
@@ -439,6 +439,18 @@ app.post('/api/tenders/:id/analyze', async (req, res) => {
   const tender = await analyzeTenderById(req.params.id);
   if (!tender) return res.status(404).json({ error: 'Tender not found' });
   res.json({ success: true, tender, message: 'Tender analyzed with Google AI.' });
+});
+
+app.post('/api/tenders/:id/refresh', async (req, res) => {
+  const tender = await analyzeTenderById(req.params.id, { forceRefresh: true });
+  if (!tender) return res.status(404).json({ error: 'Tender not found' });
+  res.json({
+    success: true,
+    tender,
+    message: getGeminiApiKey()
+      ? 'Tender information refreshed from portal and summarized with AI.'
+      : 'Tender information refreshed from portal.'
+  });
 });
 
 app.post('/api/tenders/:id/attachments', async (req, res) => {
