@@ -218,54 +218,20 @@ export const crawlerDeps = {
   sleep: (ms: number) => sleep(ms)
 };
 
-const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:st|nd|rd|th)?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
-
-/**
- * Extracts and disambiguates publish dates vs closing dates using labels and chronological sorting (Bug B7)
- */
-export function extractDatesFromText(rowText: string): { publishDate: string | null; closingDate: string | null } {
-  // 1. Look for explicit labels (including "Dead Line" with space used on BPPRA ePPS)
-  const closingLabelRegex = new RegExp(`(?:closing|submission|dead\\s*line|due|last)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
-  const publishLabelRegex = new RegExp(`(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
-
-  const closingMatch = rowText.match(closingLabelRegex);
-  const publishMatch = rowText.match(publishLabelRegex);
-
-  let closingDate: string | null = closingMatch ? parseDateString(closingMatch[1]) : null;
-  let publishDate: string | null = publishMatch ? parseDateString(publishMatch[1]) : null;
-
-  if (closingDate) {
-    return { publishDate, closingDate };
-  }
-
-  // 2. If no explicit closing label found, extract all candidate dates
-  const globalDateRegex = new RegExp(DATE_CANDIDATE_PATTERN, 'gi');
-  const matches = rowText.match(globalDateRegex) || [];
-  const parsedDates: string[] = [];
-  for (const m of matches) {
-    const p = parseDateString(m);
-    if (p && !parsedDates.includes(p)) {
-      parsedDates.push(p);
-    }
-  }
-
-  if (parsedDates.length === 1) {
-    if (publishMatch && publishDate === parsedDates[0]) {
-      return { publishDate, closingDate: null };
-    }
-    return { publishDate: null, closingDate: parsedDates[0] };
-  }
-
-  if (parsedDates.length >= 2) {
-    parsedDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
-    return {
-      publishDate: publishDate || parsedDates[0],
-      closingDate: parsedDates[parsedDates.length - 1]
-    };
-  }
-
-  return { publishDate: null, closingDate: null };
-}
+export {
+  isValidCalendarDay,
+  MONTH_NAMES,
+  parseDateString,
+  formatClosingDate,
+  DATE_CANDIDATE_PATTERN,
+  extractDatesFromText
+} from './dateParser.js';
+import {
+  parseDateString,
+  formatClosingDate,
+  DATE_CANDIDATE_PATTERN,
+  extractDatesFromText
+} from './dateParser.js';
 
 const GENERIC_LINK_LABELS = /^(download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click\s+to\s+view|view(?:\s+details|\s+file)?|details|advertisement|bidding\s+document|nit\s+document|boq\s+document|rfq\s+document|bid\s+document|evaluation\s+report|tender\s+document|read\s+more|open|apply|corrigendum|asset\s+register|o&m\s+manuals|drawings)$/i;
 
@@ -949,79 +915,11 @@ export function hasProcurementSignals(html: string): boolean {
 }
 
 /**
- * Step 3 of the 5-Step Autonomous Healer:
- * Scores all navigation/page links on an organization's homepage to locate the "Tenders" button/portal URL.
- */
-export function scoreCandidateTenderLinks(
-  html: string,
-  finalBaseUrl: string
-): Array<{ text: string; href: string; score: number }> {
-  const $ = cheerio.load(html);
-  const baseTagHref = $('base[href]').attr('href');
-  let effectiveBase = finalBaseUrl;
-  if (baseTagHref) {
-    try {
-      effectiveBase = new URL(baseTagHref, finalBaseUrl).toString();
-    } catch {}
-  }
-
-  const scoreMap = new Map<string, { text: string; href: string; score: number }>();
-
-  $('a[href]').each((_, aEl) => {
-    const rawHref = ($(aEl).attr('href') || '').trim();
-    if (!rawHref || rawHref.startsWith('#') || /^(javascript:|mailto:|tel:)/i.test(rawHref)) return;
-
-    let absUrl: string;
-    try {
-      absUrl = rawHref.startsWith('http') ? rawHref : new URL(rawHref, effectiveBase).toString();
-    } catch {
-      return;
-    }
-
-    // Ignore external social media and map links
-    if (/facebook\.com|twitter\.com|x\.com|linkedin\.com|youtube\.com|instagram\.com|google\.com\/maps|whatsapp\.com/i.test(absUrl)) {
-      return;
-    }
-
-    // Ignore direct static file links when looking for a portal navigation page
-    if (/\.(pdf|docx?|xlsx?|zip|rar|jpe?g|png|gif)(\?|$)/i.test(absUrl)) {
-      return;
-    }
-
-    const text = $(aEl).text().replace(/\s+/g, ' ').trim();
-    const combined = `${text} ${rawHref}`;
-    let score = 0;
-
-    if (/\b(active\s+tenders?|open\s+tenders?|tenders?|e-?tenders?|procurement|tender\s+notices?|rfps?|active\s+bids?|nit|quotations?)\b/i.test(text)) {
-      score += 10;
-    }
-    if (/^(tenders?|active\s+tenders?|open\s+tenders?|procurement|bids?|rfps?|e-?tenders?|nit)$/i.test(text)) {
-      score += 4;
-    }
-    if (/\/(tenders?|active-tenders|procurement|bids|rfp|nit|quotations?|download-category\/tender)(\/|$|\?)/i.test(absUrl)) {
-      score += 5;
-    }
-    if (/\b(archived?|closed|awarded|cancelled|corrigendum-archive|rules|regulations|act|ordinance|faq|contact|about|login|register|sign\s*in|career|jobs?|press\s+release|gallery|team|wings|prc\s+decisions|tendersstats)\b/i.test(combined)) {
-      score -= 15;
-    }
-
-    if (score > 0) {
-      const existing = scoreMap.get(absUrl);
-      if (!existing || score > existing.score) {
-        scoreMap.set(absUrl, { text: text || absUrl, href: absUrl, score });
-      }
-    }
-  });
-
-  return Array.from(scoreMap.values()).sort((a, b) => b.score - a.score);
-}
-
-/**
  * Helper that fetches HTML and returns { html, finalUrl }.
  * Uses crawlerDeps.fetchHtml when mocked in tests, or fetchHtmlWithMetadata in live production runs
  * so cross-origin 301/302 redirects (e.g. bppra.gob.pk -> bpptwo.vdc.services:5451) are accurately tracked.
  */
-async function fetchHtmlSmart(url: string, cookieStr?: string): Promise<{ html: string; finalUrl: string }> {
+export async function fetchHtmlSmart(url: string, cookieStr?: string): Promise<{ html: string; finalUrl: string }> {
   if (crawlerDeps.fetchHtml !== fetchHtmlWithTolerantAgent) {
     const html = await crawlerDeps.fetchHtml(url, 0, cookieStr);
     return { html, finalUrl: url };
@@ -1029,259 +927,21 @@ async function fetchHtmlSmart(url: string, cookieStr?: string): Promise<{ html: 
   return fetchHtmlWithMetadata(url, 0, cookieStr);
 }
 
-/**
- * Rule 6: Strict base_url Origin Normalization — never store file paths or queries in base_url.
- */
-export function sanitizeBaseOrigin(url: string, fallback: string = ''): string {
-  try {
-    return new URL(url.trim()).origin;
-  } catch {
-    return fallback;
-  }
-}
-
-/**
- * Rule 1: Strict Trigger Gating — never trigger Auto-Heal on 0-item scans, network timeouts, TLS resets, or 502/503/504 gateway errors.
- * Only trigger when explicitly invoked by the operator (isManualTrigger = true) or on structural HTTP 404/410/500 dead-link errors.
- */
-export function shouldTriggerAutoHeal(fetchError: any, isManualTrigger: boolean = false): boolean {
-  if (isManualTrigger) return true;
-  if (!fetchError) return false;
-  const msg = String(fetchError?.message || fetchError || '');
-  const statusCode = Number(fetchError?.statusCode || 0);
-  if (statusCode === 404 || statusCode === 410) return true;
-  if (/^HTTP\s+(404|410|500)\b/i.test(msg)) return true;
-  return false;
-}
-
-/**
- * Rule 3: Registrable Domain Boundary — candidate URL must belong to the same hostname/subdomain as the portal
- * (or the official server-redirected root URL), preventing external ministry/footer link hijacking.
- */
-export function isAllowedPortalDomain(
-  candidateUrl: string,
-  portal: PortalDefinition,
-  redirectedRootUrl?: string
-): boolean {
-  try {
-    const candHost = new URL(candidateUrl).hostname.toLowerCase().replace(/^www\./, '');
-    const allowedHosts = new Set<string>();
-
-    const addHost = (u?: string) => {
-      if (!u) return;
-      try {
-        const h = new URL(u).hostname.toLowerCase().replace(/^www\./, '');
-        if (h) allowedHosts.add(h);
-      } catch {}
-    };
-
-    addHost(portal.baseUrl);
-    addHost(portal.tendersUrl);
-    addHost(redirectedRootUrl);
-    const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portal.id);
-    if (canonicalDef) {
-      addHost(canonicalDef.baseUrl);
-      addHost(canonicalDef.tendersUrl);
-    }
-
-    for (const allowed of allowedHosts) {
-      if (candHost === allowed || candHost.endsWith(`.${allowed}`) || allowed.endsWith(`.${candHost}`)) {
-        return true;
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Rule 4: Anti-Downgrade & Path Integrity Guard — prevents overwriting a specific tender path (e.g. /ActiveTenders.aspx)
- * with a bare root homepage (/), static file, login page, or non-procurement section.
- */
-export function isValidHealedTendersUrl(candidateUrl: string, portal: PortalDefinition): boolean {
-  try {
-    const parsed = new URL(candidateUrl);
-    const pathname = parsed.pathname || '/';
-
-    // Block static files/assets from becoming the portal listing URL
-    if (/\.(pdf|docx?|xlsx?|zip|rar|jpe?g|png|gif|webp|css|js)(\?|$)/i.test(pathname)) {
-      return false;
-    }
-
-    // Block login, auth, or non-procurement pages
-    if (/\/(login|signin|sign-in|auth|register|about|contact|career|jobs?|faq|gallery|press|rules|regulations)(\/|$|\.)/i.test(pathname)) {
-      return false;
-    }
-
-    // Block downgrading a specific non-root path to a bare root homepage "/"
-    const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portal.id);
-    const referenceTendersUrl = canonicalDef?.tendersUrl || portal.tendersUrl;
-    const currentPath = new URL(referenceTendersUrl).pathname || '/';
-    const isCurrentSpecific = currentPath !== '/' && currentPath !== '' && !/^\/index\.(html?|php|aspx?)$/i.test(currentPath);
-    const isCandidateRoot = pathname === '/' || pathname === '' || /^\/(index|home|default)\.(html?|php|aspx?)$/i.test(pathname);
-
-    if (isCurrentSpecific && isCandidateRoot) {
-      return false;
-    }
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Rule 5: Quality-Verified Yield Proof — requires >= 2 valid items, or >= 1 item that has BOTH a date (closingDate or publishDate)
- * AND a reference number or attachment URL. Never accepts 0 items or empty table states.
- */
-export function hasVerifiedTenderYield(items: RawScrapedItem[]): boolean {
-  if (!Array.isArray(items) || items.length === 0) return false;
-  if (items.length >= 2) return true;
-  const first = items[0];
-  const hasDate = Boolean(first.closingDate || first.publishDate);
-  const hasRefOrAttachment = Boolean(first.referenceNo) || Boolean(first.attachmentUrls && first.attachmentUrls.length > 0);
-  return hasDate && hasRefOrAttachment;
-}
-
-/**
- * Executes the 5-Step Autonomous Portal Discovery & Self-Healing Process governed by the 7 Anti-Corruption Rules:
- * 1. Identify organization base domain (including canonical PORTAL_DEFINITIONS baseline recovery)
- * 2. Open official website (following cross-domain/port redirects)
- * 3. Look for the "Tenders" button (deterministic scoring + Gemini link discovery fallback)
- * 4. Validate domain boundary, path integrity, and quality-verified tender yield
- * 5. Save the healed portal web address (with sanitized origin base_url) to SQLite portal_health
- */
-export async function healPortalConnection(
-  portal: PortalDefinition & { sessionCookies?: string }
-): Promise<{ healedPortal: PortalDefinition; result: ScrapeResult } | null> {
-  const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portal.id);
-  const rootCandidates: string[] = [];
-  if (portal.baseUrl) rootCandidates.push(sanitizeBaseOrigin(portal.baseUrl, portal.baseUrl));
-  if (canonicalDef?.baseUrl && !rootCandidates.includes(canonicalDef.baseUrl)) {
-    rootCandidates.push(canonicalDef.baseUrl);
-  }
-  try {
-    const tendersOrigin = new URL(portal.tendersUrl).origin;
-    if (!rootCandidates.includes(tendersOrigin)) {
-      rootCandidates.push(tendersOrigin);
-    }
-  } catch {}
-
-  for (const rootUrl of rootCandidates) {
-    let rootHtml = '';
-    let finalRootUrl = rootUrl;
-    try {
-      const fetched = await fetchHtmlSmart(rootUrl, portal.sessionCookies);
-      rootHtml = fetched.html;
-      finalRootUrl = fetched.finalUrl;
-    } catch {
-      continue;
-    }
-
-    if (!rootHtml || rootHtml.length < 50) continue;
-
-    // Step 3: Look for the tenders button on the official homepage
-    const scoredLinks = scoreCandidateTenderLinks(rootHtml, finalRootUrl);
-    let candidateUrls = scoredLinks.filter(l => l.score >= 5).map(l => l.href);
-
-    // Rule 7: Always include canonical PORTAL_DEFINITIONS tendersUrl as recovery candidate if current DB tendersUrl diverged
-    if (canonicalDef && canonicalDef.tendersUrl !== portal.tendersUrl) {
-      candidateUrls.unshift(canonicalDef.tendersUrl);
-    }
-
-    // Step 3B: AI Navigation Link Discovery Fallback if heuristic scoring finds no strong match
-    if (candidateUrls.length === 0) {
-      const $ = cheerio.load(rootHtml);
-      const rawLinks: Array<{ text: string; href: string }> = [];
-      $('a[href]').each((_, aEl) => {
-        const rawHref = ($(aEl).attr('href') || '').trim();
-        const text = $(aEl).text().replace(/\s+/g, ' ').trim();
-        if (!rawHref || rawHref.startsWith('#') || /^(javascript:|mailto:|tel:)/i.test(rawHref) || !text) return;
-        try {
-          const abs = rawHref.startsWith('http') ? rawHref : new URL(rawHref, finalRootUrl).toString();
-          if (!rawLinks.some(r => r.href === abs)) {
-            rawLinks.push({ text, href: abs });
-          }
-        } catch {}
-      });
-      if (rawLinks.length > 0) {
-        const aiUrls = await discoverTenderLinkWithAI({
-          links: rawLinks,
-          portalName: portal.name,
-          baseUrl: finalRootUrl
-        });
-        candidateUrls.push(...aiUrls);
-      }
-    }
-
-    // Deduplicate, skip already-failed tendersUrl, and enforce Rules 3 & 4 (Domain Boundary + Anti-Downgrade Path Guard)
-    const uniqueCandidates = Array.from(new Set(candidateUrls))
-      .filter(u => u !== portal.tendersUrl)
-      .filter(u => isAllowedPortalDomain(u, portal, finalRootUrl) && isValidHealedTendersUrl(u, portal))
-      .slice(0, 3);
-
-    // Step 4: Open each candidate portal URL and verify tender extraction
-    for (const candidateUrl of uniqueCandidates) {
-      try {
-        const { html: candidateHtml, finalUrl: resolvedCandidateUrl } = await fetchHtmlSmart(
-          candidateUrl,
-          portal.sessionCookies
-        );
-        if (!isAllowedPortalDomain(resolvedCandidateUrl, portal, finalRootUrl) || !isValidHealedTendersUrl(resolvedCandidateUrl, portal)) {
-          continue;
-        }
-
-        const resolvedBaseOrigin = sanitizeBaseOrigin(resolvedCandidateUrl, portal.baseUrl);
-        const candidatePortal: PortalDefinition = {
-          ...portal,
-          baseUrl: resolvedBaseOrigin,
-          tendersUrl: resolvedCandidateUrl
-        };
-
-        let parsed = parsePortalHtml(candidateHtml, candidatePortal);
-
-        // If deterministic selectors found 0 items, try Phase 2 Adaptive AI Layout Extraction
-        if (
-          parsed.items.length === 0 &&
-          !parsed.hitlRequired &&
-          !hasEmptyTenderTableState(candidateHtml) &&
-          hasProcurementSignals(candidateHtml)
-        ) {
-          const compacted = compactHtmlForAiExtraction(candidateHtml, candidatePortal.baseUrl);
-          const aiItems = await extractTenderListFromHtmlWithAI({
-            compactedHtml: compacted,
-            portalName: candidatePortal.name,
-            baseUrl: candidatePortal.baseUrl,
-            tendersUrl: candidatePortal.tendersUrl
-          });
-          if (aiItems.length > 0) {
-            parsed = { items: aiItems, hitlRequired: false };
-          }
-        }
-
-        // Rule 5: Only persist to SQLite if candidate passes Quality-Verified Yield Proof (NEVER on empty table state)
-        if (hasVerifiedTenderYield(parsed.items)) {
-          portal.baseUrl = candidatePortal.baseUrl;
-          portal.tendersUrl = candidatePortal.tendersUrl;
-          updatePortalHealth(portal.id, {
-            base_url: candidatePortal.baseUrl,
-            tenders_url: candidatePortal.tendersUrl,
-            access_mode: 'public',
-            status: 'online',
-            last_error_message: null,
-            verified_status: `Auto-healed -> ${candidatePortal.tendersUrl}`
-          });
-          return { healedPortal: candidatePortal, result: parsed };
-        }
-      } catch {
-        // Try next candidate
-      }
-    }
-  }
-
-  return null;
-}
+export {
+  scoreCandidateTenderLinks,
+  sanitizeBaseOrigin,
+  shouldTriggerAutoHeal,
+  isAllowedPortalDomain,
+  isValidHealedTendersUrl,
+  hasVerifiedTenderYield,
+  healPortalConnection
+} from './healer.js';
+import {
+  shouldTriggerAutoHeal,
+  isValidHealedTendersUrl,
+  sanitizeBaseOrigin,
+  healPortalConnection
+} from './healer.js';
 
 /**
  * Scrapes a portal via Playwright headless (if tier === 'playwright') with fallback to tolerant HTTP/Cheerio (Bug B1),
@@ -1463,187 +1123,7 @@ export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 
   return fetchHtmlWithMetadata(url, redirectCount, cookieStr).then(res => res.html);
 }
 
-/**
- * Strict date string parsing for Pakistani tenders:
- * Checks DD/MM/YYYY and DD-MM-YYYY first with explicit PKT (+05:00) timezone,
- * preventing US-style day/month swaps on days 1-12.
- */
-function isValidCalendarDay(year: number, month: number, day: number): boolean {
-  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
-  const maxDays = new Date(year, month, 0).getDate();
-  return day <= maxDays;
-}
-
-const MONTH_NAMES: Record<string, number> = {
-  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
-  apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
-  aug: 8, august: 8, sep: 9, september: 9, oct: 10, october: 10,
-  nov: 11, november: 11, dec: 12, december: 12
-};
-
 const DEFAULT_PORTAL_NAMES = new Set(PORTAL_DEFINITIONS.map(p => p.name.toLowerCase()));
-
-export function parseDateString(raw: string): string | null {
-  if (!raw || !raw.trim()) return null;
-  const str = raw.trim();
-
-  // Exclude known non-date text noise
-  if (/^(not available|n\/a|none|null|undefined|-+)$/i.test(str)) return null;
-
-  // Strip ordinal suffixes (1st, 2nd, 3rd, 4th..31st) and commas for uniform matching
-  const cleanStr = str
-    .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1')
-    .replace(/,/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  try {
-    // 1. Check numeric DD/MM/YYYY or DD-MM-YYYY with optional time
-    const dmyMatch = cleanStr.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-    if (dmyMatch) {
-      const day = parseInt(dmyMatch[1], 10);
-      const month = parseInt(dmyMatch[2], 10);
-      let year = parseInt(dmyMatch[3], 10);
-      if (year < 100) year += 2000;
-
-      const hour = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 14;
-      const minute = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
-      const second = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
-
-      if (
-        isValidCalendarDay(year, month, day) &&
-        hour >= 0 && hour < 24 &&
-        minute >= 0 && minute < 60 &&
-        second >= 0 && second < 60
-      ) {
-        const hStr = String(hour).padStart(2, '0');
-        const mStr = String(minute).padStart(2, '0');
-        const sStr = String(second).padStart(2, '0');
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
-        if (!isNaN(d.getTime())) {
-          return d.toISOString();
-        }
-      }
-      return null;
-    }
-
-    // 2. Named month format (Day first): e.g. 15 Nov 2026, 30 Oct, 2026, 15-November-2026
-    const namedMonthMatch = cleanStr.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
-    if (namedMonthMatch) {
-      const day = parseInt(namedMonthMatch[1], 10);
-      const month = MONTH_NAMES[namedMonthMatch[2].toLowerCase()];
-      let year = parseInt(namedMonthMatch[3], 10);
-      if (year < 100) year += 2000;
-
-      const hour = namedMonthMatch[4] ? parseInt(namedMonthMatch[4], 10) : 14;
-      const minute = namedMonthMatch[5] ? parseInt(namedMonthMatch[5], 10) : 0;
-      const second = namedMonthMatch[6] ? parseInt(namedMonthMatch[6], 10) : 0;
-
-      if (
-        month &&
-        isValidCalendarDay(year, month, day) &&
-        hour >= 0 && hour < 24 &&
-        minute >= 0 && minute < 60 &&
-        second >= 0 && second < 60
-      ) {
-        const hStr = String(hour).padStart(2, '0');
-        const mStr = String(minute).padStart(2, '0');
-        const sStr = String(second).padStart(2, '0');
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
-        if (!isNaN(d.getTime())) {
-          return d.toISOString();
-        }
-      }
-      return null;
-    }
-
-    // 2b. Named month format (Month first): e.g. September 25, 2026, Jun 30th 2026, Aug 17, 2026
-    const monthFirstMatch = cleanStr.match(/^([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{1,2})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/i);
-    if (monthFirstMatch) {
-      const month = MONTH_NAMES[monthFirstMatch[1].toLowerCase()];
-      const day = parseInt(monthFirstMatch[2], 10);
-      let year = parseInt(monthFirstMatch[3], 10);
-      if (year < 100) year += 2000;
-
-      const hour = monthFirstMatch[4] ? parseInt(monthFirstMatch[4], 10) : 14;
-      const minute = monthFirstMatch[5] ? parseInt(monthFirstMatch[5], 10) : 0;
-      const second = monthFirstMatch[6] ? parseInt(monthFirstMatch[6], 10) : 0;
-
-      if (
-        month &&
-        isValidCalendarDay(year, month, day) &&
-        hour >= 0 && hour < 24 &&
-        minute >= 0 && minute < 60 &&
-        second >= 0 && second < 60
-      ) {
-        const hStr = String(hour).padStart(2, '0');
-        const mStr = String(minute).padStart(2, '0');
-        const sStr = String(second).padStart(2, '0');
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
-        if (!isNaN(d.getTime())) {
-          return d.toISOString();
-        }
-      }
-      return null;
-    }
-
-    // 3. ISO format YYYY-MM-DD with optional time
-    const isoMatch = cleanStr.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-    if (isoMatch) {
-      const year = parseInt(isoMatch[1], 10);
-      const month = parseInt(isoMatch[2], 10);
-      const day = parseInt(isoMatch[3], 10);
-      const hour = isoMatch[4] ? parseInt(isoMatch[4], 10) : 14;
-      const minute = isoMatch[5] ? parseInt(isoMatch[5], 10) : 0;
-      const second = isoMatch[6] ? parseInt(isoMatch[6], 10) : 0;
-
-      if (
-        isValidCalendarDay(year, month, day) &&
-        hour >= 0 && hour < 24 &&
-        minute >= 0 && minute < 60 &&
-        second >= 0 && second < 60
-      ) {
-        const hStr = String(hour).padStart(2, '0');
-        const mStr = String(minute).padStart(2, '0');
-        const sStr = String(second).padStart(2, '0');
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
-        if (!isNaN(d.getTime())) {
-          return d.toISOString();
-        }
-      }
-      return null;
-    }
-
-    // 4. Fallback standard parse (only if it contains digits and not noise)
-    if (/\d/.test(str)) {
-      const fallback = new Date(str);
-      if (!isNaN(fallback.getTime())) {
-        return fallback.toISOString();
-      }
-    }
-  } catch {}
-
-  return null;
-}
-
-export function formatClosingDate(isoDate: string | null): string {
-  if (!isoDate) return 'Not Available';
-  try {
-    const d = new Date(isoDate);
-    if (isNaN(d.getTime())) return 'Not Available';
-    return d.toLocaleDateString('en-GB', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric'
-    }) + ', ' + d.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
-    }) + ' PKT';
-  } catch {
-    return 'Not Available';
-  }
-}
 
 /**
  * Matches scraped tender against active domain tracks and computes keyword match score
