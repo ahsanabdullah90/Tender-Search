@@ -13,8 +13,16 @@ export function sleep(ms: number): Promise<void> {
 
 export const sslTolerantAgent = new https.Agent({
   rejectUnauthorized: false,
-  keepAlive: true,
-  timeout: 15000
+  keepAlive: false,
+  timeout: 25000
+});
+
+export const legacySslTolerantAgent = new https.Agent({
+  rejectUnauthorized: false,
+  ciphers: 'DEFAULT:@SECLEVEL=0',
+  minVersion: 'TLSv1',
+  keepAlive: false,
+  timeout: 25000
 });
 
 export const HUMAN_CHROME_HEADERS = {
@@ -26,7 +34,7 @@ export const HUMAN_CHROME_HEADERS = {
   'sec-ch-ua-platform': '"Windows"',
   'sec-fetch-dest': 'document',
   'sec-fetch-mode': 'navigate',
-  'sec-fetch-site': 'same-origin',
+  'sec-fetch-site': 'none',
   'sec-fetch-user': '?1',
   'Upgrade-Insecure-Requests': '1'
 };

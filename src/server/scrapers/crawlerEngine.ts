@@ -1,7 +1,7 @@
 import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields, getGeminiApiKey } from '../db.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../deduplicator.js';
-import { getHumanJitterDelay, sleep, sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
+import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, Tender } from '../../types.js';
 import { downloadAndCacheDossier, deriveDossierLabel } from '../dossierManager.js';
 import { extractTenderFromImage, summarizeTenderTextWithAI, extractTenderListFromHtmlWithAI, discoverTenderLinkWithAI } from '../ocrService.js';
@@ -151,7 +151,9 @@ export async function startCrawlerScan(targetPortalId?: string, awaitCompletion:
               last_scan_at: new Date().toISOString(),
               last_items_found: itemsMatched,
               consecutive_zero_yields: newZeros,
-              last_error_message: rawItems.length === 0 ? 'No listings found on the last scan' : null
+              last_error_message: rawItems.length === 0
+                ? '0 tenders found on page — check website URL manually if active tenders are expected'
+                : null
             });
           }
         } catch (err: any) {
@@ -270,10 +272,50 @@ const GENERIC_LINK_LABELS = /^(download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click
 function resolvePortalUrl(href: string | undefined, portal: PortalDefinition): string {
   if (!href || href.startsWith('#') || href.startsWith('javascript:')) return portal.tendersUrl;
   try {
-    return href.startsWith('http') ? href : new URL(href, portal.baseUrl).toString();
+    const resolved = href.startsWith('http') ? new URL(href) : new URL(href, portal.baseUrl);
+    resolved.pathname = resolved.pathname.replace(/\/{2,}/g, '/');
+    return resolved.toString();
   } catch {
     return portal.tendersUrl;
   }
+}
+
+/**
+ * Checks whether a title or filename represents a post-bid evaluation report, pre-bid meeting minutes,
+ * annual procurement plan, or architectural/CAD drawing rather than an open tender opportunity.
+ */
+export function isNonBidEvaluationOrPlanTitle(title: string, url?: string): boolean {
+  const cleanTitle = (title || '').replace(/\s+/g, ' ').trim();
+  const fileSlug = url
+    ? decodeURIComponent(url.split('/').pop() || '').replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim()
+    : '';
+  const combined = `${cleanTitle} ${fileSlug}`;
+
+  // 1. Post-bid evaluation reports (Technical / Financial / Final / PPRA Evaluation Report)
+  if (
+    /^(?:ppra\s+)?(?:technical\s+|financial\s+|final\s+|bid\s+)?eval(?:ua|u)tion\s+report\b/i.test(cleanTitle) ||
+    /\b(?:technical|financial|final|bid)\s+eval(?:ua|u)tion\s+(?:report|as\s+per\s+ppra)\b/i.test(combined) ||
+    /^evaluation\s+report\b/i.test(cleanTitle)
+  ) {
+    return true;
+  }
+
+  // 2. Pre-bid minutes, procurement plans, templates, and non-tender notices
+  if (
+    /^(?:minutes?\s+of\s+pre[- ]?bid|minuets?\s+of\s+meeting|mom\s+of\s+|annual\s+procurement\s+plan|cancellation(?:\s+notice)?|approval\s+mechanism|management\s+team\s+cv\s+format|cv\s+format|list\s+of\s+trades|manual\s+skills\s+scholarship\s+program\s+system|formats?)$/i.test(cleanTitle) ||
+    /\b(?:annual\s+procurement\s+plan|minutes?\s+of\s+pre[- ]?bid|minuets?\s+of\s+meeting)\b/i.test(combined)
+  ) {
+    return true;
+  }
+
+  // 3. CAD floor plans, site plans, asset registers, and bid summaries (e.g. PSEB sub-files like "SITE PLANGround")
+  if (
+    /(?:site\s*plan|floor\s*plans?|ground\s*floor|elevation\s*plan|cad\s*drawing|assets?\s*register|bid\s*summary|tech\s+destination\s+of\s+the\s+year|approval\s+mechanism)/i.test(combined)
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function extractRefFromText(text: string): string | undefined {
@@ -324,20 +366,27 @@ export function cleanRowSummary(rowText: string, title: string, $el?: cheerio.Ch
 
 function collectRowAttachments($: cheerio.CheerioAPI, el: any, portal: PortalDefinition): string[] {
   const attachmentUrls: string[] = [];
-  $(el).find('a[href]').each((__, aEl) => {
-    const aHref = $(aEl).attr('href');
-    if (aHref && /\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(aHref)) {
+  $(el).find('a[href], a[data-downloadurl]').each((__, aEl) => {
+    const aHref = $(aEl).attr('data-downloadurl') || $(aEl).attr('href');
+    if (
+      aHref &&
+      (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(aHref) ||
+       /[?&]wpdmdl=\d+/i.test(aHref) ||
+       $(aEl).hasClass('wpdm-download-link'))
+    ) {
+      if (aHref.startsWith('#') || aHref.startsWith('javascript:')) return;
       const absUrl = resolvePortalUrl(aHref, portal);
       if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
     }
   });
-  $(el).find('img[src]').each((__, imgEl) => {
-    const src = $(imgEl).attr('src');
+  $(el).find('img').each((__, imgEl) => {
+    const src = $(imgEl).attr('data-lazy-src') || $(imgEl).attr('data-src') || $(imgEl).attr('src');
     const cls = ($(imgEl).attr('class') || '').toLowerCase();
     if (
       src &&
+      !src.startsWith('data:') &&
       /\.(jpe?g|png|webp)(\?|$)/i.test(src) &&
-      !/logo|icon|avatar|spinner|zoom-onhover|banner|flag|placeholder/i.test(src) &&
+      !/logo|icon|avatar|spinner|zoom-onhover|banner|flag|placeholder|download-icon/i.test(src) &&
       !cls.includes('on-hover-image')
     ) {
       const absUrl = resolvePortalUrl(src, portal);
@@ -398,6 +447,8 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 
       const href = titleLink.attr('href');
       const fullUrl = resolvePortalUrl(href, portal);
+      if (isNonBidEvaluationOrPlanTitle(title, fullUrl)) return;
+
       const subText = $(el).find('[data-label*="Submission"], [data-label*="Closing"]').text().trim();
       const openText = $(el).find('[data-label*="Opening"], [data-label*="Publish"]').text().trim();
       const rowText = $(el).text().replace(/\s+/g, ' ').trim();
@@ -433,12 +484,14 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       if (rawTitle.length <= 5) return;
 
       const fullUrl = resolvePortalUrl(link.attr('href'), portal);
-      const cardEl = $(el).closest('.card, .media, article');
+      const cardEl = $(el).closest('.card, .media, article, .wpdm-link-tpl, .col-md-4, .col-md-6');
       const rowText = (cardEl.length ? cardEl.text() : rawTitle).replace(/\s+/g, ' ').trim();
       const { publishDate, closingDate } = extractDatesFromText(rowText);
 
       // Strip leading date prefix from title if present (e.g. "22-08-2026, RENOVATION OF...")
       const cleanTitle = rawTitle.replace(/^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\s*[,:-]?\s*/, '').trim() || rawTitle;
+      if (isNonBidEvaluationOrPlanTitle(cleanTitle, fullUrl)) return;
+
       const attachmentUrls = cardEl.length ? collectRowAttachments($, cardEl.get(0), portal) : [];
 
       items.push({
@@ -455,12 +508,57 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     if (items.length > 0) return { items, hitlRequired: false };
   }
 
-  // 3. Structured PSDF advertisement listing boxes (.inner-advertisement-listing-box)
-  if ($('.inner-advertisement-listing-box').length > 0) {
+  // 3. Structured PSDF advertisement listing boxes (.inner-advertisement-listing-box) & dropdown PDFs (#tendersdownload-button)
+  if ($('.inner-advertisement-listing-box').length > 0 || $('#tendersdownload-button .dropdown-content a[href$=".pdf"]').length > 0) {
     const seenTitles = new Set<string>();
+    const seenUrls = new Set<string>();
+
+    // 3a. Parse active tender PDFs in #tendersdownload-button .dropdown-content
+    $('#tendersdownload-button .dropdown-content a[href$=".pdf"], .dropdown-content a[href$=".pdf"]').each((_, aEl) => {
+      const href = $(aEl).attr('href');
+      if (!href) return;
+      // Skip historical archive years 2020-2024 on PSDF uploads
+      if (/\/wp-content\/uploads\/202[0-4]\//i.test(href)) return;
+
+      const fullUrl = resolvePortalUrl(href, portal);
+      if (seenUrls.has(fullUrl)) return;
+
+      const liText = $(aEl).find('li').first().text().replace(/\s+/g, ' ').trim() || $(aEl).text().replace(/\s+/g, ' ').trim();
+      const fileSlug = decodeURIComponent(fullUrl.split('/').pop() || '')
+        .replace(/\.pdf$/i, '')
+        .replace(/^(?:Tender[-_ ]Document[-_ ]|Bidding[-_ ]Document[-_ ])/i, '')
+        .replace(/[-_]+/g, ' ')
+        .trim();
+
+      const isGenericLabel = !liText || GENERIC_LINK_LABELS.test(liText) || /^(tender\s+document(?:\s+uploaded)?|bidding\s+document|corrigendum(?:\s+bd|\s+tender\s+doc)?|advertisement(?:\s+\d+)?|formats?|ks)$/i.test(liText);
+      const title = isGenericLabel ? fileSlug : liText;
+      if (!title || title.length <= 5) return;
+      if (/^(tender\s+document(?:\s+uploaded)?|bidding\s+document|corrigendum(?:\s+bd|\s+tender\s+doc)?|advertisement(?:\s+\d+)?|formats?|ks)$/i.test(title)) return;
+      if (isNonBidEvaluationOrPlanTitle(title, fullUrl)) return;
+
+      const normTitle = title.toLowerCase();
+      if (seenTitles.has(normTitle)) return;
+      seenTitles.add(normTitle);
+      seenUrls.add(fullUrl);
+
+      const { publishDate, closingDate } = extractDatesFromText(`${title} ${fileSlug}`);
+      items.push({
+        referenceNo: extractRefFromText(title),
+        title,
+        organization: portal.name,
+        directUrl: fullUrl,
+        publishDate: publishDate || undefined,
+        closingDate,
+        description: '',
+        attachmentUrls: [fullUrl]
+      });
+    });
+
+    // 3b. Parse advertisement listing boxes (.inner-advertisement-listing-box)
     $('.inner-advertisement-listing-box').each((_, el) => {
-      const title = $(el).find('h4, h3, .listingadver-title1').first().text().replace(/\s+/g, ' ').trim();
+      const title = ($(el).find('h4.listingadver-title1').first().text() || $(el).find('h4, h3, .listingadver-title1').first().text()).replace(/\s+/g, ' ').trim();
       if (title.length <= 5 || seenTitles.has(title.toLowerCase())) return;
+      if (isNonBidEvaluationOrPlanTitle(title)) return;
       seenTitles.add(title.toLowerCase());
 
       const attachmentUrls = collectRowAttachments($, el, portal);
@@ -609,6 +707,42 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     if (items.length > 0) return { items, hitlRequired: false };
   }
 
+  // 3d. Structured UNGM Notice Rows (.tableRow.dataRow, .ungm-list-item, div[data-noticeid])
+  if ($('.tableRow.dataRow, .ungm-list-item, div[data-noticeid]').length > 0) {
+    $('.tableRow.dataRow, .ungm-list-item, div[data-noticeid]').each((_, el) => {
+      const noticeLink = $(el).find('a[href*="/Public/Notice/"]').first();
+      const title = (
+        noticeLink.find('.ungm-title').text() ||
+        noticeLink.text() ||
+        $(el).find('.ungm-title, .resultTitle').text()
+      ).replace(/\s+/g, ' ').trim();
+      if (!title || title.length <= 5) return;
+
+      const noticeId = $(el).attr('data-noticeid');
+      const href = noticeLink.attr('href') || (noticeId ? `/Public/Notice/${noticeId}` : undefined);
+      const directUrl = resolvePortalUrl(href, portal);
+      const rowText = $(el).text().replace(/\s+/g, ' ').trim();
+      const { publishDate, closingDate } = extractDatesFromText(rowText);
+
+      // Extract UN agency or reference cell if present
+      const cells = $(el).find('.tableCell');
+      const refText = cells.length >= 6 ? $(cells[5]).text().replace(/\s+/g, ' ').trim() : undefined;
+      const agencyText = cells.length >= 4 ? $(cells[3]).text().replace(/\s+/g, ' ').trim() : undefined;
+
+      items.push({
+        referenceNo: (refText && refText.length >= 3 && refText.length <= 40 ? refText : undefined) || extractRefFromText(rowText),
+        title,
+        organization: (agencyText && agencyText.length >= 2 && agencyText.length <= 60) ? `${agencyText} (${portal.name})` : portal.name,
+        directUrl,
+        publishDate: publishDate || undefined,
+        closingDate,
+        description: cleanRowSummary(rowText, title, $(el)),
+        attachmentUrls: collectRowAttachments($, el, portal)
+      });
+    });
+    if (items.length > 0) return { items, hitlRequired: false };
+  }
+
   // 4. Standard & Drupal / NinjaTable / GridView rows
   const selector = [
     'table tbody tr',
@@ -626,6 +760,9 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
   $(selector).each((_, el) => {
     // Skip if inside form, select, nav, header, footer, or search bar
     if ($(el).closest('form, select, nav, header, footer, .job-search, .search-form, .filter-bar, .pagination, aside').length > 0) return;
+
+    // Skip outer <article> wrappers that contain nested tables or tender rows (fixes Ignite mega-row bug)
+    if ($(el).is('article') && $(el).find('table, tbody tr, .tender-row, .tender-card, .job-post-item').length > 0) return;
 
     // Skip table header rows
     if ($(el).is('th') || $(el).closest('thead').length > 0 || $(el).find('th').length > $(el).find('td').length) return;
@@ -683,6 +820,8 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       title = rowText.slice(0, 100);
     }
 
+    if (isNonBidEvaluationOrPlanTitle(title, fullUrl)) return;
+
     const referenceNo = extractRefFromText(rowText);
 
     // Disambiguate dates using explicit Drupal/table cells, <time datetime>, or row text (Bug B7)
@@ -726,13 +865,12 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       if (seenUrls.has(fullUrl)) return;
 
       const fileSlug = decodeURIComponent(fullUrl.split('/').pop() || '').replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim();
-      // Skip non-procurement marketing/drawings files
-      if (/tech destination of the year|floor plans|asset register|approval mechanism/i.test(fileSlug)) return;
-
-      seenUrls.add(fullUrl);
       const aText = $(aEl).text().replace(/\s+/g, ' ').trim();
       const title = (!aText || GENERIC_LINK_LABELS.test(aText)) ? fileSlug : aText;
       if (title.length <= 5) return;
+      if (isNonBidEvaluationOrPlanTitle(title, fullUrl)) return;
+
+      seenUrls.add(fullUrl);
 
       const containerText = $(aEl).closest('.e-con, tr, article, li, div').text().replace(/\s+/g, ' ').trim();
       const { publishDate, closingDate } = extractDatesFromText(containerText);
@@ -891,18 +1029,137 @@ async function fetchHtmlSmart(url: string, cookieStr?: string): Promise<{ html: 
 }
 
 /**
- * Executes the 5-Step Autonomous Portal Discovery & Self-Healing Process:
- * 1. Identify organization base domain
+ * Rule 6: Strict base_url Origin Normalization — never store file paths or queries in base_url.
+ */
+export function sanitizeBaseOrigin(url: string, fallback: string = ''): string {
+  try {
+    return new URL(url.trim()).origin;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Rule 1: Strict Trigger Gating — never trigger Auto-Heal on 0-item scans, network timeouts, TLS resets, or 502/503/504 gateway errors.
+ * Only trigger when explicitly invoked by the operator (isManualTrigger = true) or on structural HTTP 404/410/500 dead-link errors.
+ */
+export function shouldTriggerAutoHeal(fetchError: any, isManualTrigger: boolean = false): boolean {
+  if (isManualTrigger) return true;
+  if (!fetchError) return false;
+  const msg = String(fetchError?.message || fetchError || '');
+  const statusCode = Number(fetchError?.statusCode || 0);
+  if (statusCode === 404 || statusCode === 410) return true;
+  if (/^HTTP\s+(404|410|500)\b/i.test(msg)) return true;
+  return false;
+}
+
+/**
+ * Rule 3: Registrable Domain Boundary — candidate URL must belong to the same hostname/subdomain as the portal
+ * (or the official server-redirected root URL), preventing external ministry/footer link hijacking.
+ */
+export function isAllowedPortalDomain(
+  candidateUrl: string,
+  portal: PortalDefinition,
+  redirectedRootUrl?: string
+): boolean {
+  try {
+    const candHost = new URL(candidateUrl).hostname.toLowerCase().replace(/^www\./, '');
+    const allowedHosts = new Set<string>();
+
+    const addHost = (u?: string) => {
+      if (!u) return;
+      try {
+        const h = new URL(u).hostname.toLowerCase().replace(/^www\./, '');
+        if (h) allowedHosts.add(h);
+      } catch {}
+    };
+
+    addHost(portal.baseUrl);
+    addHost(portal.tendersUrl);
+    addHost(redirectedRootUrl);
+    const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portal.id);
+    if (canonicalDef) {
+      addHost(canonicalDef.baseUrl);
+      addHost(canonicalDef.tendersUrl);
+    }
+
+    for (const allowed of allowedHosts) {
+      if (candHost === allowed || candHost.endsWith(`.${allowed}`) || allowed.endsWith(`.${candHost}`)) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rule 4: Anti-Downgrade & Path Integrity Guard — prevents overwriting a specific tender path (e.g. /ActiveTenders.aspx)
+ * with a bare root homepage (/), static file, login page, or non-procurement section.
+ */
+export function isValidHealedTendersUrl(candidateUrl: string, portal: PortalDefinition): boolean {
+  try {
+    const parsed = new URL(candidateUrl);
+    const pathname = parsed.pathname || '/';
+
+    // Block static files/assets from becoming the portal listing URL
+    if (/\.(pdf|docx?|xlsx?|zip|rar|jpe?g|png|gif|webp|css|js)(\?|$)/i.test(pathname)) {
+      return false;
+    }
+
+    // Block login, auth, or non-procurement pages
+    if (/\/(login|signin|sign-in|auth|register|about|contact|career|jobs?|faq|gallery|press|rules|regulations)(\/|$|\.)/i.test(pathname)) {
+      return false;
+    }
+
+    // Block downgrading a specific non-root path to a bare root homepage "/"
+    const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portal.id);
+    const referenceTendersUrl = canonicalDef?.tendersUrl || portal.tendersUrl;
+    const currentPath = new URL(referenceTendersUrl).pathname || '/';
+    const isCurrentSpecific = currentPath !== '/' && currentPath !== '' && !/^\/index\.(html?|php|aspx?)$/i.test(currentPath);
+    const isCandidateRoot = pathname === '/' || pathname === '' || /^\/(index|home|default)\.(html?|php|aspx?)$/i.test(pathname);
+
+    if (isCurrentSpecific && isCandidateRoot) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rule 5: Quality-Verified Yield Proof — requires >= 2 valid items, or >= 1 item that has BOTH a date (closingDate or publishDate)
+ * AND a reference number or attachment URL. Never accepts 0 items or empty table states.
+ */
+export function hasVerifiedTenderYield(items: RawScrapedItem[]): boolean {
+  if (!Array.isArray(items) || items.length === 0) return false;
+  if (items.length >= 2) return true;
+  const first = items[0];
+  const hasDate = Boolean(first.closingDate || first.publishDate);
+  const hasRefOrAttachment = Boolean(first.referenceNo) || Boolean(first.attachmentUrls && first.attachmentUrls.length > 0);
+  return hasDate && hasRefOrAttachment;
+}
+
+/**
+ * Executes the 5-Step Autonomous Portal Discovery & Self-Healing Process governed by the 7 Anti-Corruption Rules:
+ * 1. Identify organization base domain (including canonical PORTAL_DEFINITIONS baseline recovery)
  * 2. Open official website (following cross-domain/port redirects)
  * 3. Look for the "Tenders" button (deterministic scoring + Gemini link discovery fallback)
- * 4. Open candidate portal URL & verify it yields tender listings
- * 5. Save the healed portal web address to SQLite portal_health
+ * 4. Validate domain boundary, path integrity, and quality-verified tender yield
+ * 5. Save the healed portal web address (with sanitized origin base_url) to SQLite portal_health
  */
 export async function healPortalConnection(
   portal: PortalDefinition & { sessionCookies?: string }
 ): Promise<{ healedPortal: PortalDefinition; result: ScrapeResult } | null> {
+  const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portal.id);
   const rootCandidates: string[] = [];
-  if (portal.baseUrl) rootCandidates.push(portal.baseUrl);
+  if (portal.baseUrl) rootCandidates.push(sanitizeBaseOrigin(portal.baseUrl, portal.baseUrl));
+  if (canonicalDef?.baseUrl && !rootCandidates.includes(canonicalDef.baseUrl)) {
+    rootCandidates.push(canonicalDef.baseUrl);
+  }
   try {
     const tendersOrigin = new URL(portal.tendersUrl).origin;
     if (!rootCandidates.includes(tendersOrigin)) {
@@ -926,6 +1183,11 @@ export async function healPortalConnection(
     // Step 3: Look for the tenders button on the official homepage
     const scoredLinks = scoreCandidateTenderLinks(rootHtml, finalRootUrl);
     let candidateUrls = scoredLinks.filter(l => l.score >= 5).map(l => l.href);
+
+    // Rule 7: Always include canonical PORTAL_DEFINITIONS tendersUrl as recovery candidate if current DB tendersUrl diverged
+    if (canonicalDef && canonicalDef.tendersUrl !== portal.tendersUrl) {
+      candidateUrls.unshift(canonicalDef.tendersUrl);
+    }
 
     // Step 3B: AI Navigation Link Discovery Fallback if heuristic scoring finds no strong match
     if (candidateUrls.length === 0) {
@@ -952,9 +1214,10 @@ export async function healPortalConnection(
       }
     }
 
-    // Deduplicate and skip the already-failed tendersUrl unless the origin redirected
+    // Deduplicate, skip already-failed tendersUrl, and enforce Rules 3 & 4 (Domain Boundary + Anti-Downgrade Path Guard)
     const uniqueCandidates = Array.from(new Set(candidateUrls))
       .filter(u => u !== portal.tendersUrl)
+      .filter(u => isAllowedPortalDomain(u, portal, finalRootUrl) && isValidHealedTendersUrl(u, portal))
       .slice(0, 3);
 
     // Step 4: Open each candidate portal URL and verify tender extraction
@@ -964,7 +1227,11 @@ export async function healPortalConnection(
           candidateUrl,
           portal.sessionCookies
         );
-        const resolvedBaseOrigin = new URL(resolvedCandidateUrl).origin;
+        if (!isAllowedPortalDomain(resolvedCandidateUrl, portal, finalRootUrl) || !isValidHealedTendersUrl(resolvedCandidateUrl, portal)) {
+          continue;
+        }
+
+        const resolvedBaseOrigin = sanitizeBaseOrigin(resolvedCandidateUrl, portal.baseUrl);
         const candidatePortal: PortalDefinition = {
           ...portal,
           baseUrl: resolvedBaseOrigin,
@@ -992,8 +1259,8 @@ export async function healPortalConnection(
           }
         }
 
-        if (parsed.items.length > 0 || hasEmptyTenderTableState(candidateHtml)) {
-          // Step 5: Save the healed portal web address in SQLite and in-memory portal object
+        // Rule 5: Only persist to SQLite if candidate passes Quality-Verified Yield Proof (NEVER on empty table state)
+        if (hasVerifiedTenderYield(parsed.items)) {
           portal.baseUrl = candidatePortal.baseUrl;
           portal.tendersUrl = candidatePortal.tendersUrl;
           updatePortalHealth(portal.id, {
@@ -1017,11 +1284,12 @@ export async function healPortalConnection(
 
 /**
  * Scrapes a portal via Playwright headless (if tier === 'playwright') with fallback to tolerant HTTP/Cheerio (Bug B1),
- * enhanced with Self-Healing Phase 2 (Adaptive AI Layout Extraction) and Phase 3 (5-Step Autonomous URL Healer).
+ * enhanced with Self-Healing Phase 2 (Adaptive AI Layout Extraction) and strictly gated Phase 3 (Auto-Healer on dead links only).
  */
 async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string }): Promise<ScrapeResult> {
   let html: string | null = null;
   let fetchError: any = null;
+  let redirectedUrl: string | null = null;
 
   if (portal.tier === 'playwright') {
     try {
@@ -1030,10 +1298,18 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
       if (playwright && playwright.chromium) {
         let browser: any = null;
         try {
-          browser = await playwright.chromium.launch({ headless: true });
-          const context = await browser.newContext({ ignoreHTTPSErrors: true });
+          browser = await playwright.chromium
+            .launch({ headless: true, channel: 'chromium' })
+            .catch(() => playwright.chromium.launch({ headless: true }));
+          const context = await browser.newContext({
+            ignoreHTTPSErrors: true,
+            userAgent: HUMAN_CHROME_HEADERS['User-Agent']
+          });
           const page = await context.newPage();
-          await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+          await page
+            .waitForSelector('table, .job-post-item, .notice-table, .tableRow.dataRow, .tender-card, a[href*=".pdf"]', { timeout: 6000 })
+            .catch(() => {});
           html = await page.content();
           await browser.close();
         } catch {
@@ -1050,30 +1326,36 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
       const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies);
       html = fetched.html;
       if (fetched.finalUrl && fetched.finalUrl !== portal.tendersUrl) {
-        try {
-          portal.baseUrl = new URL(fetched.finalUrl).origin;
-          portal.tendersUrl = fetched.finalUrl;
-        } catch {}
+        redirectedUrl = fetched.finalUrl;
       }
     } catch (err) {
       fetchError = err;
     }
   }
 
-  // If primary tendersUrl failed (HTTP 404/500, DNS, redirect change), run 5-Step Autonomous URL Healer
+  // Rule 1: Only trigger Auto-Healer on explicit dead-link HTTP errors (404/410/500), NEVER on timeouts/TLS/0-item scans
   if (fetchError || html === null) {
-    const healed = await healPortalConnection(portal);
-    if (healed) {
-      return healed.result;
+    if (shouldTriggerAutoHeal(fetchError, false)) {
+      const healed = await healPortalConnection(portal);
+      if (healed) {
+        return healed.result;
+      }
     }
     throw fetchError || new Error('Scrape connection failure');
   }
 
   let result = parsePortalHtml(html, portal);
 
+  // Rule 2: Non-Destructive Redirect Handling — only update in-memory URL if redirect target is valid and yielded tenders
+  if (redirectedUrl && result.items.length > 0 && isValidHealedTendersUrl(redirectedUrl, portal)) {
+    portal.baseUrl = sanitizeBaseOrigin(redirectedUrl, portal.baseUrl);
+    portal.tendersUrl = redirectedUrl;
+  }
+
   // If 0 items returned and not a challenge/login wall or explicit empty state:
+  // Run Phase 2 Adaptive AI Layout Extraction on the current page ONLY.
+  // Rule 1: Do NOT run healPortalConnection on 0-item scans; preserve the URL and surface the manual URL check warning.
   if (result.items.length === 0 && !result.hitlRequired && !hasEmptyTenderTableState(html)) {
-    // Phase 2: Try Adaptive AI HTML Layout Extraction on the current page if it has procurement signals
     if (hasProcurementSignals(html)) {
       const compacted = compactHtmlForAiExtraction(html, portal.baseUrl);
       const aiItems = await extractTenderListFromHtmlWithAI({
@@ -1086,12 +1368,6 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
         return { items: aiItems, hitlRequired: false };
       }
     }
-
-    // Phase 3: Maybe the URL landed on a homepage instead of the Tenders subpage — run 5-Step Healer
-    const healed = await healPortalConnection(portal);
-    if (healed && healed.result.items.length > 0) {
-      return healed.result;
-    }
   }
 
   return result;
@@ -1100,7 +1376,8 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
 export function fetchHtmlWithMetadata(
   url: string,
   redirectCount: number = 0,
-  cookieStr?: string
+  cookieStr?: string,
+  useLegacyTls: boolean = false
 ): Promise<{ html: string; finalUrl: string }> {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
@@ -1123,14 +1400,14 @@ export function fetchHtmlWithMetadata(
     }
 
     const req = client.get(url, {
-      agent: isHttps ? sslTolerantAgent : undefined,
+      agent: isHttps ? (useLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
       headers: reqHeaders,
-      timeout: 15000
+      timeout: 25000
     }, res => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         const nextUrl = new URL(res.headers.location, url).toString();
-        return fetchHtmlWithMetadata(nextUrl, redirectCount + 1, cookieStr).then(resolve).catch(reject);
+        return fetchHtmlWithMetadata(nextUrl, redirectCount + 1, cookieStr, useLegacyTls).then(resolve).catch(reject);
       }
 
       if (res.statusCode && res.statusCode >= 400) {
@@ -1144,7 +1421,9 @@ export function fetchHtmlWithMetadata(
             // Return challenge HTML so parsePortalHtml flags hitlRequired (Bug B4)
             return resolve({ html: errBody, finalUrl: url });
           }
-          return reject(new Error(`HTTP ${res.statusCode} from portal server`));
+          const httpErr: any = new Error(`HTTP ${res.statusCode} from portal server`);
+          httpErr.statusCode = res.statusCode;
+          return reject(httpErr);
         });
         return;
       }
@@ -1154,7 +1433,24 @@ export function fetchHtmlWithMetadata(
       res.on('end', () => resolve({ html: data, finalUrl: url }));
     });
 
-    req.on('error', reject);
+    req.on('error', (err: any) => {
+      const msg = String(err?.message || '');
+      const code = String(err?.code || '');
+      // Automatic fallback 1: If server speaks plain HTTP on an HTTPS URL ("wrong version number"), retry over http://
+      if (isHttps && /wrong version number/i.test(msg)) {
+        const httpUrl = url.replace(/^https:/i, 'http:');
+        return fetchHtmlWithMetadata(httpUrl, redirectCount + 1, cookieStr, false).then(resolve).catch(() => reject(err));
+      }
+      // Automatic fallback 2: If modern TLS handshake fails on legacy .gov.pk server, retry once with legacySslTolerantAgent (SECLEVEL=0, TLSv1)
+      if (
+        isHttps &&
+        !useLegacyTls &&
+        (/EPROTO|ERR_SSL|TLSV1|UNSUPPORTED_PROTOCOL|ECONNRESET|socket hang up/i.test(`${code} ${msg}`))
+      ) {
+        return fetchHtmlWithMetadata(url, redirectCount, cookieStr, true).then(resolve).catch(() => reject(err));
+      }
+      reject(err);
+    });
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('Connection timed out'));
@@ -1591,7 +1887,7 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
 
   // 1. Fetch from direct_url or scrape detail page for images/PDFs
   if (shouldFetchLive && tender.direct_url && tender.direct_url.startsWith('http')) {
-    if (/\.(pdf|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url)) {
+    if (/\.(pdf|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url) || /[?&]wpdmdl=\d+/i.test(tender.direct_url)) {
       const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(tender.direct_url);
       const label = deriveDossierLabel(tender.direct_url, isImg ? 'Tender Notice Image' : 'Tender Document');
       const doc = await downloadAndCacheDossier(tender.id, tender.direct_url, label);

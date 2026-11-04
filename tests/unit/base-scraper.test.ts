@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getHumanJitterDelay, sleep, sslTolerantAgent, HUMAN_CHROME_HEADERS } from '../../src/server/scrapers/baseScraper.js';
+import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, HUMAN_CHROME_HEADERS } from '../../src/server/scrapers/baseScraper.js';
 
 describe('baseScraper utility module', () => {
   afterEach(() => {
@@ -48,11 +48,16 @@ describe('baseScraper utility module', () => {
   });
 
   describe('sslTolerantAgent', () => {
-    it('is configured to tolerate self-signed and expired TLS certificates', () => {
+    it('is configured to tolerate self-signed and expired TLS certificates and legacy gov.pk ciphers', () => {
       expect(sslTolerantAgent).toBeDefined();
       expect((sslTolerantAgent as any).options.rejectUnauthorized).toBe(false);
-      expect((sslTolerantAgent as any).options.keepAlive).toBe(true);
-      expect((sslTolerantAgent as any).options.timeout).toBe(15000);
+      expect((sslTolerantAgent as any).options.keepAlive).toBe(false);
+      expect((sslTolerantAgent as any).options.timeout).toBe(25000);
+
+      expect(legacySslTolerantAgent).toBeDefined();
+      expect((legacySslTolerantAgent as any).options.rejectUnauthorized).toBe(false);
+      expect((legacySslTolerantAgent as any).options.ciphers).toBe('DEFAULT:@SECLEVEL=0');
+      expect((legacySslTolerantAgent as any).options.minVersion).toBe('TLSv1');
     });
   });
 
@@ -62,6 +67,7 @@ describe('baseScraper utility module', () => {
       expect(HUMAN_CHROME_HEADERS['User-Agent']).toContain('Windows NT 10.0');
       expect(HUMAN_CHROME_HEADERS['Accept-Language']).toContain('ur;');
       expect(HUMAN_CHROME_HEADERS['sec-ch-ua-platform']).toBe('"Windows"');
+      expect(HUMAN_CHROME_HEADERS['sec-fetch-site']).toBe('none');
       expect(HUMAN_CHROME_HEADERS['Upgrade-Insecure-Requests']).toBe('1');
     });
   });

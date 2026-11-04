@@ -187,6 +187,13 @@ app.put('/api/portals/:portalId', (req, res) => {
     }
   }
 
+  // Enforce strict origin normalization on base_url (Rule 6: never store file paths in base_url)
+  if (typeof updates.base_url === 'string' && updates.base_url.trim()) {
+    try {
+      updates.base_url = new URL(updates.base_url.trim()).origin;
+    } catch {}
+  }
+
   // If operator updated tenders_url, derive clean base_url origin and clear stale offline/error states
   if (typeof updates.tenders_url === 'string' && updates.tenders_url.trim()) {
     try {

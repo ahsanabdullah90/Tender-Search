@@ -283,6 +283,30 @@ function seedPortalHealth() {
           db.prepare('UPDATE portal_health SET login_url = ? WHERE portal_id = ? AND (login_url IS NULL OR login_url = "")').run(p.loginUrl, p.id);
         } catch {}
       }
+
+      // Repair any corrupted base_url (e.g. containing a file path) or root-downgraded auto-healed tenders_url
+      try {
+        const dbRow = db.prepare('SELECT base_url, tenders_url, verified_status FROM portal_health WHERE portal_id = ?').get(p.id) as any;
+        if (dbRow) {
+          let cleanBase = dbRow.base_url;
+          try {
+            cleanBase = new URL(dbRow.base_url).origin;
+          } catch {
+            cleanBase = p.baseUrl;
+          }
+          if (cleanBase !== dbRow.base_url) {
+            db.prepare('UPDATE portal_health SET base_url = ? WHERE portal_id = ?').run(cleanBase, p.id);
+          }
+
+          // If a previous auto-heal downgraded a specific path (like /ActiveTenders.aspx) to a bare root "/", restore canonical tendersUrl
+          const defPath = new URL(p.tendersUrl).pathname;
+          const dbPath = new URL(dbRow.tenders_url).pathname;
+          if (defPath && defPath !== '/' && (dbPath === '/' || dbPath === '') && String(dbRow.verified_status || '').startsWith('Auto-healed')) {
+            db.prepare('UPDATE portal_health SET base_url = ?, tenders_url = ?, verified_status = ? WHERE portal_id = ?')
+              .run(p.baseUrl, p.tendersUrl, p.verifiedStatus, p.id);
+          }
+        }
+      } catch {}
     }
   });
 
@@ -614,8 +638,14 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
 
   for (const [key, val] of Object.entries(updates)) {
     if (allowedColumns.has(key) && val !== undefined) {
+      let normalizedVal = val;
+      if (key === 'base_url' && typeof val === 'string' && val.trim()) {
+        try {
+          normalizedVal = new URL(val.trim()).origin;
+        } catch {}
+      }
       fields.push(`${key} = ?`);
-      values.push(val);
+      values.push(normalizedVal);
     }
   }
 

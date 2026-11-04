@@ -27,6 +27,12 @@ import {
   analyzeTenderById,
   scoreCandidateTenderLinks,
   healPortalConnection,
+  sanitizeBaseOrigin,
+  shouldTriggerAutoHeal,
+  isAllowedPortalDomain,
+  isValidHealedTendersUrl,
+  hasVerifiedTenderYield,
+  isNonBidEvaluationOrPlanTitle,
   crawlerDeps
 } from '../../src/server/scrapers/crawlerEngine.js';
 import http from 'http';
@@ -381,7 +387,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
       let portal = getPortalHealthList().find(p => p.portal_id === 'punjab_eproc');
       expect(portal?.consecutive_zero_yields).toBe(1);
-      expect(portal?.last_error_message).toBe('No listings found on the last scan');
+      expect(portal?.last_error_message).toBe('0 tenders found on page — check website URL manually if active tenders are expected');
       expect(portal?.status).toBe('online');
 
       // Second zero yield
@@ -917,6 +923,176 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       // Must NOT scrape the random unrelated PDF from the homepage
       const dossiers = Array.isArray(analyzed?.cached_dossiers) ? analyzed.cached_dossiers : JSON.parse(analyzed?.cached_dossiers as any || '[]');
       expect(dossiers.length).toBe(0);
+    });
+
+    it('enforces the 7-Rule Auto-Healer Governance & Anti-Corruption Framework', async () => {
+      const punjabPortal = PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!;
+
+      // Rule 1: Never trigger auto-heal on 0-item scans, timeouts, or 502/503/504 errors; only on 404/410/500 or manual trigger
+      expect(shouldTriggerAutoHeal(null, false)).toBe(false);
+      expect(shouldTriggerAutoHeal(new Error('Connection timed out'), false)).toBe(false);
+      expect(shouldTriggerAutoHeal(new Error('ETIMEDOUT'), false)).toBe(false);
+      expect(shouldTriggerAutoHeal(new Error('HTTP 503 from portal server'), false)).toBe(false);
+      expect(shouldTriggerAutoHeal(new Error('HTTP 404 from portal server'), false)).toBe(true);
+      expect(shouldTriggerAutoHeal(new Error('HTTP 410 from portal server'), false)).toBe(true);
+      expect(shouldTriggerAutoHeal(null, true)).toBe(true);
+
+      // Rule 3: Registrable Domain Boundary Lock (block external ministry/footer links)
+      expect(isAllowedPortalDomain('https://eproc.punjab.gov.pk/ActiveTenders.aspx', punjabPortal)).toBe(true);
+      expect(isAllowedPortalDomain('https://sub.eproc.punjab.gov.pk/tenders', punjabPortal)).toBe(true);
+      expect(isAllowedPortalDomain('https://unrelated-ministry.gov.pk/tenders', punjabPortal)).toBe(false);
+
+      // Rule 4: Anti-Downgrade & Path Guard (never downgrade /ActiveTenders.aspx to root "/" or static file)
+      expect(isValidHealedTendersUrl('https://eproc.punjab.gov.pk/', punjabPortal)).toBe(false);
+      expect(isValidHealedTendersUrl('https://eproc.punjab.gov.pk/index.html', punjabPortal)).toBe(false);
+      expect(isValidHealedTendersUrl('https://eproc.punjab.gov.pk/login', punjabPortal)).toBe(false);
+      expect(isValidHealedTendersUrl('https://eproc.punjab.gov.pk/docs/manual.pdf', punjabPortal)).toBe(false);
+      expect(isValidHealedTendersUrl('https://eproc.punjab.gov.pk/ViewTenders.aspx', punjabPortal)).toBe(true);
+
+      // Rule 5: Quality-Verified Yield Proof (reject 0 items or 1 item without date+ref/attachment)
+      expect(hasVerifiedTenderYield([])).toBe(false);
+      expect(hasVerifiedTenderYield([{
+        title: 'Unverified Single Link',
+        organization: 'Org',
+        directUrl: 'https://eproc.punjab.gov.pk/page'
+      }])).toBe(false);
+      expect(hasVerifiedTenderYield([{
+        title: 'Verified Single Tender',
+        organization: 'Org',
+        directUrl: 'https://eproc.punjab.gov.pk/tender/1',
+        closingDate: '2026-12-01T14:00:00.000Z',
+        referenceNo: 'PPRA-2026-01'
+      }])).toBe(true);
+
+      // Rule 6: Strict base_url Origin Normalization
+      expect(sanitizeBaseOrigin('https://www.giz.de/en/workingwithgiz/bidding_procurement.html')).toBe('https://www.giz.de');
+    });
+
+    it('never runs healPortalConnection on a 0-item HTTP 200 scan and surfaces manual URL check warning', async () => {
+      const emptyPageHtml = '<html><body><div>Welcome to portal</div></body></html>';
+      const fetchSpy = vi.fn().mockResolvedValue(emptyPageHtml);
+      crawlerDeps.fetchHtml = fetchSpy;
+
+      await startCrawlerScan('peef', true);
+
+      // Should only fetch the primary tendersUrl once, never crawling homepage/candidates on 0-item scan
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const peefHealth = getPortalHealthList().find(p => p.portal_id === 'peef');
+      expect(peefHealth?.tenders_url).toBe('https://peef.org.pk/tenders');
+      expect(peefHealth?.last_error_message).toContain('0 tenders found on page — check website URL manually');
+    });
+
+    it('parses Ignite table rows without creating a fake <article> wrapper mega-row', () => {
+      const igniteHtml = `
+        <article class="post-page">
+          <h2>Tender Notice</h2>
+          <table>
+            <tbody>
+              <tr>
+                <td>1</td>
+                <td><a href="https://ignite.org.pk/wp-content/uploads/rfp-cloud.pdf">RFP for National Cloud Infrastructure</a></td>
+                <td>15-11-2026</td>
+                <td>30-11-2026</td>
+              </tr>
+              <tr>
+                <td>2</td>
+                <td><a href="https://ignite.org.pk/wp-content/uploads/rfp-cyber.pdf">Hiring of Cybersecurity Audit Firm</a></td>
+                <td>16-11-2026</td>
+                <td>05-12-2026</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+      `;
+      const ignitePortal = PORTAL_DEFINITIONS.find(p => p.id === 'ignite')!;
+      const res = parsePortalHtml(igniteHtml, ignitePortal);
+      expect(res.items.length).toBe(2);
+      expect(res.items.some(i => i.title === 'Tender Notice')).toBe(false);
+    });
+
+    it('parses PSDF dropdown PDFs and lazy-loaded images while skipping evaluation reports and old archives', () => {
+      const psdfHtml = `
+        <div id="tendersdownload-button">
+          <div class="dropdown-content">
+            <a href="https://psdf.org.pk/wp-content/uploads/2026/02/Advance-Tech-Digital-Skills-Scholarship-Program-2025-26-2.pdf">
+              <ul class="tenders-dropdown-inner">
+                <li>Advance Tech Digital Skills Scholarship Program (2025-26)</li>
+              </ul>
+            </a>
+            <a href="https://psdf.org.pk/wp-content/uploads/2026/05/Technical-Evaluation-Report-Procurement-of-Tool-Kits-1.pdf">
+              <ul class="tenders-dropdown-inner">
+                <li>Technical Evaluation Report</li>
+              </ul>
+            </a>
+            <a href="https://psdf.org.pk/wp-content/uploads/2022/09/Old-Archive-RFP.pdf">
+              <ul class="tenders-dropdown-inner">
+                <li>Old 2022 RFP</li>
+              </ul>
+            </a>
+          </div>
+        </div>
+        <div class="inner-advertisement-listing-box">
+          <img class="adver-thumbnail" data-lazy-src="https://psdf.org.pk/wp-content/uploads/2026/10/umeed-ad.jpg" src="" />
+          <h4 class="listingadver-title1" style="display:none;">Hiring of Training Service Providers for Umeed Program</h4>
+          <h4 class="listingadver-title">Hiring of Training Servic</h4>
+        </div>
+      `;
+      const psdfPortal = PORTAL_DEFINITIONS.find(p => p.id === 'psdf')!;
+      const res = parsePortalHtml(psdfHtml, psdfPortal);
+      expect(res.items.length).toBe(2);
+      expect(res.items[0].title).toBe('Advance Tech Digital Skills Scholarship Program (2025-26)');
+      expect(res.items[0].attachmentUrls).toEqual(['https://psdf.org.pk/wp-content/uploads/2026/02/Advance-Tech-Digital-Skills-Scholarship-Program-2025-26-2.pdf']);
+      expect(res.items[1].title).toBe('Hiring of Training Service Providers for Umeed Program');
+      expect(res.items[1].attachmentUrls).toEqual(['https://psdf.org.pk/wp-content/uploads/2026/10/umeed-ad.jpg']);
+    });
+
+    it('filters NDMA evaluation reports, normalizes double slashes, and supports FDE WPDM & UNGM rows', () => {
+      // 1. NDMA
+      const ndmaHtml = `
+        <div class="tender-card">
+          <div class="tender-card__title"><a href="https://www.ndma.gov.pk//storage/tender/eval-1.pdf">Technical Evaluation Report for Relief Tents</a></div>
+        </div>
+        <div class="tender-card">
+          <div class="tender-card__title"><a href="https://www.ndma.gov.pk//storage/tender/nit-solar.pdf">Procurement of Emergency Solar Generators</a></div>
+          <div data-label="Closing">25-11-2026</div>
+        </div>
+      `;
+      const ndmaPortal = PORTAL_DEFINITIONS.find(p => p.id === 'ndma')!;
+      const ndmaRes = parsePortalHtml(ndmaHtml, ndmaPortal);
+      expect(ndmaRes.items.length).toBe(1);
+      expect(ndmaRes.items[0].title).toBe('Procurement of Emergency Solar Generators');
+      expect(ndmaRes.items[0].directUrl).toBe('https://www.ndma.gov.pk/storage/tender/nit-solar.pdf');
+
+      // 2. FDE WPDM
+      const fdeHtml = `
+        <div class="card">
+          <h3 class="package-title"><a href="https://fde.gov.pk/download/supply-of-science-kits/">20-11-2026, Supply of Science Kits for Model Colleges</a></h3>
+          <a class="wpdm-download-link" data-downloadurl="https://fde.gov.pk/download/supply-of-science-kits/?wpdmdl=4512" href="#">Download</a>
+        </div>
+      `;
+      const fdePortal = PORTAL_DEFINITIONS.find(p => p.id === 'fde')!;
+      const fdeRes = parsePortalHtml(fdeHtml, fdePortal);
+      expect(fdeRes.items.length).toBe(1);
+      expect(fdeRes.items[0].attachmentUrls).toContain('https://fde.gov.pk/download/supply-of-science-kits/?wpdmdl=4512');
+
+      // 3. UNGM
+      const ungmHtml = `
+        <div class="tableRow dataRow notice-table" data-noticeid="299104">
+          <div class="tableCell"><a href="/Public/Notice/299104"><span class="ungm-title">Provision of Solar Hybrid Systems for Health Facilities in KP</span></a></div>
+          <div class="tableCell">28-Nov-2026</div>
+          <div class="tableCell">10-Nov-2026</div>
+          <div class="tableCell">UNDP</div>
+          <div class="tableCell">Request for proposal</div>
+          <div class="tableCell">UNDP-PAK-00921</div>
+        </div>
+      `;
+      const ungmPortal = PORTAL_DEFINITIONS.find(p => p.id === 'ungm')!;
+      const ungmRes = parsePortalHtml(ungmHtml, ungmPortal);
+      expect(ungmRes.items.length).toBe(1);
+      expect(ungmRes.items[0].title).toBe('Provision of Solar Hybrid Systems for Health Facilities in KP');
+      expect(ungmRes.items[0].referenceNo).toBe('UNDP-PAK-00921');
+      expect(ungmRes.items[0].organization).toContain('UNDP');
+      expect(ungmRes.items[0].directUrl).toBe('https://www.ungm.org/Public/Notice/299104');
     });
   });
 });
