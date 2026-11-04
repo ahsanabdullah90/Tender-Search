@@ -210,6 +210,12 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                     )}
                     <span className="text-ink-muted">· {p.category} · {lastChecked(p.last_scan_at)}</span>
                   </div>
+                  {p.last_error_message && state !== 'working' && (
+                    <div className="mt-1 flex items-center gap-1 text-[12px] text-danger">
+                      <span className="font-semibold">Reason:</span>
+                      <span className="truncate max-w-[500px]">{p.last_error_message}</span>
+                    </div>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {state === 'working' && <Chip tone="ok">Working</Chip>}
