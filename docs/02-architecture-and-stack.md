@@ -6,23 +6,23 @@ Tender Tracker is architected as an integrated single-process Node.js applicatio
 
 ```mermaid
 graph TD
-    subgraph Client [Browser Client (React 19 + Tailwind v4)]
+    subgraph Client [Browser Client: React 19 + Tailwind v4]
         AppShell[App Shell & Navigation]
-        Inbox[Inbox Screen]
-        Pipeline[Pipeline Board & Gantt]
-        Sources[Sources & Keywords Management]
+        Inbox[Inbox Screen & Triage List]
+        Pipeline[Pipeline Board & 5-Week Gantt]
+        Sources[Sources, Keywords & Data Management]
         KpiBanner[KPI Header & HITL Alerts]
         SSEClient[SSE Real-time Scan Progress]
     end
 
-    subgraph Server [Backend Engine (Express on Node 24)]
+    subgraph Server [Backend Engine: Express on Node 24]
         API[Express REST API /api/*]
         SSEHub[Server-Sent Events Stream]
         Scheduler[Background Crawl Scheduler]
         Crawler[Crawler Engine]
-        Deduplicator[Bigram Deduplicator]
+        Deduplicator[Dice Bigram Deduplicator]
         DossierMgr[Dossier Manager & Cache]
-        OCR[Gemini Vision OCR Service]
+        OCR[Gemini Multimodal & Summarization Service]
         BrowserEngine[Playwright Engine & Session Manager]
     end
 
@@ -35,7 +35,7 @@ graph TD
 
     subgraph External [External Web & Services]
         GovPortals[18 Pakistan Procurement Portals]
-        GeminiAPI[Google Gemini API]
+        GeminiAPI[Google AI Studio: Gemini Flash]
     end
 
     AppShell --> API
@@ -71,22 +71,22 @@ graph TD
 ### Data & Persistence
 - **Database**: SQLite 3 using `better-sqlite3` compiled for Node 24.
 - **Journal Mode**: Write-Ahead Logging (`PRAGMA journal_mode = WAL`) for concurrent reads and writes without blocking.
-- **Migrations**: Programmatic, idempotent guarded `ALTER TABLE` schema updates executed upon database initialization in `src/server/db.ts`.
+- **Schema & Migrations**: Programmatic, idempotent guarded `ALTER TABLE` schema updates and `app_settings` initialization in `src/server/db.ts`.
 
 ### Scraping, Automation & AI
 - **HTML Parsing**: `cheerio` for fast, lightweight DOM parsing of static HTML responses.
 - **HTTP Client**: Tolerant HTTPS/HTTP agents with configurable timeouts, header masquerading, and unverified TLS bypass for misconfigured legacy government SSL certs.
-- **Browser Automation**: `@playwright/test` / Playwright Chromium for rendering dynamic SPA portals (e.g., Sindh SPPRA) and interactive HITL Cloudflare bypass.
-- **OCR Engine**: `@google/genai` integrating Google Gemini Vision (`gemini-2.5-flash`) for scanned image corrigenda extraction.
+- **Browser Automation**: Playwright Chromium for rendering dynamic SPA portals (e.g., Sindh SPPRA) and interactive HITL Cloudflare bypass.
+- **AI Engine**: `@google/genai` integrating Google Gemini Flash (`gemini-flash-lite-latest` with `gemini-3.8-flash` candidate fallback) for multimodal scanned notice OCR and structured First-Look brief generation.
 
 ---
 
 ## Client-Server Communication
 
 1. **REST API**:
-   38 endpoints serve data queries, record mutations, status updates, bookmark toggles, credential submissions, and manual crawl triggers.
+   44 endpoints serve data queries, manual tender creation, file uploads, inline edits, status transitions, bookmark toggles, portal credentials, and manual crawl triggers.
 2. **Server-Sent Events (SSE)**:
-   `/api/scan/progress` delivers non-blocking, real-time push updates during crawl execution. The frontend displays active portal names, progress bars, and yield counts without polling.
+   `/api/scan/progress` (and alias `/api/scan/stream`) delivers non-blocking, real-time push updates during crawl execution.
 3. **Graceful Shutdown**:
    Listens for `SIGTERM` and `SIGINT`, shutting down the HTTP listener, terminating background schedulers, and safely closing SQLite database connections with WAL flush.
 
@@ -94,7 +94,7 @@ graph TD
 
 ## Data Boundary & Security Isolation
 
-- **Production Directory (`data/`)**: Contains live operational database `tender_tracker.db`, dossier downloads, encrypted session cookies, and database backups.
+- **Production Directory (`data/`)**: Contains live operational database `tender_tracker.db`, dossier downloads, serialized session cookies, and database backups.
 - **Sample Directory (`data-sample/`)**: Isolated environment populated by `npm run seed:sample` for demonstration and preview.
-- **Automated Test Isolation**: Tests enforce `TENDER_DATA_DIR` pointing to temporary isolated folders (`tests/temp/`) or explicit mock environments. The setup guard throws an immediate exception if a test attempts to bind to the root production `data/` directory.
+- **Automated Test Isolation**: Tests enforce `TENDER_DATA_DIR` pointing to temporary isolated folders (`AppData/Local/Temp/tt-suite-temp-*`). The setup guard throws an immediate exception if a test attempts to bind to the root production `data/` directory.
 - **Loopback Binding**: By default, `server.ts` binds strictly to `127.0.0.1` (`HOST=127.0.0.1`), preventing exposure on public network interfaces.

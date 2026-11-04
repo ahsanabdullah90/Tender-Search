@@ -102,6 +102,11 @@ erDiagram
         text access_mode
         text verified_status
     }
+
+    APP_SETTINGS {
+        text key PK
+        text value
+    }
 ```
 
 ---
@@ -130,12 +135,12 @@ The primary entity representing scraped, matched, and tracked procurement opport
 | `closing_date_formatted`| `TEXT` | `NOT NULL` | Human-friendly display date in PKT format. |
 | `estimated_value` | `TEXT` | `NULL` | Estimated tender budget (e.g., `"PKR 45,000,000"`). |
 | `location` | `TEXT` | `NULL` | Work/delivery station (e.g., `"Islamabad"`). |
-| `description` | `TEXT` | `DEFAULT ''` | Detailed scope or excerpt extracted from notice. |
-| `cached_dossiers` | `TEXT` | `DEFAULT '[]'` | JSON array of downloaded bidding document metadata. |
+| `description` | `TEXT` | `DEFAULT ''` | Detailed scope or AI First-Look brief extracted from notice. |
+| `cached_dossiers` | `TEXT` | `DEFAULT '[]'` | JSON array of downloaded bidding document metadata `{id, filename, filepath, mimeType, sizeBytes, label, downloadedAt}`. |
 | `has_corrigendum` | `INTEGER`| `DEFAULT 0` | Flag (0 or 1) indicating active amendment notice. |
 | `pipeline_status` | `TEXT` | `DEFAULT 'New Opportunity'` | Status constrained to `TENDER_STATUSES`. |
 | `status_notes` | `TEXT` | `DEFAULT ''` | Operator private notes and reminders. |
-| `result_expected_date` | `TEXT` | `NULL` | Target date when bid award results are expected. |
+| `result_expected_date` | `TEXT` | `NULL` | Target date when bid award results are expected (YYYY-MM-DD). |
 | `is_bookmarked` | `INTEGER`| `DEFAULT 0` | Starred tender flag (0 or 1). |
 | `viewed` | `INTEGER`| `DEFAULT 0` | Read indicator (0 or 1). |
 | `created_at` | `TEXT` | `NOT NULL` | Discovery timestamp. |
@@ -204,8 +209,7 @@ Maintains operational health, credentials, and scan metrics for each of the 18 p
 | `tenders_url` | `TEXT` | `NOT NULL` | Active tenders page URL. |
 | `login_url` | `TEXT` | `NULL` | Login page URL (for portals requiring authentication). |
 | `auth_username` | `TEXT` | `NULL` | Operator account username / email. |
-| `auth_password` | `TEXT` | `NULL` | Encrypted or local password for portal auth. |
-| `has_credentials`| `INTEGER`| `DEFAULT 0` | 1 if credentials have been submitted. |
+| `auth_password` | `TEXT` | `NULL` | Password for portal authentication. |
 | `session_cookies`| `TEXT` | `NULL` | Serialized session cookie storage. |
 | `status` | `TEXT` | `DEFAULT 'online'` | `'online'`, `'scanning'`, `'hitl_required'`, `'selector_broken'`, `'error'`. |
 | `last_scan_at` | `TEXT` | `NULL` | Timestamp of last scan completion. |
@@ -214,3 +218,13 @@ Maintains operational health, credentials, and scan metrics for each of the 18 p
 | `last_error_message` | `TEXT` | `NULL` | Error details or failure diagnostics. |
 | `access_mode` | `TEXT` | `DEFAULT 'public'`| `'public'`, `'login_required'`, `'cloudflare'`, `'offline_broken'`. |
 | `verified_status`| `TEXT` | `NULL` | Informational status badge for UI. |
+
+---
+
+### 6. `app_settings`
+Key-value storage for application configuration managed directly via the UI (e.g., Google AI Studio Gemini API Key).
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `key` | `TEXT` | `PRIMARY KEY` | Setting key (e.g., `'gemini_api_key'`). |
+| `value` | `TEXT` | `NULL` | Plaintext value (e.g., API key token). |

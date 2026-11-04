@@ -22,24 +22,46 @@
 - **Decision**: Surface a one-click HITL browser launcher in the UI. The operator solves the challenge once, and harvested cookies allow headless scanning for weeks.
 - **Consequences**: Completely resilient against modern Cloudflare protections with zero monthly API costs.
 
+### ADR 05: Google AI Studio Multimodal Extraction & Model Fallback
+- **Context**: Bidding documents in Pakistan are frequently published as low-resolution newspaper clipping scans, multi-page PDFs, or unformatted text blocks. Relying on a single model endpoint can encounter transient rate limits or quota variations.
+- **Decision**: Integrate Google AI Studio via `@google/genai` using Candidate Model Fallback (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.8-flash`) with a 15-second timeout and strict JSON schema output. Support setting the API key both via environment variables and through the UI in the SQLite `app_settings` table.
+- **Consequences**: Fast, high-accuracy document parsing and structured "First Look" summary briefs with zero single-model dependency.
+
+### ADR 06: Zero-Loss Manual Tender & Dossier Intake
+- **Context**: High-value opportunities often arrive via direct channels (WhatsApp, print newspapers, peer referrals) outside monitored web portals.
+- **Decision**: Provide an Inbox "Add Tender" modal supporting drag-and-drop notice uploads, AI auto-fill, and manual editing, linking documents into `./data/dossiers/`.
+- **Consequences**: Tender Tracker functions as a complete, centralized repository for all opportunities, automated or manual.
+
 ---
 
 ## Changelog
 
+### Version 1.2.0 (November 2–4, 2026)
+- **AI Model Resilience & Timeout Protection**:
+  - Implemented candidate model fallback (`gemini-flash-lite-latest` and `gemini-3.8-flash`) in `ocrService.ts` with 15s timeout.
+  - Resolved Vite middleware EPERM locking on Windows in test suites.
+- **Clean Repository Hygiene**:
+  - Removed obsolete generated test images, legacy mockups zip, redundant lockfiles, legacy AI Studio planning docs, and leftover sentinel database files.
+  - Authored missing `docs/08-testing-and-coverage.md` and brought all architectural documentation into full alignment with the codebase.
+- **On-Demand Tender Refresh**:
+  - Added real-time portal re-crawl and AI re-summarization via `POST /api/tenders/:id/refresh` and Inbox UI button (`f75aca0`).
+- **Google AI Studio Extraction & Manual Tender Intake**:
+  - Added in-app Gemini API key configuration via Sources > Data (`app_settings` SQLite table).
+  - Added multimodal image and PDF notice auto-fill extraction (`POST /api/ai/extract-file`).
+  - Added manual tender intake modal with automatic track matching (`POST /api/tenders`).
+  - Added manual attachment uploads (`POST /api/tenders/:id/attachments`) with inline PDF and image previews (`7bc9d84`).
+- **Live Scraper Heuristics & Portal DOM Extractors**:
+  - Custom DOM extractors added for NDMA (`.tender-card`), FDE (`h3.package-title`), PSDF (`.inner-advertisement-listing-box`), and PSEB.
+  - Expanded date parser to support ordinal suffixes (`15th`), month name formats (`November 15, 2026`), and comma delimiters.
+  - Filtered default portal names from track matching to eliminate false-positive matches on skills/education boards (`eb55963`).
+
+### Version 1.1.0 (November 1, 2026)
+- **Test Expansion & Hardening**:
+  - Expanded test coverage across UI, API, database, and scraper suites to 288 passing tests across 25 suites.
+  - Added Playwright browser HITL lifecycle tests, storage pruning tests, and crawler HTTP agent redirect validation (`a683f66`).
+
 ### Version 1.0.0 (October 31 – November 1, 2026)
-- **Rebranding**: Completed transition from legacy working name to **Tender Tracker** across the entire UI, codebase, and documentation.
-- **Refactoring (Phase 0)**:
-  - Extracted `parsePortalHtml()` from `crawlerEngine.ts` to enable hermetic offline unit testing.
-  - Exported `createApp()` and `startServer()` in `server.ts` to allow Supertest API integration without premature port binding.
-  - Extracted and unified `TENDER_STATUSES` constant across client, server, and schema.
-- **Bug Fixes (Phases 1–6)**:
-  - Resolved all 13 known bugs (B1 through B13) with test-first methodology.
-  - Implemented Playwright graceful fallback (B1), scan awaiting (B2), startup watchdog for stuck portals (B3), Cloudflare challenge detection (B4), zero-yield diagnostics (B5), expired opportunity filter (B6), multi-date disambiguation (B7), strict status validation (B8), sessions directory configuration (B9), and Clear Inbox warning copy (B12).
-- **Test Infrastructure**:
-  - Implemented dual Vitest projects (`node` and `jsdom`).
-  - Added 25 test suites containing 197 passing tests covering unit functions, SQLite repositories, scraper pipelines, Supertest API routes, and React components.
-  - Implemented strict safety guard preventing tests from touching the production `data/` directory.
-- **Documentation**:
-  - Authored comprehensive documentation in `docs/` (`01-overview.md` through `12-decisions-and-changelog.md`).
-  - Archived earlier redesign notes to [`docs/archive/REDESIGN-HANDOVER.md`](archive/REDESIGN-HANDOVER.md).
-  - Updated root `README.md`.
+- **Rebranding & Redesign**:
+  - Transitioned to **Tender Tracker** with modern three-screen architecture (Inbox, Pipeline, Sources & Keywords).
+  - Resolved all 13 legacy bugs (B1 through B13).
+  - Implemented SQLite WAL persistence with rolling 14-day backups.

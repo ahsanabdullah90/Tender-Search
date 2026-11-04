@@ -392,7 +392,7 @@ app.get('/api/ai/status', (req, res) => {
   res.json({
     configured: Boolean(key),
     maskedKey,
-    model: 'gemini-2.5-flash'
+    model: 'gemini-flash-lite-latest'
   });
 });
 
@@ -600,7 +600,8 @@ export async function startServer() {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: 'spa'
+      appType: 'spa',
+      optimizeDeps: process.env.VITEST ? { noDiscovery: true } : undefined
     });
     app.use(vite.middlewares);
   } else {

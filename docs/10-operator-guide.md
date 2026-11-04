@@ -8,57 +8,82 @@ This guide outlines the day-to-day routine for managing and tracking tenders usi
 
 ### 1. Starting the Application
 
-From Windows PowerShell:
-```powershell
-cd H:\Tender-Search\Tender-Search
-npm run dev
-```
-Or use the launch configuration configured in `.claude/launch.json` (`tender-sample` or `tender-sample-prod`).
-
-Open your browser to: `http://localhost:3000` (or the configured `PORT`).
+On Windows 11:
+- Double-click **`start-tender-tracker.bat`** in the project directory, or run from PowerShell:
+  ```powershell
+  npm run dev
+  ```
+- The local SQLite WAL database initializes in `./data/tender_tracker.db` and launches the browser at `http://localhost:3000`.
 
 ---
 
-### 2. Monitoring Morning Alerts & KPIs
+### 2. Configuring Google AI Studio (Gemini)
+
+To enable automatic First-Look summaries and image/PDF OCR notice extraction:
+1. Navigate to **Sources & Keywords > Data**.
+2. Under **Google AI Studio (Gemini API)**:
+   - Paste your Gemini API key (`AIzaSy...`).
+   - Click **"Save Key"**.
+3. Status will display as `Connected (AIza••••1234) · Gemini Flash`.
+4. The key is stored securely in your local `app_settings` SQLite table and persists across reboots.
+
+---
+
+### 3. Monitoring Morning Alerts & KPIs
 
 When you open Tender Tracker:
-1. **Human Verification Banner**:
-   If an amber alert appears at the top stating that a portal requires verification (e.g., Cloudflare challenge or login session expired):
+1. **Human Verification (HITL) Banner**:
+   If an amber alert appears at the top stating that a portal requires verification (e.g., Cloudflare challenge or session expiration):
    - Click **"Launch HITL Browser"**.
    - A browser window opens directly to the portal.
    - Complete the Cloudflare verification or log in.
-   - Click **"Verify & Save Session"**.
+   - Click **"I've finished"** to save harvested cookies and resume automated passes.
 2. **Corrigenda Counter**:
    - Check the **Corrigenda** metric in the top KPI bar.
    - If greater than 0, tenders you are tracking have received deadline extensions or amendments.
-   - Click the alert to inspect the modified dates.
+   - Click the alert or filter by **Amended** to inspect modified closing dates.
 
 ---
 
-### 3. Reviewing the Inbox
+### 4. Reviewing the Inbox
 
 The **Inbox** holds newly discovered opportunities that matched your domain keywords:
-- **Filtering**: Use the search bar or domain filter pills (e.g., *Solar & Clean Energy*, *Construction*) to focus on specific categories.
+- **Filtering**: Use the search bar or the **Filters** popover (domain tracks, bookmarked, amended, sort by closing soonest / newest).
 - **Track this bid**: Moves the tender out of the Inbox and into your active **Pipeline** under `Under Review`.
 - **Pass**: Archives the notice if it is not commercially viable.
 - **Star (Bookmark)**: Pins high-priority opportunities so you never lose sight of them.
+- **Refresh from Portal**: Click the refresh button in the detail view to re-crawl the live portal page in real-time and regenerate the AI summary.
+- **Inline Editing**: Click **"Edit details"** to update title, reference number, deadline, budget, or scope directly in the app.
 
 ---
 
-### 4. Working the Pipeline (Board & Gantt)
+### 5. Adding Manual Tenders & Uploading Documents
+
+For newspaper clippings, direct WhatsApp leads, or PDF tenders from external sources:
+1. In the Inbox, click **"Add Tender"**.
+2. **Auto-Fill from File / Clipping**:
+   - Click **"Choose clipping / PDF notice to auto-fill"** and select a JPEG, PNG, or PDF.
+   - Google AI Studio automatically parses the document, extracting title, procuring organization, reference number, deadline, estimated value, and scope.
+3. Review and adjust any pre-filled fields.
+4. Click **"Save Tender"**. The tender is immediately tracked in your Inbox and the uploaded document is cached in `./data/dossiers/`.
+
+---
+
+### 6. Working the Pipeline (Board & Gantt)
 
 Switch to the **Pipeline** tab to manage active pursuits:
 - **Kanban Board**: Drag or click tenders to advance through the stages:
   `Under Review` $\rightarrow$ `Preparing Bid` $\rightarrow$ `Submitted` $\rightarrow$ `Won`.
-- **Gantt View**: Switch between **Board** and **Gantt** tabs to view submission deadlines and expected award result milestones over a 5-week timeline.
+- **Deadline Progress Bars**: Visual indicator of time remaining before the bid closing deadline. Turns into a red danger bar within 24 hours of closing.
+- **Gantt View**: Switch between **Board** and **Gantt** tabs to view submission deadlines (diamonds) and expected award result milestones (bars) over a 5-week timeline.
 - **Tender Slide-over**: Click any card to open the detail panel:
   - Add private notes (pricing notes, team reminders).
   - Set **Result Expected Date**.
-  - Download or view cached tender dossiers and attachments.
+  - Preview attached PDFs and notice images directly inline or download them.
 
 ---
 
-### 5. Managing Keywords & Portals
+### 7. Managing Keywords, Portals & Data
 
 Navigate to **Sources & Keywords**:
 1. **Keywords Subtab**:
@@ -68,6 +93,7 @@ Navigate to **Sources & Keywords**:
    - Check the operational health and last scan yields of all 18 portals.
    - Enter your login credentials for **Tender Services Pakistan** (`https://tenderservice.pk/permits/login.php`).
 3. **Data Subtab**:
-   - Create on-demand database backups.
-   - Prune cached documents for passed tenders to free up hard drive space.
-   - Clear unreviewed opportunities from the Inbox safely without affecting active pipeline bids.
+   - **CSV Export**: Export all bids, unreviewed inbox items, or active pipeline pursuits formatted with UTF-8 BOM for Microsoft Excel.
+   - **Backups**: Create on-demand database snapshots.
+   - **Pruning**: Delete cached documents for passed tenders to free up hard drive space without losing tender history.
+   - **Clear Inbox**: Safely removes unreviewed opportunities from the Inbox while strictly preserving active pipeline bids and starred bookmarks.

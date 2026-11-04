@@ -4,49 +4,58 @@ All backend routes are mounted under the `/api` prefix. The server responds with
 
 ---
 
-## 1. Tenders & Pipeline
+## 1. Tenders & Pipeline Management
 
 ### `GET /api/tenders`
 Returns a list of all active opportunities.
 - **Query Parameters**:
-  - `status` *(optional)*: Filter by pipeline status (e.g., `New Opportunity`, `Preparing Bid`).
+  - `status` *(optional)*: Filter by pipeline status (`New Opportunity`, `Under Review`, `Preparing Bid`, `Submitted`, `Won`, `Passed`).
   - `track` *(optional)*: Filter by matched domain track.
   - `search` *(optional)*: Text query matched against title, organization, reference number, or description.
-- **Response**: `200 OK`
-  ```json
-  [
-    {
-      "id": "punjab_eproc-10492",
-      "canonical_id": "punjab_eproc-10492",
-      "reference_no": "IPL-2026-991",
-      "title": "Supply and Installation of 500 kW Solar PV System",
-      "organization": "Punjab Energy Department",
-      "portal_id": "punjab_eproc",
-      "portal_name": "Punjab PPRA (eproc.punjab.gov.pk)",
-      "direct_url": "http://eproc.punjab.gov.pk/ViewTender.aspx?id=10492",
-      "secondary_sources": [],
-      "domain_tracks": ["Solar & Clean Energy"],
-      "matched_keywords": ["solar", "photovoltaic"],
-      "match_score": 92,
-      "publish_date": "2026-04-15",
-      "closing_date": "2026-05-10T14:00:00+05:00",
-      "closing_date_formatted": "10-05-2026 02:00 PM PKT",
-      "estimated_value": "PKR 82,000,000",
-      "location": "Lahore",
-      "description": "Grid-tied solar rooftop installation...",
-      "cached_dossiers": [],
-      "has_corrigendum": 0,
-      "pipeline_status": "New Opportunity",
-      "status_notes": "",
-      "is_bookmarked": 0,
-      "viewed": 0
-    }
-  ]
-  ```
+  - `bookmarkedOnly` *(optional, `true`\|`false`)*: Filter starred items.
+  - `corrigendumOnly` *(optional, `true`\|`false`)*: Filter tenders with active unacknowledged amendments.
+- **Response**: `200 OK` array of tender objects.
 
 ### `GET /api/tenders/:id`
 Retrieves a single tender by its unique identifier.
 - **Response**: `200 OK` or `404 Not Found`.
+
+### `POST /api/tenders`
+Creates a manual tender entry with automatic domain track matching and optional file attachment.
+- **Request Body**:
+  ```json
+  {
+    "title": "Supply of IT Equipment",
+    "organization": "National University of Technology",
+    "reference_no": "NUTECH-2026-IT",
+    "portal_name": "Newspaper Notice",
+    "direct_url": "https://example.com/notice",
+    "closing_date": "2026-11-20 14:00",
+    "estimated_value": "PKR 15,000,000",
+    "location": "Islamabad",
+    "description": "Procurement of laptops, switches, and interactive displays.",
+    "fileBase64": "data:image/jpeg;base64,...",
+    "filename": "clipping.jpeg",
+    "mimeType": "image/jpeg"
+  }
+  ```
+- **Response**: `201 Created` (`{"success": true, "tender": {...}}`).
+
+### `PATCH /api/tenders/:id`
+Updates editable fields on a tender record.
+- **Request Body**:
+  ```json
+  {
+    "title": "Updated Tender Title",
+    "organization": "Updated Org",
+    "reference_no": "REF-001",
+    "closing_date": "2026-12-01",
+    "estimated_value": "PKR 25,000,000",
+    "location": "Lahore",
+    "description": "Updated scope details."
+  }
+  ```
+- **Response**: `200 OK` (`{"success": true, "tender": {...}}`).
 
 ### `PATCH /api/tenders/:id/status`
 Updates the pipeline status of a tender.
@@ -57,56 +66,114 @@ Updates the pipeline status of a tender.
     "notes": "Reviewed specifications; viable commercial opportunity."
   }
   ```
-- **Validation (Bug B8)**: Must be one of the six valid `TENDER_STATUSES`:
+- **Validation**: Must be one of the six valid `TENDER_STATUSES`:
   - `New Opportunity`
   - `Under Review`
   - `Preparing Bid`
   - `Submitted`
   - `Won`
   - `Passed`
-- **Response**: `200 OK` or `400 Bad Request` (`{"error": "Invalid tender status"}`).
+- **Response**: `200 OK` or `400 Bad Request`.
 
 ### `PATCH /api/tenders/:id/notes`
 Saves operator notes on a specific tender.
-- **Request Body**: `{"notes": "Follow up with procurement officer regarding site visit."}`
+- **Request Body**: `{"notes": "Follow up with procurement officer."}`
 - **Response**: `200 OK`.
 
 ### `PATCH /api/tenders/:id/result-date`
 Sets or clears the expected award announcement date.
-- **Request Body**: `{"result_expected_date": "2026-06-30"}` (or `null` to clear).
+- **Request Body**: `{"date": "2026-06-30"}` (or `null` to clear).
 - **Response**: `200 OK`.
 
 ### `PATCH /api/tenders/:id/bookmark`
 Toggles the starred/bookmarked state.
-- **Response**: `200 OK` with updated status: `{"id": "...", "is_bookmarked": 1}`.
+- **Response**: `200 OK` with updated status.
 
 ### `PATCH /api/tenders/:id/viewed`
 Marks the tender as viewed/read.
 - **Response**: `200 OK`.
 
+### `POST /api/tenders/:id/refresh`
+Re-fetches the live portal page in real-time, extracts updated text, detects new attachments, and runs AI re-summarization if Gemini is configured.
+- **Response**: `200 OK` (`{"success": true, "tender": {...}, "message": "..."}`).
+
+### `POST /api/tenders/:id/analyze`
+Triggers on-demand Gemini AI analysis on the tender text or cached documents.
+- **Response**: `200 OK` (`{"success": true, "tender": {...}}`) or `400 Bad Request` if API key is not configured.
+
+### `POST /api/tenders/:id/attachments`
+Uploads a manual file attachment (PDF, image, document) to an existing tender and optionally runs AI OCR extraction.
+- **Request Body**:
+  ```json
+  {
+    "filename": "newspaper_advert.png",
+    "mimeType": "image/png",
+    "base64Data": "data:image/png;base64,...",
+    "label": "Tender Notice Clipping",
+    "runAi": true
+  }
+  ```
+- **Response**: `200 OK` (`{"success": true, "tender": {...}, "attachment": {...}, "aiExtracted": true}`).
+
+### `POST /api/tenders/clear`
+Clears unreviewed inbox opportunities or performs a full wipe.
+- **Request Body**:
+  ```json
+  {
+    "unreviewedOnly": true
+  }
+  ```
+  - When `unreviewedOnly: true`: Deletes unreviewed `New Opportunity` items; active pipeline stages and bookmarked records are preserved.
+  - When `unreviewedOnly: false`: Deletes all tenders.
+- **Response**: `200 OK` with confirmation message.
+
+### `GET /api/export/csv`
+Downloads a CSV export formatted with UTF-8 BOM for Microsoft Excel.
+- **Query Parameters**:
+  - `scope` *(optional)*: `'inbox'` (unreviewed), `'pipeline'` (active bids in work), or omit for all.
+  - `track`, `status`, `search`, `bookmarkedOnly`, `corrigendumOnly`.
+- **Response**: `200 OK` with `Content-Type: text/csv; charset=utf-8`.
+
 ---
 
-## 2. Corrigenda & Amendments
+## 2. Google AI Studio (Gemini API) Integration
+
+### `GET /api/ai/status`
+Returns the current Gemini configuration state, masked API key, and active model.
+- **Response**: `200 OK`
+  ```json
+  {
+    "configured": true,
+    "maskedKey": "AIza••••1234",
+    "model": "gemini-flash-lite-latest"
+  }
+  ```
+
+### `POST /api/ai/config`
+Saves or clears the Google AI Studio API key in the `app_settings` SQLite table.
+- **Request Body**: `{"apiKey": "AIzaSy..."}` (or `""` / `null` to clear).
+- **Response**: `200 OK` (`{"success": true, "configured": true, "maskedKey": "..."}`).
+
+### `POST /api/ai/extract-file`
+Extracts structured tender fields (organization, title, reference number, closing date, scope summary, corrigendum flag) from an uploaded image or PDF document.
+- **Request Body**:
+  ```json
+  {
+    "base64Data": "data:image/jpeg;base64,...",
+    "mimeType": "image/jpeg"
+  }
+  ```
+- **Response**: `200 OK` (`{"success": true, "extracted": {...}}`) or `422 Unprocessable Entity`.
+
+---
+
+## 3. Corrigenda & Amendments
 
 ### `GET /api/corrigenda`
 Returns all logged amendments and scope revisions.
 - **Query Parameters**:
   - `unacknowledged` *(optional, boolean)*: If `true`, returns only unread changes.
-- **Response**: `200 OK`
-  ```json
-  [
-    {
-      "id": "corr-819",
-      "tender_id": "punjab_eproc-10492",
-      "tender_title": "Supply and Installation of 500 kW Solar PV System",
-      "change_type": "deadline_extension",
-      "previous_value": "05-05-2026 02:00 PM PKT",
-      "new_value": "15-05-2026 02:00 PM PKT",
-      "is_acknowledged": 0,
-      "detected_at": "2026-05-02T11:20:00+05:00"
-    }
-  ]
-  ```
+- **Response**: `200 OK` array of `CorrigendumLog` records.
 
 ### `POST /api/corrigenda/:id/acknowledge`
 Acknowledges and clears an amendment alert.
@@ -114,25 +181,18 @@ Acknowledges and clears an amendment alert.
 
 ---
 
-## 3. Portals, Health & Authentication
+## 4. Portals, Health & Authentication
 
 ### `GET /api/portals`
 Returns health metrics, access modes, and configuration for all 18 procurement portals.
 - **Response**: `200 OK` array of `PortalHealth` records.
 
 ### `GET /api/portals/:id/credentials`
-Retrieves saved credentials configuration for a portal (e.g., `tender_services`).
-- **Response**: `200 OK`
-  ```json
-  {
-    "username": "operator@company.com",
-    "loginUrl": "https://tenderservice.pk/permits/login.php",
-    "hasPassword": true
-  }
-  ```
+Retrieves saved credentials metadata for a portal (e.g., `tender_services`).
+- **Response**: `200 OK` (`{"username": "...", "loginUrl": "...", "hasPassword": true}`).
 
 ### `POST /api/portals/:id/credentials`
-Submits login credentials, attempts portal authentication, and saves cookies.
+Submits credentials and attempts immediate portal authentication.
 - **Request Body**:
   ```json
   {
@@ -141,25 +201,25 @@ Submits login credentials, attempts portal authentication, and saves cookies.
     "loginUrl": "https://tenderservice.pk/permits/login.php"
   }
   ```
-- **Response**: `200 OK` (`{"success": true, "message": "Authentication successful"}`) or `401 Unauthorized`.
+- **Response**: `200 OK` or `401 Unauthorized`.
 
-### `POST /api/portals/:id/launch-hitl`
+### `POST /api/portals/:id/hitl-launch`
 Launches an interactive, headed Playwright browser window allowing the operator to solve Cloudflare Turnstile or portal bot checks.
 - **Response**: `200 OK` (`{"success": true, "message": "Browser session launched"}`).
 
-### `POST /api/portals/:id/verify-hitl`
-Validates whether active session cookies exist in `data/sessions/` after HITL completion.
-- **Response**: `200 OK` (`{"verified": true, "cookiesCount": 4}`).
+### `POST /api/portals/:id/hitl-verify`
+Validates whether active session cookies exist in `data/sessions/` after HITL completion and marks the portal online.
+- **Response**: `200 OK` (`{"success": true}`).
 
 ---
 
-## 4. Crawling & Scanning
+## 5. Crawling & Scanning
 
-### `POST /api/scan/trigger`
-Initiates a crawl.
+### `POST /api/scan/start`
+Initiates a crawl across all portals or a targeted portal.
 - **Request Body**:
-  - `portal_id` *(optional)*: Scan a single portal rather than all 18.
-- **Response**: `200 OK` (`{"message": "Scan started"}`).
+  - `portalId` *(optional)*: Scan a single portal rather than all 18.
+- **Response**: `200 OK` snapshot of initial scan status.
 
 ### `GET /api/scan/status`
 Returns immediate snapshot of crawler status.
@@ -173,16 +233,17 @@ Returns immediate snapshot of crawler status.
     "totalPortals": 18,
     "newTendersFound": 12,
     "corrigendaFound": 2,
-    "lastScanTimestamp": "2026-05-01T10:00:00+05:00"
+    "lastScanTimestamp": "2026-11-04T09:00:00+05:00"
   }
   ```
 
-### `GET /api/scan/progress`
+### `GET /api/scan/progress` & `GET /api/scan/stream`
 Server-Sent Events (SSE) connection streaming real-time scan progress events to connected clients.
+- Event envelope: `data: {"type": "scan_progress", "status": {...}}`.
 
 ---
 
-## 5. Domain Tracks & Keywords
+## 6. Domain Tracks & Keywords
 
 ### `GET /api/tracks`
 Returns all business domain tracking rules.
@@ -195,7 +256,7 @@ Creates or updates a domain track.
     "id": "track-solar",
     "name": "Solar & Clean Energy",
     "positive_keywords": ["solar", "photovoltaic", "inverter", "net metering"],
-    "negative_keywords": ["janitorial", "cleaning"]
+    "negative_keywords": ["solar geyser repair"]
   }
   ```
 
@@ -204,22 +265,19 @@ Deletes a domain track.
 
 ---
 
-## 6. Backups & Storage Management
+## 7. Storage, Dossiers & Backups
+
+### `GET /api/storage`
+Reports disk usage for dossiers, databases, passed tenders, and Gemini AI status.
+
+### `POST /api/dossiers/prune-passed`
+Deletes downloaded documents for tenders marked `Passed`, freeing local disk storage.
+
+### `GET /api/dossiers/:tenderId/:filename`
+Serves a cached local bidding document with path-traversal protection.
 
 ### `GET /api/backups`
 Lists all available SQLite backups with filenames, creation timestamps, and byte sizes.
 
-### `POST /api/backups/create`
+### `POST /api/backups`
 Generates an immediate SQLite vacuum backup into `data/backups/`.
-
-### `GET /api/storage`
-Reports disk usage for dossiers, databases, and passed tenders.
-
-### `POST /api/storage/prune`
-Deletes downloaded documents for tenders marked `Passed`, freeing local disk storage.
-
-### `POST /api/data/clear-inbox`
-Clears unreviewed opportunities from the inbox without affecting tracked pipeline tenders or bookmarked records (enforced by Bug B12 fix).
-
-### `GET /api/export/csv`
-Downloads an export of active pipeline or inbox tenders in CSV format with PKT dates.

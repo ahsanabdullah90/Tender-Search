@@ -27,6 +27,43 @@ const TENDER_JSON_SCHEMA = {
   required: ['organization', 'title', 'closingDateFormatted', 'summaryScope', 'isCorrigendum']
 };
 
+const CANDIDATE_MODELS = ['gemini-flash-lite-latest', 'gemini-3.8-flash'];
+
+function createAiClient(apiKey: string): GoogleGenAI {
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      timeout: 15000,
+      retryOptions: {
+        attempts: 1
+      }
+    }
+  });
+}
+
+async function generateWithFallback(
+  ai: GoogleGenAI,
+  params: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>
+): Promise<string | null> {
+  let lastErr: unknown = null;
+  for (const model of CANDIDATE_MODELS) {
+    try {
+      const response = await ai.models.generateContent({
+        ...params,
+        model
+      });
+      if (response?.text) return response.text;
+    } catch (err: any) {
+      lastErr = err;
+      console.warn(`[Gemini] Model ${model} generation attempt failed:`, err?.message || err);
+    }
+  }
+  if (lastErr) {
+    console.warn('[Gemini] All candidate models exhausted:', lastErr);
+  }
+  return null;
+}
+
 /**
  * Extracts structured tender information from a scanned newspaper clipping, notice image, or PDF buffer
  */
@@ -37,7 +74,7 @@ export async function extractTenderFromImage(imageBuffer: Buffer, mimeType: stri
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = createAiClient(apiKey);
     const base64Data = imageBuffer.toString('base64');
 
     const prompt = `You are a procurement data extraction specialist for Pakistan government and multilateral tender notices.
@@ -54,8 +91,7 @@ Important guidelines:
   If any of these details are not present in the document, explicitly mention that they are not stated in the notice.
 - Check if this is an "Extension Notice", "Corrigendum", "Addendum", or "Amendment". Set isCorrigendum: true if so.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+    const rawText = await generateWithFallback(ai, {
       contents: [
         {
           role: 'user',
@@ -76,8 +112,8 @@ Important guidelines:
       }
     });
 
-    if (!response.text) return null;
-    return JSON.parse(response.text) as OcrExtractedData;
+    if (!rawText) return null;
+    return JSON.parse(rawText) as OcrExtractedData;
   } catch (err) {
     console.warn('Gemini Vision/Document extraction encountered an error:', err);
     return null;
@@ -98,7 +134,7 @@ export async function summarizeTenderTextWithAI(params: {
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = createAiClient(apiKey);
     const prompt = `You are a procurement specialist analyzing a tender listing from Pakistan.
 Title: ${params.title}
 Organization: ${params.organization}
@@ -112,8 +148,7 @@ Extract the official tender details into strict JSON matching the schema:
   • Bid security / earnest money / submission instructions (if mentioned)
   Do NOT repeat raw table headers or navigation menu text. If the raw text only contains a title and dates with no detailed scope, state: "• Detailed scope and eligibility criteria are not stated in the portal listing text; please refer to the attached bidding document or portal page."`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+    const rawText = await generateWithFallback(ai, {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         responseMimeType: 'application/json',
@@ -121,8 +156,8 @@ Extract the official tender details into strict JSON matching the schema:
       }
     });
 
-    if (!response.text) return null;
-    return JSON.parse(response.text) as OcrExtractedData;
+    if (!rawText) return null;
+    return JSON.parse(rawText) as OcrExtractedData;
   } catch (err) {
     console.warn('Gemini text summarization encountered an error:', err);
     return null;

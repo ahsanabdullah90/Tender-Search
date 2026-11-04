@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { extractTenderFromImage } from '../../src/server/ocrService.js';
+import { extractTenderFromImage, summarizeTenderTextWithAI } from '../../src/server/ocrService.js';
 
 const { mockGenerateContent, expectedOcr } = vi.hoisted(() => {
   const expected = {
@@ -41,39 +41,82 @@ describe('ocrService', () => {
     vi.restoreAllMocks();
   });
 
-  it('returns null when GEMINI_API_KEY is not configured', async () => {
-    const dummyBuffer = Buffer.from('fake image data');
-    const result = await extractTenderFromImage(dummyBuffer);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when GEMINI_API_KEY is placeholder MY_GEMINI_API_KEY', async () => {
-    process.env.GEMINI_API_KEY = 'MY_GEMINI_API_KEY';
-    const dummyBuffer = Buffer.from('fake image data');
-    const result = await extractTenderFromImage(dummyBuffer);
-    expect(result).toBeNull();
-  });
-
-  it('handles GoogleGenAI client execution and parses valid JSON response', async () => {
-    process.env.GEMINI_API_KEY = 'valid-test-key';
-    const dummyBuffer = Buffer.from('fake image data');
-
-    mockGenerateContent.mockResolvedValueOnce({
-      text: JSON.stringify(expectedOcr)
+  describe('extractTenderFromImage', () => {
+    it('returns null when GEMINI_API_KEY is not configured', async () => {
+      const dummyBuffer = Buffer.from('fake image data');
+      const result = await extractTenderFromImage(dummyBuffer);
+      expect(result).toBeNull();
     });
 
-    const result = await extractTenderFromImage(dummyBuffer);
-    expect(result).toEqual(expectedOcr);
+    it('returns null when GEMINI_API_KEY is placeholder MY_GEMINI_API_KEY', async () => {
+      process.env.GEMINI_API_KEY = 'MY_GEMINI_API_KEY';
+      const dummyBuffer = Buffer.from('fake image data');
+      const result = await extractTenderFromImage(dummyBuffer);
+      expect(result).toBeNull();
+    });
+
+    it('handles GoogleGenAI client execution and parses valid JSON response', async () => {
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+      const dummyBuffer = Buffer.from('fake image data');
+
+      mockGenerateContent.mockResolvedValueOnce({
+        text: JSON.stringify(expectedOcr)
+      });
+
+      const result = await extractTenderFromImage(dummyBuffer);
+      expect(result).toEqual(expectedOcr);
+    });
+
+    it('falls back to secondary model when first model fails', async () => {
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+      const dummyBuffer = Buffer.from('fake image data');
+
+      mockGenerateContent
+        .mockRejectedValueOnce(new Error('503 Service Unavailable'))
+        .mockResolvedValueOnce({
+          text: JSON.stringify(expectedOcr)
+        });
+
+      const result = await extractTenderFromImage(dummyBuffer);
+      expect(result).toEqual(expectedOcr);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns null when GoogleGenAI returns empty or all models throw', async () => {
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+      const dummyBuffer = Buffer.from('fake image data');
+
+      mockGenerateContent.mockResolvedValue({ text: '' });
+      expect(await extractTenderFromImage(dummyBuffer)).toBeNull();
+
+      mockGenerateContent.mockReset();
+      mockGenerateContent.mockRejectedValue(new Error('Quota exceeded'));
+      expect(await extractTenderFromImage(dummyBuffer)).toBeNull();
+    });
   });
 
-  it('returns null when GoogleGenAI returns empty or throws error', async () => {
-    process.env.GEMINI_API_KEY = 'valid-test-key';
-    const dummyBuffer = Buffer.from('fake image data');
+  describe('summarizeTenderTextWithAI', () => {
+    it('returns null if API key is not configured or text is empty', async () => {
+      expect(await summarizeTenderTextWithAI({ title: 'Test', organization: 'Org', rawText: '' })).toBeNull();
 
-    mockGenerateContent.mockResolvedValueOnce({ text: '' });
-    expect(await extractTenderFromImage(dummyBuffer)).toBeNull();
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+      expect(await summarizeTenderTextWithAI({ title: 'Test', organization: 'Org', rawText: '   ' })).toBeNull();
+    });
 
-    mockGenerateContent.mockRejectedValueOnce(new Error('Quota exceeded'));
-    expect(await extractTenderFromImage(dummyBuffer)).toBeNull();
+    it('summarizes text and returns structured data', async () => {
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+
+      mockGenerateContent.mockResolvedValueOnce({
+        text: JSON.stringify(expectedOcr)
+      });
+
+      const res = await summarizeTenderTextWithAI({
+        title: 'Bridges',
+        organization: 'FWO',
+        rawText: 'Procurement of highway bridge construction.'
+      });
+
+      expect(res).toEqual(expectedOcr);
+    });
   });
 });
