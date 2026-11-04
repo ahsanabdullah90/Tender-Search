@@ -320,13 +320,9 @@ describe('SourcesScreen component', () => {
     const editDialog = screen.getByRole('dialog', { name: /Edit Punjab PPRA/ });
 
     // Edit name, tenders page address, and website address inputs
-    const nameInput = within(editDialog).getByLabelText('Name');
+    const nameInput = within(editDialog).getByLabelText(/Portal name|Name/);
     await user.clear(nameInput);
     await user.type(nameInput, 'Punjab PPRA eProcurement');
-
-    const tendersUrlInput = within(editDialog).getByLabelText('Tenders page address');
-    await user.clear(tendersUrlInput);
-    await user.type(tendersUrlInput, 'https://eproc.punjab.gov.pk/tenders');
 
     const webAddrInput = within(editDialog).getByLabelText('Website address');
     await user.clear(webAddrInput);

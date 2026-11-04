@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Download, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Download, ExternalLink, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react';
 import { DomainTrack, PortalHealth } from '../types';
 import { Button, Chip, Dialog, EmptyState, Panel, Tabs } from '../ui';
 import { PortalCredentialsModal } from './PortalCredentialsModal';
@@ -162,7 +162,7 @@ function lastChecked(iso: string | null) {
 function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal' | 'onLaunchHitl' | 'onVerifyHitl' | 'onScanSinglePortal'>) {
   const { portals } = props;
   const [editing, setEditing] = useState<PortalHealth | null>(null);
-  const [form, setForm] = useState({ portal_name: '', tenders_url: '', base_url: '' });
+  const [form, setForm] = useState({ portal_name: '', website_url: '' });
   const [credentialsFor, setCredentialsFor] = useState<PortalHealth | null>(null);
   const [verifying, setVerifying] = useState<string | null>(null);
 
@@ -170,7 +170,10 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
 
   const startEdit = (p: PortalHealth) => {
     setEditing(p);
-    setForm({ portal_name: p.portal_name, tenders_url: p.tenders_url, base_url: p.base_url });
+    setForm({
+      portal_name: p.portal_name,
+      website_url: p.tenders_url || p.base_url || ''
+    });
   };
 
   return (
@@ -185,11 +188,28 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
           .sort((a, b) => ['verify', 'offline', 'working'].indexOf(portalState(a)) - ['verify', 'offline', 'working'].indexOf(portalState(b)))
           .map(p => {
             const state = portalState(p);
+            const website = p.tenders_url || p.base_url;
             return (
               <div key={p.portal_id} className="flex items-center justify-between gap-4 border-b border-line px-5 py-3.5 last:border-b-0">
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <div className="truncate font-semibold">{p.portal_name}</div>
-                  <div className="text-[13px] text-ink-muted">{p.category} · {lastChecked(p.last_scan_at)}</div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[13px]">
+                    {website ? (
+                      <a
+                        href={website}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-mono text-[12px] text-accent hover:underline"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        <span className="truncate max-w-[280px] sm:max-w-[420px]">{website}</span>
+                        <ExternalLink className="h-3 w-3 shrink-0 opacity-70" />
+                      </a>
+                    ) : (
+                      <span className="font-mono text-[12px] font-medium text-danger">⚠️ Missing website address</span>
+                    )}
+                    <span className="text-ink-muted">· {p.category} · {lastChecked(p.last_scan_at)}</span>
+                  </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {state === 'working' && <Chip tone="ok">Working</Chip>}
@@ -221,7 +241,17 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
             <Button onClick={() => setEditing(null)}>Cancel</Button>
             <Button
               variant="primary"
-              onClick={() => { if (editing) props.onUpdatePortal(editing.portal_id, form); setEditing(null); }}
+              onClick={() => {
+                if (editing) {
+                  const url = form.website_url.trim();
+                  props.onUpdatePortal(editing.portal_id, {
+                    portal_name: form.portal_name.trim(),
+                    tenders_url: url,
+                    base_url: url
+                  });
+                }
+                setEditing(null);
+              }}
             >
               Save
             </Button>
@@ -229,14 +259,21 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
         }
       >
         <div className="space-y-4">
-          <Field label="Name">
-            <input value={form.portal_name} onChange={e => setForm({ ...form, portal_name: e.target.value })} className={inputClass} />
-          </Field>
-          <Field label="Tenders page address">
-            <input value={form.tenders_url} onChange={e => setForm({ ...form, tenders_url: e.target.value })} className={`${inputClass} font-mono text-[13px]`} />
+          <Field label="Portal name">
+            <input
+              value={form.portal_name}
+              onChange={e => setForm({ ...form, portal_name: e.target.value })}
+              className={inputClass}
+              placeholder="e.g. Punjab PPRA"
+            />
           </Field>
           <Field label="Website address">
-            <input value={form.base_url} onChange={e => setForm({ ...form, base_url: e.target.value })} className={`${inputClass} font-mono text-[13px]`} />
+            <input
+              value={form.website_url}
+              onChange={e => setForm({ ...form, website_url: e.target.value })}
+              className={`${inputClass} font-mono text-[13px]`}
+              placeholder="https://..."
+            />
           </Field>
           <Button onClick={() => { setCredentialsFor(editing); setEditing(null); }}>
             <KeyRound className="h-4 w-4" /> Login details
