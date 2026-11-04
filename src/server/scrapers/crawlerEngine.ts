@@ -4,7 +4,7 @@ import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../dedupl
 import { getHumanJitterDelay, sleep, sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, Tender } from '../../types.js';
 import { downloadAndCacheDossier } from '../dossierManager.js';
-import { extractTenderFromImage, summarizeTenderTextWithAI } from '../ocrService.js';
+import { extractTenderFromImage, summarizeTenderTextWithAI, extractTenderListFromHtmlWithAI, discoverTenderLinkWithAI } from '../ocrService.js';
 import * as cheerio from 'cheerio';
 import https from 'https';
 import http from 'http';
@@ -216,14 +216,14 @@ export const crawlerDeps = {
   sleep: (ms: number) => sleep(ms)
 };
 
-const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?\\s+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
+const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:st|nd|rd|th)?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
 
 /**
  * Extracts and disambiguates publish dates vs closing dates using labels and chronological sorting (Bug B7)
  */
 export function extractDatesFromText(rowText: string): { publishDate: string | null; closingDate: string | null } {
-  // 1. Look for explicit labels
-  const closingLabelRegex = new RegExp(`(?:closing|submission|deadline|due|last)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
+  // 1. Look for explicit labels (including "Dead Line" with space used on BPPRA ePPS)
+  const closingLabelRegex = new RegExp(`(?:closing|submission|dead\\s*line|due|last)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
   const publishLabelRegex = new RegExp(`(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
 
   const closingMatch = rowText.match(closingLabelRegex);
@@ -265,7 +265,7 @@ export function extractDatesFromText(rowText: string): { publishDate: string | n
   return { publishDate: null, closingDate: null };
 }
 
-const GENERIC_LINK_LABELS = /^(download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click\s+to\s+view|view(?:\s+details|\s+file)?|details|advertisement|tender\s+document|read\s+more|open|apply|corrigendum|asset\s+register|o&m\s+manuals|drawings)$/i;
+const GENERIC_LINK_LABELS = /^(download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click\s+to\s+view|view(?:\s+details|\s+file)?|details|advertisement|bidding\s+document|nit\s+document|boq\s+document|rfq\s+document|bid\s+document|evaluation\s+report|tender\s+document|read\s+more|open|apply|corrigendum|asset\s+register|o&m\s+manuals|drawings)$/i;
 
 function resolvePortalUrl(href: string | undefined, portal: PortalDefinition): string {
   if (!href || href.startsWith('#') || href.startsWith('javascript:')) return portal.tendersUrl;
@@ -481,6 +481,69 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     if (items.length > 0) return { items, hitlRequired: false };
   }
 
+  // 3b. Structured BPPRA ePPS Multi-Row Table (tr.tender-row-main + sibling tr.tender-row-dates)
+  if ($('tr.tender-row-main').length > 0) {
+    $('tr.tender-row-main').each((_, el) => {
+      const titleLink = $(el).find('.td-title-link').first();
+      const rawTitleBlock = (titleLink.text() || $(el).find('.td-title-cell').first().text()).replace(/\s+/g, ' ').trim();
+      if (!rawTitleBlock || rawTitleBlock.length <= 5) return;
+
+      const refFromBlock = extractRefFromText(rawTitleBlock);
+      let cleanTitle = rawTitleBlock;
+      if (refFromBlock) {
+        cleanTitle = cleanTitle.replace(refFromBlock, '').trim();
+      }
+      cleanTitle = cleanTitle.replace(/\s+/g, ' ').trim();
+      if (cleanTitle.length <= 5) cleanTitle = rawTitleBlock;
+
+      // Extract agency/department, UNSPSC category, and budget from main row cells
+      const agencyText = $(el).find('td:nth-child(3)').text().replace(/\s+/g, ' ').trim();
+      const unspscText = $(el).find('td:nth-child(4)').text().replace(/\s+/g, ' ').trim();
+      const budgetText = (
+        $(el).find('td:nth-child(5)').text() ||
+        $(el).find('.td-title-footer').text()
+      ).replace(/Estimated\s*budget\s*:\s*/i, '').replace(/\bOpen\b/gi, '').replace(/\s+/g, ' ').trim();
+
+      // Extract dates from sibling .tender-row-dates rows belonging to this rowspan group
+      let siblingDatesText = '';
+      let nextTr = $(el).next('tr');
+      let steps = 0;
+      while (nextTr.length > 0 && !nextTr.hasClass('tender-row-main') && steps < 3) {
+        siblingDatesText += ' ' + (nextTr.html() || nextTr.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        nextTr = nextTr.next('tr');
+        steps++;
+      }
+
+      const { publishDate, closingDate } = extractDatesFromText(siblingDatesText || $(el).text());
+
+      // Collect document links (.td-doc-link and standard file attachments)
+      const attachmentUrls = collectRowAttachments($, el, portal);
+      $(el).find('a.td-doc-link[href], .td-doc-links a[href]').each((__, aEl) => {
+        const href = $(aEl).attr('href');
+        if (href) {
+          const absUrl = resolvePortalUrl(href, portal);
+          if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
+        }
+      });
+
+      const directUrl = attachmentUrls[0] || portal.tendersUrl;
+      const summaryParts = [agencyText, unspscText].filter(Boolean);
+
+      items.push({
+        referenceNo: refFromBlock,
+        title: cleanTitle,
+        organization: agencyText || portal.name,
+        directUrl,
+        publishDate: publishDate || undefined,
+        closingDate,
+        estimatedValue: budgetText || undefined,
+        description: summaryParts.join(' | ').slice(0, 350),
+        attachmentUrls
+      });
+    });
+    if (items.length > 0) return { items, hitlRequired: false };
+  }
+
   // 4. Standard & Drupal / NinjaTable / GridView rows
   const selector = [
     'table tbody tr',
@@ -614,9 +677,275 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 }
 
 /**
- * Scrapes a portal via Playwright headless (if tier === 'playwright') with fallback to tolerant HTTP/Cheerio (Bug B1)
+ * Converts raw HTML into a compact, link-preserving markdown-style digest for Gemini AI extraction.
+ * Preserves <a href="...">Label</a> as [Label](resolvedUrl) while stripping scripts, styles, and chrome.
+ */
+export function compactHtmlForAiExtraction(html: string, baseUrl: string): string {
+  const $ = cheerio.load(html);
+  $('script, style, svg, noscript, iframe, nav, footer, header').remove();
+
+  $('a[href]').each((_, aEl) => {
+    const href = $(aEl).attr('href');
+    const text = $(aEl).text().replace(/\s+/g, ' ').trim();
+    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+    try {
+      const absUrl = href.startsWith('http') ? href : new URL(href, baseUrl).toString();
+      $(aEl).replaceWith(` [${text || 'Link'}](${absUrl}) `);
+    } catch {
+      // Keep original text if URL is malformed
+    }
+  });
+
+  const bodyText = ($('body').text() || $.root().text())
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n')
+    .trim();
+
+  return bodyText.slice(0, 25000);
+}
+
+/**
+ * Checks whether an HTML page contains explicit "0 open tenders" empty table wording.
+ */
+export function hasEmptyTenderTableState(html: string): boolean {
+  return /no\s+active\s+(?:tenders?|records?|procurements?)|no\s+records?\s+found|currently\s+0\s+open\s+tenders?|no\s+open\s+tenders?|0\s+tenders?\s+found/i.test(html);
+}
+
+/**
+ * Checks whether an HTML page has enough procurement signal words to warrant Adaptive AI DOM extraction.
+ */
+export function hasProcurementSignals(html: string): boolean {
+  const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (text.length < 120) return false;
+  const signals = [
+    /\btenders?\b/i,
+    /\bprocurements?\b/i,
+    /\brfps?\b|\brfqs?\b/i,
+    /\bbids?\b|\bbidding\b/i,
+    /\bnit\b|\bnotice\s+inviting\b/i,
+    /\bclosing\s+date\b|\bdead\s*line\b|\bsubmission\b/i
+  ];
+  let matchedCount = 0;
+  for (const rx of signals) {
+    if (rx.test(text)) matchedCount++;
+  }
+  return matchedCount >= 2;
+}
+
+/**
+ * Step 3 of the 5-Step Autonomous Healer:
+ * Scores all navigation/page links on an organization's homepage to locate the "Tenders" button/portal URL.
+ */
+export function scoreCandidateTenderLinks(
+  html: string,
+  finalBaseUrl: string
+): Array<{ text: string; href: string; score: number }> {
+  const $ = cheerio.load(html);
+  const baseTagHref = $('base[href]').attr('href');
+  let effectiveBase = finalBaseUrl;
+  if (baseTagHref) {
+    try {
+      effectiveBase = new URL(baseTagHref, finalBaseUrl).toString();
+    } catch {}
+  }
+
+  const scoreMap = new Map<string, { text: string; href: string; score: number }>();
+
+  $('a[href]').each((_, aEl) => {
+    const rawHref = ($(aEl).attr('href') || '').trim();
+    if (!rawHref || rawHref.startsWith('#') || /^(javascript:|mailto:|tel:)/i.test(rawHref)) return;
+
+    let absUrl: string;
+    try {
+      absUrl = rawHref.startsWith('http') ? rawHref : new URL(rawHref, effectiveBase).toString();
+    } catch {
+      return;
+    }
+
+    // Ignore external social media and map links
+    if (/facebook\.com|twitter\.com|x\.com|linkedin\.com|youtube\.com|instagram\.com|google\.com\/maps|whatsapp\.com/i.test(absUrl)) {
+      return;
+    }
+
+    // Ignore direct static file links when looking for a portal navigation page
+    if (/\.(pdf|docx?|xlsx?|zip|rar|jpe?g|png|gif)(\?|$)/i.test(absUrl)) {
+      return;
+    }
+
+    const text = $(aEl).text().replace(/\s+/g, ' ').trim();
+    const combined = `${text} ${rawHref}`;
+    let score = 0;
+
+    if (/\b(active\s+tenders?|open\s+tenders?|tenders?|e-?tenders?|procurement|tender\s+notices?|rfps?|active\s+bids?|nit|quotations?)\b/i.test(text)) {
+      score += 10;
+    }
+    if (/^(tenders?|active\s+tenders?|open\s+tenders?|procurement|bids?|rfps?|e-?tenders?|nit)$/i.test(text)) {
+      score += 4;
+    }
+    if (/\/(tenders?|active-tenders|procurement|bids|rfp|nit|quotations?|download-category\/tender)(\/|$|\?)/i.test(absUrl)) {
+      score += 5;
+    }
+    if (/\b(archived?|closed|awarded|cancelled|corrigendum-archive|rules|regulations|act|ordinance|faq|contact|about|login|register|sign\s*in|career|jobs?|press\s+release|gallery|team|wings|prc\s+decisions|tendersstats)\b/i.test(combined)) {
+      score -= 15;
+    }
+
+    if (score > 0) {
+      const existing = scoreMap.get(absUrl);
+      if (!existing || score > existing.score) {
+        scoreMap.set(absUrl, { text: text || absUrl, href: absUrl, score });
+      }
+    }
+  });
+
+  return Array.from(scoreMap.values()).sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Helper that fetches HTML and returns { html, finalUrl }.
+ * Uses crawlerDeps.fetchHtml when mocked in tests, or fetchHtmlWithMetadata in live production runs
+ * so cross-origin 301/302 redirects (e.g. bppra.gob.pk -> bpptwo.vdc.services:5451) are accurately tracked.
+ */
+async function fetchHtmlSmart(url: string, cookieStr?: string): Promise<{ html: string; finalUrl: string }> {
+  if (crawlerDeps.fetchHtml !== fetchHtmlWithTolerantAgent) {
+    const html = await crawlerDeps.fetchHtml(url, 0, cookieStr);
+    return { html, finalUrl: url };
+  }
+  return fetchHtmlWithMetadata(url, 0, cookieStr);
+}
+
+/**
+ * Executes the 5-Step Autonomous Portal Discovery & Self-Healing Process:
+ * 1. Identify organization base domain
+ * 2. Open official website (following cross-domain/port redirects)
+ * 3. Look for the "Tenders" button (deterministic scoring + Gemini link discovery fallback)
+ * 4. Open candidate portal URL & verify it yields tender listings
+ * 5. Save the healed portal web address to SQLite portal_health
+ */
+export async function healPortalConnection(
+  portal: PortalDefinition & { sessionCookies?: string }
+): Promise<{ healedPortal: PortalDefinition; result: ScrapeResult } | null> {
+  const rootCandidates: string[] = [];
+  if (portal.baseUrl) rootCandidates.push(portal.baseUrl);
+  try {
+    const tendersOrigin = new URL(portal.tendersUrl).origin;
+    if (!rootCandidates.includes(tendersOrigin)) {
+      rootCandidates.push(tendersOrigin);
+    }
+  } catch {}
+
+  for (const rootUrl of rootCandidates) {
+    let rootHtml = '';
+    let finalRootUrl = rootUrl;
+    try {
+      const fetched = await fetchHtmlSmart(rootUrl, portal.sessionCookies);
+      rootHtml = fetched.html;
+      finalRootUrl = fetched.finalUrl;
+    } catch {
+      continue;
+    }
+
+    if (!rootHtml || rootHtml.length < 50) continue;
+
+    // Step 3: Look for the tenders button on the official homepage
+    const scoredLinks = scoreCandidateTenderLinks(rootHtml, finalRootUrl);
+    let candidateUrls = scoredLinks.filter(l => l.score >= 5).map(l => l.href);
+
+    // Step 3B: AI Navigation Link Discovery Fallback if heuristic scoring finds no strong match
+    if (candidateUrls.length === 0) {
+      const $ = cheerio.load(rootHtml);
+      const rawLinks: Array<{ text: string; href: string }> = [];
+      $('a[href]').each((_, aEl) => {
+        const rawHref = ($(aEl).attr('href') || '').trim();
+        const text = $(aEl).text().replace(/\s+/g, ' ').trim();
+        if (!rawHref || rawHref.startsWith('#') || /^(javascript:|mailto:|tel:)/i.test(rawHref) || !text) return;
+        try {
+          const abs = rawHref.startsWith('http') ? rawHref : new URL(rawHref, finalRootUrl).toString();
+          if (!rawLinks.some(r => r.href === abs)) {
+            rawLinks.push({ text, href: abs });
+          }
+        } catch {}
+      });
+      if (rawLinks.length > 0) {
+        const aiUrls = await discoverTenderLinkWithAI({
+          links: rawLinks,
+          portalName: portal.name,
+          baseUrl: finalRootUrl
+        });
+        candidateUrls.push(...aiUrls);
+      }
+    }
+
+    // Deduplicate and skip the already-failed tendersUrl unless the origin redirected
+    const uniqueCandidates = Array.from(new Set(candidateUrls))
+      .filter(u => u !== portal.tendersUrl)
+      .slice(0, 3);
+
+    // Step 4: Open each candidate portal URL and verify tender extraction
+    for (const candidateUrl of uniqueCandidates) {
+      try {
+        const { html: candidateHtml, finalUrl: resolvedCandidateUrl } = await fetchHtmlSmart(
+          candidateUrl,
+          portal.sessionCookies
+        );
+        const resolvedBaseOrigin = new URL(resolvedCandidateUrl).origin;
+        const candidatePortal: PortalDefinition = {
+          ...portal,
+          baseUrl: resolvedBaseOrigin,
+          tendersUrl: resolvedCandidateUrl
+        };
+
+        let parsed = parsePortalHtml(candidateHtml, candidatePortal);
+
+        // If deterministic selectors found 0 items, try Phase 2 Adaptive AI Layout Extraction
+        if (
+          parsed.items.length === 0 &&
+          !parsed.hitlRequired &&
+          !hasEmptyTenderTableState(candidateHtml) &&
+          hasProcurementSignals(candidateHtml)
+        ) {
+          const compacted = compactHtmlForAiExtraction(candidateHtml, candidatePortal.baseUrl);
+          const aiItems = await extractTenderListFromHtmlWithAI({
+            compactedHtml: compacted,
+            portalName: candidatePortal.name,
+            baseUrl: candidatePortal.baseUrl,
+            tendersUrl: candidatePortal.tendersUrl
+          });
+          if (aiItems.length > 0) {
+            parsed = { items: aiItems, hitlRequired: false };
+          }
+        }
+
+        if (parsed.items.length > 0 || hasEmptyTenderTableState(candidateHtml)) {
+          // Step 5: Save the healed portal web address in SQLite and in-memory portal object
+          portal.baseUrl = candidatePortal.baseUrl;
+          portal.tendersUrl = candidatePortal.tendersUrl;
+          updatePortalHealth(portal.id, {
+            base_url: candidatePortal.baseUrl,
+            tenders_url: candidatePortal.tendersUrl,
+            access_mode: 'public',
+            status: 'online',
+            last_error_message: null,
+            verified_status: `Auto-healed -> ${candidatePortal.tendersUrl}`
+          });
+          return { healedPortal: candidatePortal, result: parsed };
+        }
+      } catch {
+        // Try next candidate
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Scrapes a portal via Playwright headless (if tier === 'playwright') with fallback to tolerant HTTP/Cheerio (Bug B1),
+ * enhanced with Self-Healing Phase 2 (Adaptive AI Layout Extraction) and Phase 3 (5-Step Autonomous URL Healer).
  */
 async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string }): Promise<ScrapeResult> {
+  let html: string | null = null;
+  let fetchError: any = null;
+
   if (portal.tier === 'playwright') {
     try {
       const modName = 'playwright';
@@ -628,9 +957,8 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
           const context = await browser.newContext();
           const page = await context.newPage();
           await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-          const html = await page.content();
+          html = await page.content();
           await browser.close();
-          return parsePortalHtml(html, portal);
         } catch {
           if (browser) {
             try { await browser.close(); } catch {}
@@ -640,11 +968,63 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
     } catch {}
   }
 
-  const html = await crawlerDeps.fetchHtml(portal.tendersUrl, 0, portal.sessionCookies);
-  return parsePortalHtml(html, portal);
+  if (html === null) {
+    try {
+      const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies);
+      html = fetched.html;
+      if (fetched.finalUrl && fetched.finalUrl !== portal.tendersUrl) {
+        try {
+          portal.baseUrl = new URL(fetched.finalUrl).origin;
+          portal.tendersUrl = fetched.finalUrl;
+        } catch {}
+      }
+    } catch (err) {
+      fetchError = err;
+    }
+  }
+
+  // If primary tendersUrl failed (HTTP 404/500, DNS, redirect change), run 5-Step Autonomous URL Healer
+  if (fetchError || html === null) {
+    const healed = await healPortalConnection(portal);
+    if (healed) {
+      return healed.result;
+    }
+    throw fetchError || new Error('Scrape connection failure');
+  }
+
+  let result = parsePortalHtml(html, portal);
+
+  // If 0 items returned and not a challenge/login wall or explicit empty state:
+  if (result.items.length === 0 && !result.hitlRequired && !hasEmptyTenderTableState(html)) {
+    // Phase 2: Try Adaptive AI HTML Layout Extraction on the current page if it has procurement signals
+    if (hasProcurementSignals(html)) {
+      const compacted = compactHtmlForAiExtraction(html, portal.baseUrl);
+      const aiItems = await extractTenderListFromHtmlWithAI({
+        compactedHtml: compacted,
+        portalName: portal.name,
+        baseUrl: portal.baseUrl,
+        tendersUrl: portal.tendersUrl
+      });
+      if (aiItems.length > 0) {
+        return { items: aiItems, hitlRequired: false };
+      }
+    }
+
+    // Phase 3: Maybe the URL landed on a homepage instead of the Tenders subpage — run 5-Step Healer
+    const healed = await healPortalConnection(portal);
+    if (healed && healed.result.items.length > 0) {
+      return healed.result;
+    }
+  }
+
+  return result;
 }
 
-export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0, cookieStr?: string): Promise<string> {
+export function fetchHtmlWithMetadata(
+  url: string,
+  redirectCount: number = 0,
+  cookieStr?: string
+): Promise<{ html: string; finalUrl: string }> {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
       return reject(new Error('Too many redirects while loading portal page'));
@@ -673,7 +1053,7 @@ export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         const nextUrl = new URL(res.headers.location, url).toString();
-        return fetchHtmlWithTolerantAgent(nextUrl, redirectCount + 1, cookieStr).then(resolve).catch(reject);
+        return fetchHtmlWithMetadata(nextUrl, redirectCount + 1, cookieStr).then(resolve).catch(reject);
       }
 
       if (res.statusCode && res.statusCode >= 400) {
@@ -685,7 +1065,7 @@ export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 
             (errBody.includes('cloudflare') || errBody.includes('Just a moment') || errBody.includes('challenge'))
           ) {
             // Return challenge HTML so parsePortalHtml flags hitlRequired (Bug B4)
-            return resolve(errBody);
+            return resolve({ html: errBody, finalUrl: url });
           }
           return reject(new Error(`HTTP ${res.statusCode} from portal server`));
         });
@@ -694,7 +1074,7 @@ export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 
 
       let data = '';
       res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve(data));
+      res.on('end', () => resolve({ html: data, finalUrl: url }));
     });
 
     req.on('error', reject);
@@ -703,6 +1083,10 @@ export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 
       reject(new Error('Connection timed out'));
     });
   });
+}
+
+export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 0, cookieStr?: string): Promise<string> {
+  return fetchHtmlWithMetadata(url, redirectCount, cookieStr).then(res => res.html);
 }
 
 /**

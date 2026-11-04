@@ -22,46 +22,51 @@
 - **Decision**: Surface a one-click HITL browser launcher in the UI. The operator solves the challenge once, and harvested cookies allow headless scanning for weeks.
 - **Consequences**: Completely resilient against modern Cloudflare protections with zero monthly API costs.
 
-### ADR 05: Google AI Studio Multimodal Extraction & Model Fallback
-- **Context**: Bidding documents in Pakistan are frequently published as low-resolution newspaper clipping scans, multi-page PDFs, or unformatted text blocks. Relying on a single model endpoint can encounter transient rate limits or quota variations.
-- **Decision**: Integrate Google AI Studio via `@google/genai` using Candidate Model Fallback (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.8-flash`) with a 15-second timeout and strict JSON schema output. Support setting the API key both via environment variables and through the UI in the SQLite `app_settings` table.
-- **Consequences**: Fast, high-accuracy document parsing and structured "First Look" summary briefs with zero single-model dependency.
+### ADR 05: 4-Tier Google Gemini Failover Pool & Self-Healing JSON Parser
+- **Context**: Bidding documents in Pakistan are frequently published as low-resolution newspaper clipping scans, multi-page PDFs, or unformatted text blocks. Single-model endpoints can experience transient `503` high-demand spikes or rate limits.
+- **Decision**: Integrate Google AI Studio via `@google/genai` using a 4-model failover chain (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`) with a 20-second timeout, cached client pooling, and `parseAndRepairTenderJson()` to strip markdown fences, repair trailing commas, and backfill missing fields.
+- **Consequences**: Zero single-model point of failure and guaranteed structured output across OCR, summarization, and self-healing DOM extraction.
 
 ### ADR 06: Zero-Loss Manual Tender & Dossier Intake
 - **Context**: High-value opportunities often arrive via direct channels (WhatsApp, print newspapers, peer referrals) outside monitored web portals.
 - **Decision**: Provide an Inbox "Add Tender" modal supporting drag-and-drop notice uploads, AI auto-fill, and manual editing, linking documents into `./data/dossiers/`.
 - **Consequences**: Tender Tracker functions as a complete, centralized repository for all opportunities, automated or manual.
 
+### ADR 07: Self-Healing Scraper & 5-Step Autonomous Portal Discovery
+- **Context**: Government procurement portals periodically change URL sub-paths (returning HTTP 404/500 on legacy links), redirect across hosts/ports (e.g., `bppra.gob.pk` $\rightarrow$ `bpptwo.vdc.services:5451/Tenders`), or alter their HTML layouts (`rowspan` multi-row tables, custom Blazor/React grids).
+- **Decision**: Implement a two-pronged self-healing mechanism in `crawlerEngine.ts`:
+  1. **Phase 2 (Adaptive AI DOM Extraction)**: When deterministic CSS selectors yield `0` items on an HTTP 200 page containing procurement vocabulary, compact the DOM while preserving `[Label](URL)` links and extract structured tender items via the 4-model Gemini pool.
+  2. **Phase 3 (5-Step Autonomous URL Healer)**: When `tenders_url` fails or lands on a non-tender page, probe the organization's root domain (tracking cross-origin `finalUrl`), score homepage navigation links for "Tenders / Procurement / Bids" (with AI link discovery fallback), verify candidate pages, and persist the healed address to SQLite `portal_health`.
+- **Consequences**: Broken or migrated portal URLs and layout redesigns heal automatically during scan execution without operator intervention.
+
 ---
 
 ## Changelog
 
+### Version 1.3.0 (November 4, 2026)
+- **Self-Healing Scraper & 5-Step Autonomous URL Discovery**:
+  - Implemented `healPortalConnection()`, `scoreCandidateTenderLinks()`, `compactHtmlForAiExtraction()`, and `fetchHtmlWithMetadata()` in `src/server/scrapers/crawlerEngine.ts`.
+  - Added `extractTenderListFromHtmlWithAI()` and `discoverTenderLinkWithAI()` in `src/server/ocrService.ts`.
+  - Added BPPRA ePPS multi-row (`tr.tender-row-main` + sibling `tr.tender-row-dates`) table extractor and updated BPPRA to its live portal (`https://bpptwo.vdc.services:5451/Tenders`).
+  - Expanded date parser (`DATE_CANDIDATE_PATTERN` and `closingLabelRegex`) to support hyphenated named-month dates (`04-Nov-2026`) and spaced `"Dead Line:"` labels.
+- **Portals UI Simplification & Error Diagnostics**:
+  - Simplified portal editing in `SourcesScreen.tsx` to two fields (**Portal name** and **Website address**) and surfaced clickable portal URLs plus inline `Reason: <last_error_message>` diagnostics (`b2e4862`).
+- **4-Model Gemini Failover & JSON Self-Repair**:
+  - Upgraded `CANDIDATE_MODELS` to 4 validated models (`gemini-flash-lite-latest`, `gemini-3.1-flash-lite`, `gemini-3.5-flash`, `gemini-3.8-flash`) with client caching and `parseAndRepairTenderJson()` (`be2df72`).
+- **Test Suite & Documentation Expansion**:
+  - Expanded automated test suite to **303 passing tests across 25 suites**.
+  - Updated all architectural and operational documentation (`docs/01` through `docs/12`) with complete inter-module communication diagrams.
+
 ### Version 1.2.0 (November 2–4, 2026)
-- **AI Model Resilience & Timeout Protection**:
-  - Implemented candidate model fallback (`gemini-flash-lite-latest` and `gemini-3.8-flash`) in `ocrService.ts` with 15s timeout.
-  - Resolved Vite middleware EPERM locking on Windows in test suites.
-- **Clean Repository Hygiene**:
-  - Removed obsolete generated test images, legacy mockups zip, redundant lockfiles, legacy AI Studio planning docs, and leftover sentinel database files.
-  - Authored missing `docs/08-testing-and-coverage.md` and brought all architectural documentation into full alignment with the codebase.
-- **On-Demand Tender Refresh**:
-  - Added real-time portal re-crawl and AI re-summarization via `POST /api/tenders/:id/refresh` and Inbox UI button (`f75aca0`).
-- **Google AI Studio Extraction & Manual Tender Intake**:
-  - Added in-app Gemini API key configuration via Sources > Data (`app_settings` SQLite table).
-  - Added multimodal image and PDF notice auto-fill extraction (`POST /api/ai/extract-file`).
-  - Added manual tender intake modal with automatic track matching (`POST /api/tenders`).
-  - Added manual attachment uploads (`POST /api/tenders/:id/attachments`) with inline PDF and image previews (`7bc9d84`).
-- **Live Scraper Heuristics & Portal DOM Extractors**:
-  - Custom DOM extractors added for NDMA (`.tender-card`), FDE (`h3.package-title`), PSDF (`.inner-advertisement-listing-box`), and PSEB.
-  - Expanded date parser to support ordinal suffixes (`15th`), month name formats (`November 15, 2026`), and comma delimiters.
-  - Filtered default portal names from track matching to eliminate false-positive matches on skills/education boards (`eb55963`).
+- **Clean Repository Hygiene & On-Demand Tender Refresh**:
+  - Added real-time portal re-crawl and AI re-summarization via `POST /api/tenders/:id/refresh` (`f75aca0`).
+  - Added in-app Gemini API key configuration, manual tender intake modal, and inline PDF/image previews (`7bc9d84`).
+  - Added custom DOM extractors for NDMA, FDE, PSDF, and PSEB (`eb55963`).
 
 ### Version 1.1.0 (November 1, 2026)
 - **Test Expansion & Hardening**:
-  - Expanded test coverage across UI, API, database, and scraper suites to 288 passing tests across 25 suites.
-  - Added Playwright browser HITL lifecycle tests, storage pruning tests, and crawler HTTP agent redirect validation (`a683f66`).
+  - Expanded test coverage across UI, API, database, and scraper suites (`a683f66`).
 
 ### Version 1.0.0 (October 31 – November 1, 2026)
 - **Rebranding & Redesign**:
-  - Transitioned to **Tender Tracker** with modern three-screen architecture (Inbox, Pipeline, Sources & Keywords).
-  - Resolved all 13 legacy bugs (B1 through B13).
-  - Implemented SQLite WAL persistence with rolling 14-day backups.
+  - Transitioned to **Tender Tracker** with modern three-screen architecture (Inbox, Pipeline, Sources & Keywords) and SQLite WAL persistence.

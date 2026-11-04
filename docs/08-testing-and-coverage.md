@@ -2,9 +2,9 @@
 
 ## Test Tooling & Philosophy
 
-Tender Tracker uses **Vitest v4** with V8 code coverage. The test suite maintains 288 tests across 25 suites organized into two isolated execution projects:
-1. **`node` Project**: Tests pure TypeScript utilities, database operations, scraper extraction pipelines, Google AI/Gemini fallback logic, Express API routes, and schedulers in a Node.js runtime environment.
-2. **`jsdom` Project**: Tests React 19 UI components, user interactions, theme switching, modal dialogs, inline previews, and slide-overs in a simulated DOM environment using `@testing-library/react`.
+Tender Tracker uses **Vitest v4** with V8 code coverage. The test suite maintains **303 passing tests across 25 suites** organized into two isolated execution projects:
+1. **`node` Project**: Tests pure TypeScript utilities, database operations, self-healing scraper extraction pipelines, 5-step autonomous URL discovery, 4-model Google Gemini failover & JSON repair logic, Express API routes, and schedulers in a Node.js runtime environment.
+2. **`jsdom` Project**: Tests React 19 UI components, user interactions, theme switching, modal dialogs, inline previews, portal failure reason diagnostics, and slide-overs in a simulated DOM environment using `@testing-library/react`.
 
 ---
 
@@ -18,7 +18,7 @@ tests/
     jsdom-setup.ts        # JSDOM matchMedia mock & automatic afterEach(cleanup)
   unit/                   # Pure function tests (dates, deduplication, keywords, theme)
   db/                     # SQLite database queries, triggers, and audit logging
-  scraper/                # Offline crawler engine, Playwright, auth, and Gemini OCR tests
+  scraper/                # Offline crawler engine, Self-Healing URL discovery, Playwright, auth, and Gemini OCR tests
   api/                    # Supertest HTTP integration tests against createApp()
   ui/                     # React Testing Library component tests
   fixtures/portals/       # Saved static HTML fixtures from real portals
@@ -33,14 +33,14 @@ tests/
 2. **Production Guard**:
    `tests/setup/node-setup.ts` validates that `TENDER_DATA_DIR` is set and does **not** resolve to the repository's production `data/` directory. If a test accidentally references `data/`, an immediate exception is thrown before any SQLite connection opens.
 3. **Hermetic Offline Testing**:
-   Scraper tests run against local static HTML fixtures in `tests/fixtures/portals/` or ephemeral local HTTP servers (`http://127.0.0.1:<port>`). No live internet connections are permitted in automated test runs.
+   Scraper tests run against local static HTML fixtures in `tests/fixtures/portals/` or ephemeral local HTTP servers (`http://127.0.0.1:<port>`). No live internet connections are required in automated test runs.
 
 ---
 
 ## Running Tests & Coverage
 
 ```powershell
-# Run all unit, scraper, API, and UI tests (288 passing tests)
+# Run all unit, scraper, API, and UI tests (303 passing tests across 25 suites)
 npm test
 
 # Run tests in watch mode during development

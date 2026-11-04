@@ -22,6 +22,9 @@ import {
   formatClosingDate,
   parseDateString,
   fetchHtmlWithTolerantAgent,
+  compactHtmlForAiExtraction,
+  scoreCandidateTenderLinks,
+  healPortalConnection,
   crawlerDeps
 } from '../../src/server/scrapers/crawlerEngine.js';
 import http from 'http';
@@ -648,6 +651,173 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       } finally {
         global.Date = origDate;
       }
+    });
+  });
+
+  describe('Self-Healing Scraper & BPPRA ePPS Multi-Row Extraction', () => {
+    const bppraTendersTableHtml = `
+      <html><head><title>Tenders</title></head><body>
+        <table class="table table-striped table-bordered border-primary fs-7">
+          <thead>
+            <tr>
+              <th>Sr.</th>
+              <th>Title & Documents</th>
+              <th>Procuring Agency</th>
+              <th>UNSPSC (Class of Object)</th>
+              <th>Estimated budget</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="tender-row-main">
+              <td class="td-sr-cell" rowspan="3">1</td>
+              <td class="td-title-cell" rowspan="3">
+                <div class="td-title-docs">
+                  <div class="td-title-top">
+                    <a class="cursor-pointer td-title-link">
+                      <b>TSE-2627111220143</b><br>
+                      Provision of Domestic Solar Energy Solutions in Tehsil Barshore<br>
+                      <small><b>(Large Civil Works more than 25 Million PKR)</b></small>
+                    </a>
+                  </div>
+                  <div class="td-doc-links">
+                    <a class="td-doc-link" href="https://bpptwo.vdc.services:9446/Reports/Works/BiddingDocumentWorks.html?id=105941">Bidding Document</a>
+                    <a class="td-doc-link" href="https://bpptwo.vdc.services:9446/Reports/GoodsProcurement/NITDocument.html?id=105941">NIT Document</a>
+                    <a class="td-doc-link" href="https://bpptwo.vdc.services:9446/Images/BOQManual/solar-boq.pdf">BOQ Document</a>
+                  </div>
+                </div>
+              </td>
+              <td>URBAN PLANNING & DEV DEPARTMENT QUETTA</td>
+              <td>Power Supply Solar and Energy Works</td>
+              <td>Rs. 133,600,000 Approved</td>
+            </tr>
+            <tr class="tender-row-dates"><td colspan="3">Date</td></tr>
+            <tr class="tender-row-dates">
+              <td>
+                <b>Publish:</b> <span>04-Nov-2026</span>
+                <b>Dead Line:</b> <span>25-Nov-2026 10:00 AM</span>
+                <b>Opening Date:</b> <span>25-Nov-2026 11:00 AM</span>
+              </td>
+              <td></td><td></td>
+            </tr>
+          </tbody>
+        </table>
+      </body></html>
+    `;
+
+    it('parses BPPRA multi-row (tr.tender-row-main + sibling tr.tender-row-dates) accurately without splitting rows', () => {
+      const bppraPortal = PORTAL_DEFINITIONS.find(p => p.id === 'bppra')!;
+      const result = parsePortalHtml(bppraTendersTableHtml, bppraPortal);
+
+      expect(result.hitlRequired).toBe(false);
+      expect(result.items.length).toBe(1);
+
+      const item = result.items[0];
+      expect(item.referenceNo).toBe('TSE-2627111220143');
+      expect(item.title).toContain('Provision of Domestic Solar Energy Solutions in Tehsil Barshore');
+      expect(item.organization).toContain('URBAN PLANNING & DEV DEPARTMENT QUETTA');
+      expect(item.estimatedValue).toBe('Rs. 133,600,000 Approved');
+      expect(item.publishDate).toContain('2026-11-04');
+      expect(item.closingDate).toContain('2026-11-25');
+      expect(item.attachmentUrls?.length).toBe(3);
+      expect(item.attachmentUrls).toContain('https://bpptwo.vdc.services:9446/Images/BOQManual/solar-boq.pdf');
+    });
+
+    it('scores candidate tender navigation links on homepage accurately (Step 3)', () => {
+      const homepageHtml = `
+        <html><body>
+          <nav>
+            <a href="/">Home</a>
+            <a href="/about">About Us</a>
+            <a href="/rules">Rules & Regulations</a>
+            <a href="/Tenders">Tenders</a>
+            <a href="/Tendersstats">More</a>
+            <a href="https://www.google.com/maps/place/Balochistan+Public+Procurement+Regulatory+Authority(BPPRA)">Map</a>
+          </nav>
+        </body></html>
+      `;
+      const scored = scoreCandidateTenderLinks(homepageHtml, 'https://bpptwo.vdc.services:5451/');
+      expect(scored.length).toBeGreaterThan(0);
+      expect(scored[0].href).toBe('https://bpptwo.vdc.services:5451/Tenders');
+      expect(scored[0].score).toBeGreaterThanOrEqual(15);
+      // Should filter out Google Maps and negative-scored links
+      expect(scored.some(s => s.href.includes('google.com/maps'))).toBe(false);
+      expect(scored.some(s => s.href.includes('/rules'))).toBe(false);
+    });
+
+    it('auto-heals a broken tenders_url via 5-Step Discovery and updates SQLite portal_health', async () => {
+      // Simulate legacy broken URL in SQLite for BPPRA
+      updatePortalHealth('bppra', {
+        base_url: 'https://bpptwo.vdc.services:5451',
+        tenders_url: 'https://bppra.gob.pk/active-tenders/',
+        access_mode: 'public',
+        status: 'error',
+        last_error_message: 'HTTP 500 from portal server'
+      });
+
+      const homepageHtml = `
+        <html><head><title>BPPRA</title></head><body>
+          <nav><a href="/Tenders">Tenders</a></nav>
+        </body></html>
+      `;
+
+      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
+        if (url === 'https://bppra.gob.pk/active-tenders/') {
+          throw new Error('HTTP 500 from portal server');
+        }
+        if (url === 'https://bpptwo.vdc.services:5451' || url === 'https://bppra.gob.pk') {
+          return homepageHtml;
+        }
+        if (url === 'https://bpptwo.vdc.services:5451/Tenders') {
+          return bppraTendersTableHtml;
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      await startCrawlerScan('bppra', true);
+
+      const healedRow = getPortalHealthList().find(p => p.portal_id === 'bppra');
+      expect(healedRow?.status).toBe('online');
+      expect(healedRow?.tenders_url).toBe('https://bpptwo.vdc.services:5451/Tenders');
+      expect(healedRow?.verified_status).toContain('Auto-healed -> https://bpptwo.vdc.services:5451/Tenders');
+      expect(healedRow?.last_error_message).toBeNull();
+    });
+
+    it('falls back to Adaptive AI HTML Layout Extraction when CSS selectors yield 0 items on custom DOM', async () => {
+      const customDomHtml = `
+        <html><body>
+          <section class="custom-blazor-grid">
+            <div class="custom-procurement-block">
+              <span>Tender Notice Ref: BPPRA-SOLAR-2026</span>
+              <span>Provision of Solar Energy Microgrids for Schools in Quetta</span>
+              <span>Submission Deadline: 28-12-2026</span>
+              <a href="/docs/solar-microgrid-nit.pdf">View Notice</a>
+            </div>
+          </section>
+        </body></html>
+      `;
+
+      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(customDomHtml);
+
+      const spyAiList = vi.spyOn(ocrSvc, 'extractTenderListFromHtmlWithAI').mockResolvedValueOnce([
+        {
+          referenceNo: 'BPPRA-SOLAR-2026',
+          title: 'Provision of Solar Energy Microgrids for Schools in Quetta',
+          organization: 'Balochistan BPPRA',
+          directUrl: 'https://bpptwo.vdc.services:5451/docs/solar-microgrid-nit.pdf',
+          closingDate: '2026-12-28T14:00:00+05:00',
+          attachmentUrls: ['https://bpptwo.vdc.services:5451/docs/solar-microgrid-nit.pdf']
+        }
+      ]);
+
+      const compacted = compactHtmlForAiExtraction(customDomHtml, 'https://bpptwo.vdc.services:5451');
+      expect(compacted).toContain('[View Notice](https://bpptwo.vdc.services:5451/docs/solar-microgrid-nit.pdf)');
+
+      await startCrawlerScan('bppra', true);
+
+      expect(spyAiList).toHaveBeenCalledTimes(1);
+      const savedTenders = getAllTenders();
+      expect(savedTenders.some(t => t.reference_no === 'BPPRA-SOLAR-2026')).toBe(true);
+      spyAiList.mockRestore();
     });
   });
 });

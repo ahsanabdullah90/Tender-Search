@@ -19,13 +19,13 @@ On Windows 11:
 
 ### 2. Configuring Google AI Studio (Gemini)
 
-To enable automatic First-Look summaries and image/PDF OCR notice extraction:
+To enable automatic First-Look summaries, image/PDF OCR notice extraction, and Self-Healing AI DOM extraction:
 1. Navigate to **Sources & Keywords > Data**.
 2. Under **Google AI Studio (Gemini API)**:
-   - Paste your Gemini API key (`AIzaSy...`).
+   - Paste your Gemini API key.
    - Click **"Save Key"**.
-3. Status will display as `Connected (AIza••••1234) · Gemini Flash`.
-4. The key is stored securely in your local `app_settings` SQLite table and persists across reboots.
+3. Status will display as `Connected (••••) · Gemini Flash`.
+4. The key is stored securely in your local `app_settings` SQLite table and powers the 4-model failover chain (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`).
 
 ---
 
@@ -90,8 +90,11 @@ Navigate to **Sources & Keywords**:
    - Add new domain tracks or customize positive and negative match terms.
    - Example: Add `inverter` or `photovoltaic` to *Solar & Clean Energy*; add `cleaning` or `janitorial` to the Ignore list.
 2. **Portals Subtab**:
-   - Check the operational health and last scan yields of all 18 portals.
-   - Enter your login credentials for **Tender Services Pakistan** (`https://tenderservice.pk/permits/login.php`).
+   - Check the operational health, clickable website URL, and last scan yields of all 18 portals.
+   - **Self-Healing Recovery**: If a portal moves its tenders sub-page or changes its HTML layout, the scraper automatically runs the 5-step discovery process during the scan and updates the portal URL.
+   - **Explicit Diagnostics**: If a portal cannot be reached even after self-healing, the exact failure reason (`Reason: <error>`) is displayed in red below its URL.
+   - **Streamlined Editing**: Click **"Edit"** on any portal to update its **Portal name** and **Website address** in a clean two-field dialog.
+   - **Portal Login**: Enter your login credentials for **Tender Services Pakistan** (`https://tenderservice.pk/permits/login.php`).
 3. **Data Subtab**:
    - **CSV Export**: Export all bids, unreviewed inbox items, or active pipeline pursuits formatted with UTF-8 BOM for Microsoft Excel.
    - **Backups**: Create on-demand database snapshots.

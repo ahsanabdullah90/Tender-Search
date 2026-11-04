@@ -256,3 +256,222 @@ Extract the official tender details into strict JSON matching the schema:
     return null;
   }
 }
+
+export interface AiScrapedTenderItem {
+  referenceNo?: string;
+  title: string;
+  organization: string;
+  directUrl: string;
+  publishDate?: string;
+  closingDate?: string | null;
+  estimatedValue?: string;
+  description?: string;
+  attachmentUrls?: string[];
+}
+
+const TENDER_LIST_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          referenceNo: { type: 'string', nullable: true },
+          title: { type: 'string' },
+          organization: { type: 'string' },
+          directUrl: { type: 'string', nullable: true },
+          publishDate: { type: 'string', nullable: true },
+          closingDate: { type: 'string', nullable: true },
+          estimatedValue: { type: 'string', nullable: true },
+          description: { type: 'string', nullable: true },
+          attachmentUrls: {
+            type: 'array',
+            items: { type: 'string' }
+          }
+        },
+        required: ['title']
+      }
+    }
+  },
+  required: ['items']
+};
+
+/**
+ * Self-Healing Phase 2: Adaptive AI HTML Layout Extractor.
+ * When a portal redesigns its HTML or uses custom components that bypass standard CSS selectors,
+ * extracts structured tender listings from link-annotated compacted text.
+ */
+export async function extractTenderListFromHtmlWithAI(params: {
+  compactedHtml: string;
+  portalName: string;
+  baseUrl: string;
+  tendersUrl: string;
+}): Promise<AiScrapedTenderItem[]> {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey || !params.compactedHtml || params.compactedHtml.trim().length < 40) {
+    return [];
+  }
+
+  const cleanDigest = params.compactedHtml
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .trim()
+    .slice(0, 25000);
+
+  try {
+    const ai = getAiClient(apiKey);
+    const prompt = `You are a self-healing procurement web scraper for ${params.portalName} (${params.baseUrl}).
+Analyze the following compacted webpage content from ${params.tendersUrl} (where links appear as [Label](URL)) and extract all genuine tender, RFP, RFQ, NIT, or procurement notices into strict JSON matching the schema.
+
+Rules:
+- Only extract actual procurement/tender notices. Do NOT extract navigation menus, footer links, "About Us", "Rules & Regulations", or general news.
+- If the page contains no active tender listings, return {"items": []}.
+- For each tender:
+  - title: The clean descriptive title of the tender (must be > 5 chars, not a generic label like "Download" or "Click Here").
+  - referenceNo: Tender number / TSE / PID / RFP code if present, else null.
+  - organization: Procuring agency or department if stated, else "${params.portalName}".
+  - directUrl: Best URL for the tender detail or primary document, else "${params.tendersUrl}".
+  - publishDate / closingDate: Normalize to YYYY-MM-DD if possible, else null.
+  - attachmentUrls: Array of any PDF/DOC/image URLs associated with that tender.
+
+Page Content:
+${cleanDigest}`;
+
+    const rawText = await generateWithFallback(ai, {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: TENDER_LIST_JSON_SCHEMA
+      }
+    });
+
+    if (!rawText) return [];
+
+    let cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      try {
+        parsed = JSON.parse(cleaned.replace(/,\s*([}\]])/g, '$1'));
+      } catch {
+        return [];
+      }
+    }
+
+    if (!parsed || !Array.isArray(parsed.items)) return [];
+
+    const validItems: AiScrapedTenderItem[] = [];
+    for (const rawItem of parsed.items) {
+      if (!rawItem || typeof rawItem.title !== 'string') continue;
+      const title = rawItem.title.replace(/\s+/g, ' ').trim();
+      if (title.length <= 5 || /^(download|view|details|tenders?|home|contact|login|click here)$/i.test(title)) {
+        continue;
+      }
+
+      const resolveUrl = (u: unknown, fallback: string): string => {
+        if (!u || typeof u !== 'string') return fallback;
+        try {
+          return u.startsWith('http') ? u : new URL(u, params.baseUrl).toString();
+        } catch {
+          return fallback;
+        }
+      };
+
+      const directUrl = resolveUrl(rawItem.directUrl, params.tendersUrl);
+      const attachmentUrls = Array.isArray(rawItem.attachmentUrls)
+        ? rawItem.attachmentUrls
+            .filter((u: unknown) => typeof u === 'string' && u.trim().length > 0)
+            .map((u: string) => resolveUrl(u, ''))
+            .filter(Boolean)
+        : [];
+
+      validItems.push({
+        referenceNo: rawItem.referenceNo ? String(rawItem.referenceNo).trim() : undefined,
+        title,
+        organization: rawItem.organization ? String(rawItem.organization).trim() : params.portalName,
+        directUrl,
+        publishDate: rawItem.publishDate ? String(rawItem.publishDate).trim() : undefined,
+        closingDate: rawItem.closingDate ? String(rawItem.closingDate).trim() : null,
+        estimatedValue: rawItem.estimatedValue ? String(rawItem.estimatedValue).trim() : undefined,
+        description: rawItem.description ? String(rawItem.description).trim() : '',
+        attachmentUrls
+      });
+    }
+
+    return validItems;
+  } catch (err) {
+    console.warn('[Gemini] Adaptive HTML tender list extraction failed:', err);
+    return [];
+  }
+}
+
+/**
+ * Self-Healing Phase 3 (Step 3B): AI Navigation Link Discovery Fallback.
+ * Given candidate links from an organization's homepage, selects up to 2 most likely tender portal URLs.
+ */
+export async function discoverTenderLinkWithAI(params: {
+  links: Array<{ text: string; href: string }>;
+  portalName: string;
+  baseUrl: string;
+}): Promise<string[]> {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey || !params.links || params.links.length === 0) {
+    return [];
+  }
+
+  try {
+    const ai = getAiClient(apiKey);
+    const linkListText = params.links
+      .slice(0, 80)
+      .map((l, idx) => `${idx + 1}. "${l.text}" -> ${l.href}`)
+      .join('\n');
+
+    const prompt = `You are a web navigation agent locating the official Tenders / Procurement / RFPs listing page for "${params.portalName}" (${params.baseUrl}).
+Review the following navigation links extracted from the organization's homepage and return up to 2 URLs most likely to contain active tender notices or procurement listings.
+Do NOT select login pages, rules/regulations, archive/awarded pages, or social media links.
+
+Links:
+${linkListText}`;
+
+    const rawText = await generateWithFallback(ai, {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'object',
+          properties: {
+            candidateUrls: {
+              type: 'array',
+              items: { type: 'string' }
+            }
+          },
+          required: ['candidateUrls']
+        }
+      }
+    });
+
+    if (!rawText) return [];
+    let cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+
+    const parsed = JSON.parse(cleaned.replace(/,\s*([}\]])/g, '$1'));
+    if (!parsed || !Array.isArray(parsed.candidateUrls)) return [];
+
+    return parsed.candidateUrls
+      .filter((u: unknown) => typeof u === 'string' && u.trim().length > 0)
+      .slice(0, 2);
+  } catch {
+    return [];
+  }
+}

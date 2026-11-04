@@ -68,12 +68,12 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     name: 'Balochistan BPPRA',
     category: 'Regulatory',
     tier: 'http',
-    baseUrl: 'https://bppra.gob.pk',
-    tendersUrl: 'https://bppra.gob.pk/active-tenders/',
-    description: 'Balochistan tender notice listings (tender list page often renders blank)',
+    baseUrl: 'https://bpptwo.vdc.services:5451',
+    tendersUrl: 'https://bpptwo.vdc.services:5451/Tenders',
+    description: 'Balochistan Public Procurement Regulatory Authority ePPS portal (80+ active tenders)',
     defaultKeywords: ['infrastructure', 'solar', 'office supplies', 'training'],
-    accessMode: 'offline_broken',
-    verifiedStatus: 'Partial — Homepage redirects; active tenders list renders blank'
+    accessMode: 'public',
+    verifiedStatus: 'Working — Live BPPRA ePPS portal (bpptwo.vdc.services:5451)'
   },
 
   // 2. Federal & Regional Government Entities

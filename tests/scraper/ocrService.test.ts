@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   extractTenderFromImage,
   summarizeTenderTextWithAI,
+  extractTenderListFromHtmlWithAI,
+  discoverTenderLinkWithAI,
   parseAndRepairTenderJson,
   CANDIDATE_MODELS,
   getAiClient
@@ -200,6 +202,65 @@ describe('ocrService', () => {
       });
 
       expect(res).toEqual(expectedOcr);
+    });
+  });
+
+  describe('extractTenderListFromHtmlWithAI & discoverTenderLinkWithAI (Self-Healing AI)', () => {
+    it('extracts structured tender array and resolves relative URLs', async () => {
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+
+      mockGenerateContent.mockResolvedValueOnce({
+        text: JSON.stringify({
+          items: [
+            {
+              referenceNo: 'TSE-2026-881',
+              title: 'Supply and Installation of Solar Street Lights in Quetta',
+              organization: 'BPPRA Urban Planning',
+              directUrl: '/Tenders/Detail/881',
+              publishDate: '2026-11-01',
+              closingDate: '2026-11-25',
+              estimatedValue: 'Rs. 45,000,000',
+              description: 'Solar street lighting works',
+              attachmentUrls: ['/Reports/NIT_881.pdf']
+            },
+            {
+              title: 'Download' // Should be filtered out as generic short label
+            }
+          ]
+        })
+      });
+
+      const items = await extractTenderListFromHtmlWithAI({
+        compactedHtml: 'Balochistan Public Procurement Notice: Supply and Installation of Solar Street Lights in Quetta [NIT](/Reports/NIT_881.pdf)',
+        portalName: 'Balochistan BPPRA',
+        baseUrl: 'https://bpptwo.vdc.services:5451',
+        tendersUrl: 'https://bpptwo.vdc.services:5451/Tenders'
+      });
+
+      expect(items.length).toBe(1);
+      expect(items[0].referenceNo).toBe('TSE-2026-881');
+      expect(items[0].title).toBe('Supply and Installation of Solar Street Lights in Quetta');
+      expect(items[0].directUrl).toBe('https://bpptwo.vdc.services:5451/Tenders/Detail/881');
+      expect(items[0].attachmentUrls).toEqual(['https://bpptwo.vdc.services:5451/Reports/NIT_881.pdf']);
+    });
+
+    it('discovers candidate tender URLs from navigation links via AI', async () => {
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+
+      mockGenerateContent.mockResolvedValueOnce({
+        text: '```json\n{"candidateUrls": ["https://bpptwo.vdc.services:5451/Tenders",]}\n```'
+      });
+
+      const urls = await discoverTenderLinkWithAI({
+        links: [
+          { text: 'About Us', href: 'https://bpptwo.vdc.services:5451/about' },
+          { text: 'e-Procurement Portal Notices', href: 'https://bpptwo.vdc.services:5451/Tenders' }
+        ],
+        portalName: 'Balochistan BPPRA',
+        baseUrl: 'https://bpptwo.vdc.services:5451'
+      });
+
+      expect(urls).toEqual(['https://bpptwo.vdc.services:5451/Tenders']);
     });
   });
 });
