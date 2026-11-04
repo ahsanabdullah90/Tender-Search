@@ -45,7 +45,7 @@ import {
   formatClosingDate
 } from './src/server/scrapers/crawlerEngine.js';
 import { saveManualDossier } from './src/server/dossierManager.js';
-import { extractTenderFromImage } from './src/server/ocrService.js';
+import { extractTenderFromImage, CANDIDATE_MODELS } from './src/server/ocrService.js';
 import { initStartupScheduler, stopStartupScheduler } from './src/server/scheduler.js';
 import { launchLocalBrowserHITL, verifyAndResumePortal } from './src/server/scrapers/playwrightEngine.js';
 import { TENDER_STATUSES } from './src/types.js';
@@ -392,7 +392,8 @@ app.get('/api/ai/status', (req, res) => {
   res.json({
     configured: Boolean(key),
     maskedKey,
-    model: 'gemini-flash-lite-latest'
+    model: 'Gemini Flash (Multi-Model Failover)',
+    candidateModels: CANDIDATE_MODELS
   });
 });
 

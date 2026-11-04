@@ -371,7 +371,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-ink-muted">Status:</span>
             {storage?.ai_configured ? (
-              <Chip tone="ok">Connected ({storage.ai_masked_key || 'Active'}) · Gemini Flash</Chip>
+              <Chip tone="ok">Connected ({storage.ai_masked_key || 'Active'}) · Gemini Flash (Multi-Model Failover)</Chip>
             ) : (
               <Chip>Not configured</Chip>
             )}

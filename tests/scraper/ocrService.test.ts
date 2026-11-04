@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { extractTenderFromImage, summarizeTenderTextWithAI } from '../../src/server/ocrService.js';
+import {
+  extractTenderFromImage,
+  summarizeTenderTextWithAI,
+  parseAndRepairTenderJson,
+  CANDIDATE_MODELS,
+  getAiClient
+} from '../../src/server/ocrService.js';
 
 const { mockGenerateContent, expectedOcr } = vi.hoisted(() => {
   const expected = {
@@ -41,6 +47,75 @@ describe('ocrService', () => {
     vi.restoreAllMocks();
   });
 
+  describe('CANDIDATE_MODELS & Client Pooling', () => {
+    it('defines a resilient multi-model failover chain with at least 3 models', () => {
+      expect(CANDIDATE_MODELS.length).toBeGreaterThanOrEqual(3);
+      expect(CANDIDATE_MODELS).toContain('gemini-flash-lite-latest');
+      expect(CANDIDATE_MODELS).toContain('gemini-3.5-flash');
+    });
+
+    it('reuses cached GoogleGenAI client for the same API key', () => {
+      const client1 = getAiClient('test-key-abc');
+      const client2 = getAiClient('test-key-abc');
+      expect(client1).toBe(client2);
+    });
+  });
+
+  describe('parseAndRepairTenderJson', () => {
+    it('returns null for null, empty or invalid strings', () => {
+      expect(parseAndRepairTenderJson(null)).toBeNull();
+      expect(parseAndRepairTenderJson('')).toBeNull();
+      expect(parseAndRepairTenderJson('Not json at all')).toBeNull();
+    });
+
+    it('parses pure JSON correctly', () => {
+      const jsonStr = JSON.stringify(expectedOcr);
+      expect(parseAndRepairTenderJson(jsonStr)).toEqual(expectedOcr);
+    });
+
+    it('strips markdown code blocks: ```json ... ```', () => {
+      const wrapped = '```json\n' + JSON.stringify(expectedOcr) + '\n```';
+      expect(parseAndRepairTenderJson(wrapped)).toEqual(expectedOcr);
+    });
+
+    it('extracts JSON object when surrounded by conversational text', () => {
+      const conversational = 'Here is the extracted tender:\n' + JSON.stringify(expectedOcr) + '\nHope this helps!';
+      expect(parseAndRepairTenderJson(conversational)).toEqual(expectedOcr);
+    });
+
+    it('repairs trailing commas in JSON object', () => {
+      const invalidWithTrailingComma = `{
+        "referenceNo": "TND-2026-OCR",
+        "organization": "Frontier Works Organization",
+        "title": "Construction of Mountain Highway Bridges",
+        "closingDateISO": "2026-08-30T14:00:00+05:00",
+        "closingDateFormatted": "30-08-2026",
+        "estimatedValue": "PKR 85,000,000",
+        "summaryScope": "Engineering civil works",
+        "isCorrigendum": false,
+      }`;
+      expect(parseAndRepairTenderJson(invalidWithTrailingComma)).toEqual(expectedOcr);
+    });
+
+    it('backfills missing fields with safe defaults', () => {
+      const partial = `{"referenceNo": "REF-99"}`;
+      const result = parseAndRepairTenderJson(partial, {
+        title: 'Fallback Tender',
+        organization: 'Fallback Dept'
+      });
+      expect(result).toEqual({
+        referenceNo: 'REF-99',
+        organization: 'Fallback Dept',
+        title: 'Fallback Tender',
+        closingDateISO: null,
+        closingDateFormatted: 'Not Available',
+        estimatedValue: null,
+        summaryScope: '• Detailed scope is not stated in the notice.',
+        isCorrigendum: false
+      });
+    });
+  });
+
   describe('extractTenderFromImage', () => {
     it('returns null when GEMINI_API_KEY is not configured', async () => {
       const dummyBuffer = Buffer.from('fake image data');
@@ -53,6 +128,14 @@ describe('ocrService', () => {
       const dummyBuffer = Buffer.from('fake image data');
       const result = await extractTenderFromImage(dummyBuffer);
       expect(result).toBeNull();
+    });
+
+    it('returns null on empty buffer or buffer exceeding 20MB', async () => {
+      process.env.GEMINI_API_KEY = 'valid-test-key';
+      expect(await extractTenderFromImage(Buffer.alloc(0))).toBeNull();
+
+      const oversized = { length: 25 * 1024 * 1024 } as unknown as Buffer;
+      expect(await extractTenderFromImage(oversized)).toBeNull();
     });
 
     it('handles GoogleGenAI client execution and parses valid JSON response', async () => {
@@ -107,13 +190,13 @@ describe('ocrService', () => {
       process.env.GEMINI_API_KEY = 'valid-test-key';
 
       mockGenerateContent.mockResolvedValueOnce({
-        text: JSON.stringify(expectedOcr)
+        text: '```json\n' + JSON.stringify(expectedOcr) + '\n```'
       });
 
       const res = await summarizeTenderTextWithAI({
         title: 'Bridges',
         organization: 'FWO',
-        rawText: 'Procurement of highway bridge construction.'
+        rawText: 'Procurement of highway bridge construction.\x00\x08'
       });
 
       expect(res).toEqual(expectedOcr);
