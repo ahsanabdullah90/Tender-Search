@@ -167,6 +167,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
   const [verifying, setVerifying] = useState<string | null>(null);
   const [healing, setHealing] = useState(false);
   const [healMessage, setHealMessage] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
 
   const working = portals.filter(p => portalState(p) === 'working').length;
 
@@ -203,6 +204,37 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
     }
   };
 
+  const resetToDefaultUrl = async () => {
+    if (!editing) return;
+    setResetting(true);
+    setHealMessage(null);
+    try {
+      const res = await fetch(`/api/portals/${editing.portal_id}/reset-default`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setForm({
+          portal_name: data.portal_name || form.portal_name,
+          website_url: data.tenders_url || form.website_url
+        });
+        setHealMessage(data.message || 'Restored official default URL.');
+        props.onUpdatePortal(editing.portal_id, {
+          tenders_url: data.tenders_url,
+          base_url: data.base_url,
+          status: 'online',
+          last_error_message: null
+        });
+      } else {
+        setHealMessage(data.message || 'Could not reset portal to default URL.');
+      }
+    } catch {
+      setHealMessage('Failed to reset default URL.');
+    } finally {
+      setResetting(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <p className="text-ink-muted">
@@ -223,6 +255,9 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                   <div className="flex items-center gap-2">
                     <span className="truncate font-semibold">{p.portal_name}</span>
                     {isAutoHealed && <Chip tone="accent">Auto-healed</Chip>}
+                    {p.consecutive_zero_yields > 0 && p.status === 'online' && (
+                      <Chip tone="warn">0 tenders — check URL</Chip>
+                    )}
                   </div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[13px]">
                     {website ? (
@@ -244,9 +279,9 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                       {p.last_items_found > 0 ? ` · ${p.last_items_found} matched` : ''}
                     </span>
                   </div>
-                  {p.last_error_message && state !== 'working' && (
-                    <div className="mt-1 flex items-center gap-1 text-[12px] text-danger">
-                      <span className="font-semibold">Reason:</span>
+                  {p.last_error_message && (
+                    <div className={`mt-1 flex items-center gap-1 text-[12px] ${state === 'working' ? 'text-amber-700 dark:text-amber-400' : 'text-danger'}`}>
+                      <span className="font-semibold">{state === 'working' ? 'Notice:' : 'Reason:'}</span>
                       <span className="truncate max-w-[500px]">{p.last_error_message}</span>
                     </div>
                   )}
@@ -332,6 +367,9 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
           <div className="flex flex-wrap items-center gap-2">
             <Button disabled={healing || !form.website_url.trim()} onClick={() => void runAutoHealInDialog()}>
               {healing ? 'Searching website…' : 'Auto-find tender page'}
+            </Button>
+            <Button disabled={resetting} variant="ghost" onClick={() => void resetToDefaultUrl()}>
+              {resetting ? 'Resetting…' : 'Reset to default URL'}
             </Button>
             <Button onClick={() => { setCredentialsFor(editing); setEditing(null); }}>
               <KeyRound className="h-4 w-4" /> Login details

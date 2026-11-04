@@ -403,13 +403,14 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
   const $ = cheerio.load(html);
   const items: RawScrapedItem[] = [];
 
-  // Hard Cloudflare / challenge block checks (Bug B4)
+  // Hard Cloudflare / FortiWeb / Gov WAF / challenge block checks (Bug B4)
   if (
     $('iframe[src*="challenges.cloudflare.com"], #cf-browser-verification').length > 0 ||
     html.includes('cf-browser-verification') ||
     html.includes('challenges.cloudflare.com') ||
     html.includes('Just a moment...') ||
-    html.includes('Attention Required! | Cloudflare')
+    html.includes('Attention Required! | Cloudflare') ||
+    /Web Page Blocked!|Attack ID:\s*\d+|FortiWeb|The page cannot be displayed\.\s*Please contact the administrator/i.test(html)
   ) {
     return { items: [], hitlRequired: true };
   }

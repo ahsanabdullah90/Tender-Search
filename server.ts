@@ -34,6 +34,7 @@ import {
   db
 } from './src/server/db.js';
 import { authenticatePortal } from './src/server/scrapers/portalAuth.js';
+import { PORTAL_DEFINITIONS } from './src/server/scrapers/portalList.js';
 import {
   startCrawlerScan,
   currentScanStatus,
@@ -218,6 +219,34 @@ app.put('/api/portals/:portalId', (req, res) => {
 
   updatePortalHealth(portalId, updates);
   res.json({ success: true, message: 'Portal updated successfully' });
+});
+
+app.post('/api/portals/:portalId/reset-default', (req, res) => {
+  const { portalId } = req.params;
+  const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portalId);
+  if (!canonicalDef) {
+    return res.status(404).json({ success: false, message: 'Default definition not found for this portal' });
+  }
+
+  updatePortalHealth(portalId, {
+    base_url: canonicalDef.baseUrl,
+    tenders_url: canonicalDef.tendersUrl,
+    login_url: canonicalDef.loginUrl ?? undefined,
+    access_mode: canonicalDef.accessMode,
+    tier: canonicalDef.tier,
+    verified_status: canonicalDef.verifiedStatus,
+    status: canonicalDef.accessMode === 'login_required' ? 'hitl_required' : 'online',
+    last_error_message: null,
+    consecutive_zero_yields: 0
+  });
+
+  res.json({
+    success: true,
+    portal_name: canonicalDef.name,
+    base_url: canonicalDef.baseUrl,
+    tenders_url: canonicalDef.tendersUrl,
+    message: `Reset ${canonicalDef.name} to official default URL`
+  });
 });
 
 app.post('/api/portals/:portalId/heal', async (req, res) => {
