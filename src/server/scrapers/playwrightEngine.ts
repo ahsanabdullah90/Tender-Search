@@ -56,7 +56,8 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
 
       const browser = await playwright.chromium.launchPersistentContext(sessionPath, {
         headless: false,
-        viewport: { width: 1280, height: 800 }
+        viewport: { width: 1280, height: 800 },
+        ignoreHTTPSErrors: true
       });
 
       activeHitlContexts.set(portalId, browser);

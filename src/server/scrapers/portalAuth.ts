@@ -1,3 +1,5 @@
+import { Agent as UndiciAgent } from 'undici';
+const sslTolerantDispatcher = new UndiciAgent({ connect: { rejectUnauthorized: false } });
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -34,6 +36,7 @@ export async function authenticatePortal(
       const res = await fetch(loginUrl, {
         method: 'POST',
         redirect: 'manual',
+        dispatcher: sslTolerantDispatcher,
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
@@ -41,7 +44,7 @@ export async function authenticatePortal(
           'Referer': loginUrl
         },
         body: params.toString()
-      });
+      } as any);
 
       const bodyText = await res.text();
 

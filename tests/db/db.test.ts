@@ -614,5 +614,22 @@ describe('Database and Repository Layer', () => {
       expect(match.isDuplicate).toBe(true);
       expect(match.canonicalId).toBe('canon-4');
     });
+
+    it('heals legacy offline_broken portals with TLS errors to public during initDatabase', () => {
+      db.prepare(`
+        UPDATE portal_health
+        SET access_mode = 'offline_broken',
+            verified_status = 'Broken — Expired TLS certificate on host',
+            status = 'error'
+        WHERE portal_id = 'peef'
+      `).run();
+
+      initDatabase();
+
+      const healed = db.prepare("SELECT access_mode, verified_status, status FROM portal_health WHERE portal_id = 'peef'").get() as any;
+      expect(healed.access_mode).toBe('public');
+      expect(healed.status).toBe('online');
+      expect(healed.verified_status).toContain('SSL-tolerant');
+    });
   });
 });

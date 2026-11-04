@@ -954,7 +954,7 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
         let browser: any = null;
         try {
           browser = await playwright.chromium.launch({ headless: true });
-          const context = await browser.newContext();
+          const context = await browser.newContext({ ignoreHTTPSErrors: true });
           const page = await context.newPage();
           await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
           html = await page.content();

@@ -262,6 +262,21 @@ function seedPortalHealth() {
         : 'online';
       insertStmt.run(p.id, p.name, p.category, p.tier, p.baseUrl, p.tendersUrl, p.loginUrl || null, initialStatus, p.accessMode, p.verifiedStatus);
       
+      // Heal legacy DB records where a portal was previously flagged as offline_broken due to host TLS errors,
+      // but our SSL-tolerant agent now supports it as public:
+      if (p.accessMode === 'public') {
+        try {
+          db.prepare(`
+            UPDATE portal_health 
+            SET access_mode = 'public',
+                verified_status = ?,
+                status = 'online',
+                last_error_message = NULL
+            WHERE portal_id = ? AND access_mode = 'offline_broken' AND (verified_status LIKE '%TLS%' OR verified_status LIKE '%certificate%')
+          `).run(p.verifiedStatus, p.id);
+        } catch {}
+      }
+
       // If loginUrl is defined in PORTAL_DEFINITIONS and not set in DB, populate it
       if (p.loginUrl) {
         try {
