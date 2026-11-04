@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { downloadAndCacheDossier } from '../../src/server/dossierManager.js';
+import { downloadAndCacheDossier, deriveDossierLabel } from '../../src/server/dossierManager.js';
 import { DOSSIERS_DIR } from '../../src/server/db.js';
 
 describe('dossierManager', () => {
@@ -151,5 +151,22 @@ describe('dossierManager', () => {
     vi.resetModules();
     await import('../../src/server/dossierManager.js');
     expect(fs.existsSync(DOSSIERS_DIR)).toBe(true);
+  });
+  describe('deriveDossierLabel', () => {
+    it('decodes Laravel/Filament base64 meta filenames into clean titles', () => {
+      const url = 'https://gbppra.gov.pk/storage/proc_files/9Kl6Xm1MJWugaECLMKzqJ2HuzevxzQ-metaQWR2ZXJ0aXNlbWVudCBGYWJyaWNhdGlvbiBvZiBBbWJ1bGFuY2UgRC5wZGY=-.pdf';
+      expect(deriveDossierLabel(url)).toBe('Advertisement Fabrication of Ambulance D');
+    });
+
+    it('humanizes standard descriptive file slugs', () => {
+      const url = 'https://techdestination.com/wp-content/uploads/2026/10/RFP-for-Purchase-of-Stationery-Computer-Stationery-Items.pdf';
+      expect(deriveDossierLabel(url)).toBe('RFP for Purchase of Stationery Computer Stationery Items');
+    });
+
+    it('falls back to default label for opaque hashes or IDs', () => {
+      const url = 'https://portal.gov.pk/files/48309f6c2890af4d900c718e7c9ee4bc23b00725b.pdf';
+      expect(deriveDossierLabel(url, 'Bidding Document', 1)).toBe('Bidding Document');
+      expect(deriveDossierLabel(url, 'Bidding Document', 2)).toBe('Bidding Document 2');
+    });
   });
 });

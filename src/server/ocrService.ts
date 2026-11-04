@@ -324,13 +324,13 @@ export async function extractTenderListFromHtmlWithAI(params: {
 Analyze the following compacted webpage content from ${params.tendersUrl} (where links appear as [Label](URL)) and extract all genuine tender, RFP, RFQ, NIT, or procurement notices into strict JSON matching the schema.
 
 Rules:
-- Only extract actual procurement/tender notices. Do NOT extract navigation menus, footer links, "About Us", "Rules & Regulations", or general news.
+- Only extract actual procurement/tender notices. Do NOT extract navigation menus, footer links, dropdown options, search form values, "About Us", "Rules & Regulations", or general news.
 - If the page contains no active tender listings, return {"items": []}.
 - For each tender:
   - title: The clean descriptive title of the tender (must be > 5 chars, not a generic label like "Download" or "Click Here").
   - referenceNo: Tender number / TSE / PID / RFP code if present, else null.
   - organization: Procuring agency or department if stated, else "${params.portalName}".
-  - directUrl: Best URL for the tender detail or primary document, else "${params.tendersUrl}".
+  - directUrl: Best URL for the tender detail or primary document. If no dedicated detail page exists, use the document/attachment URL.
   - publishDate / closingDate: Normalize to YYYY-MM-DD if possible, else null.
   - attachmentUrls: Array of any PDF/DOC/image URLs associated with that tender.
 
@@ -384,13 +384,36 @@ ${cleanDigest}`;
         }
       };
 
-      const directUrl = resolveUrl(rawItem.directUrl, params.tendersUrl);
+      let directUrl = resolveUrl(rawItem.directUrl, params.tendersUrl);
       const attachmentUrls = Array.isArray(rawItem.attachmentUrls)
         ? rawItem.attachmentUrls
             .filter((u: unknown) => typeof u === 'string' && u.trim().length > 0)
             .map((u: string) => resolveUrl(u, ''))
             .filter(Boolean)
         : [];
+
+      // If directUrl is generic portal root/tendersUrl, promote the first attachmentUrl to directUrl
+      const normDirect = directUrl.replace(/\/+$/, '');
+      const normTenders = params.tendersUrl.replace(/\/+$/, '');
+      const normBase = params.baseUrl.replace(/\/+$/, '');
+      if ((normDirect === normTenders || normDirect === normBase) && attachmentUrls.length > 0) {
+        directUrl = attachmentUrls[0];
+      }
+
+      // Reject false-positive category routes, search results, or newspaper aggregators
+      if (
+        /\/(category|tag|searchresults?|search|login)(\/|$)/i.test(directUrl) ||
+        /^(all newspapers|newspapers?|canteen|all categories)$/i.test(title)
+      ) {
+        continue;
+      }
+
+      // An item without a specific URL and without dates is likely a form dropdown or nav label
+      const hasSpecificLink = normDirect !== normTenders && normDirect !== normBase;
+      const hasValidDate = Boolean(rawItem.publishDate || rawItem.closingDate);
+      if (!hasSpecificLink && !hasValidDate) {
+        continue;
+      }
 
       validItems.push({
         referenceNo: rawItem.referenceNo ? String(rawItem.referenceNo).trim() : undefined,

@@ -23,6 +23,8 @@ import {
   parseDateString,
   fetchHtmlWithTolerantAgent,
   compactHtmlForAiExtraction,
+  isGenericListingUrl,
+  analyzeTenderById,
   scoreCandidateTenderLinks,
   healPortalConnection,
   crawlerDeps
@@ -818,6 +820,103 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       const savedTenders = getAllTenders();
       expect(savedTenders.some(t => t.reference_no === 'BPPRA-SOLAR-2026')).toBe(true);
       spyAiList.mockRestore();
+    });
+  });
+  describe('Scraping Integrity & False-Positive Defenses', () => {
+    it('strips select, option, form, and search filters in compactHtmlForAiExtraction', () => {
+      const dirtyHtml = `
+        <div>
+          <form class="job-search">
+            <select name="procurement_id">
+              <option value="1">Historical Tender 1</option>
+              <option value="2">Historical Tender 2</option>
+            </select>
+            <input type="text" placeholder="Search..." />
+          </form>
+          <div class="active-tenders">
+            <a href="/tender/101">Genuine Live Tender 101</a>
+          </div>
+        </div>
+      `;
+
+      const compacted = compactHtmlForAiExtraction(dirtyHtml, 'https://example.gov.pk');
+      expect(compacted).not.toContain('Historical Tender 1');
+      expect(compacted).not.toContain('Historical Tender 2');
+      expect(compacted).toContain('[Genuine Live Tender 101](https://example.gov.pk/tender/101)');
+    });
+
+    it('accurately parses GBPPRA .job-post-item cards and ignores dropdown options', () => {
+      const gbppraHtml = `
+        <div class="job-search">
+          <select name="procurement_id">
+            <option value="3284">"Capacity Building of Youth of GB in digital skills"</option>
+          </select>
+        </div>
+        <div class="job-post-item">
+          <div class="job-post-item-header">
+            <h2>[TSE-202611043306]</h2>
+            <h2>Fabrication of Ambulance District Health Office Hunza</h2>
+          </div>
+          <div class="job-post-item-body">
+            <div><span class="fa fa-university"></span> <a href="#">District Health Officer Hunza</a></div>
+            <div class="text-success">04 Nov, 2026</div>
+            <div class="text-danger">20 Nov, 2026</div>
+          </div>
+          <div class="job-post-item-body">
+            <a href="https://gbppra.gov.pk/storage/proc_files/9Kl6Xm1-metaQWR2ZXJ0aXNlbWVudCBGYWJyaWNhdGlvbiBvZiBBbWJ1bGFuY2UgRC5wZGY=-.pdf">Notice</a>
+          </div>
+          <div>
+            <a href="https://gbppra.gov.pk/procurementdetails/3306" class="btn btn-primary">View Details</a>
+          </div>
+        </div>
+      `;
+
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'gilgit')!;
+      const result = parsePortalHtml(gbppraHtml, portal);
+
+      expect(result.items.length).toBe(1);
+      const item = result.items[0];
+      expect(item.referenceNo).toBe('TSE-202611043306');
+      expect(item.title).toBe('Fabrication of Ambulance District Health Office Hunza');
+      expect(item.organization).toBe('District Health Officer Hunza');
+      expect(item.directUrl).toBe('https://gbppra.gov.pk/procurementdetails/3306');
+      expect(item.attachmentUrls).toEqual([
+        'https://gbppra.gov.pk/storage/proc_files/9Kl6Xm1-metaQWR2ZXJ0aXNlbWVudCBGYWJyaWNhdGlvbiBvZiBBbWJ1bGFuY2UgRC5wZGY=-.pdf'
+      ]);
+    });
+
+    it('identifies generic listing URLs vs specific detail pages', () => {
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'gilgit')!;
+      expect(isGenericListingUrl('https://gbppra.gov.pk', portal)).toBe(true);
+      expect(isGenericListingUrl('https://gbppra.gov.pk/', portal)).toBe(true);
+      expect(isGenericListingUrl('https://gbppra.gov.pk/tenders', portal)).toBe(true);
+      expect(isGenericListingUrl('https://gbppra.gov.pk/procurementdetails/3306', portal)).toBe(false);
+      expect(isGenericListingUrl('https://gbppra.gov.pk/storage/proc_files/notice.pdf', portal)).toBe(false);
+    });
+
+    it('guards analyzeTenderById against whole-body PDF scraping when direct_url is a listing URL', async () => {
+      // Seed tender with generic portal URL
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url, pipeline_status)
+        VALUES ('t-generic-url-guard', 't-generic-url-guard', 'gilgit', 'GBPPRA', 'Unique Unmatched Opportunity Title', 'Govt of GB', 'https://gbppra.gov.pk/', 'New Opportunity')
+      `).run();
+
+      const homepageWithUnrelatedPdfs = `
+        <html><body>
+          <div class="banner">
+            <a href="https://gbppra.gov.pk/storage/proc_files/completely-unrelated-file.pdf">Random PDF</a>
+          </div>
+          <div>Other Unrelated Content</div>
+        </body></html>
+      `;
+
+      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(homepageWithUnrelatedPdfs);
+
+      const analyzed = await analyzeTenderById('t-generic-url-guard', { forceRefresh: true });
+      expect(analyzed).not.toBeNull();
+      // Must NOT scrape the random unrelated PDF from the homepage
+      const dossiers = Array.isArray(analyzed?.cached_dossiers) ? analyzed.cached_dossiers : JSON.parse(analyzed?.cached_dossiers as any || '[]');
+      expect(dossiers.length).toBe(0);
     });
   });
 });

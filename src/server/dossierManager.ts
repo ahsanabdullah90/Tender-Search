@@ -18,21 +18,75 @@ const sslTolerantAgent = new https.Agent({
 });
 
 /**
+ * Derives a human-readable document label from a remote URL.
+ * Automatically decodes Laravel / Filament -meta<base64>- filenames,
+ * humanizes standard URL slugs, and disambiguates generic labels with an index.
+ */
+export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, index?: number): string {
+  try {
+    const rawFilename = path.basename(remoteUrl.split('?')[0]);
+
+    // 1. Check for Laravel / Filament / Livewire -meta<base64>- pattern
+    const metaMatch = rawFilename.match(/-meta([A-Za-z0-9+/=]+)-/i);
+    if (metaMatch && metaMatch[1]) {
+      try {
+        const decoded = Buffer.from(metaMatch[1], 'base64').toString('utf8').trim();
+        if (decoded && decoded.length > 3) {
+          const cleanDecoded = decoded.replace(/\.[a-z0-9]+$/i, '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+          if (cleanDecoded.length > 2) {
+            return cleanDecoded;
+          }
+        }
+      } catch {}
+    }
+
+    // 2. Check if raw filename is meaningful (not an opaque hash or ID)
+    const baseNameWithoutExt = rawFilename.replace(/\.[a-z0-9]+$/i, '');
+    const isOpaqueHash = /^[0-9a-f]{20,}$/i.test(baseNameWithoutExt) ||
+                         /^\d+$/.test(baseNameWithoutExt) ||
+                         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(baseNameWithoutExt) ||
+                         /^[a-zA-Z0-9]{25,}$/.test(baseNameWithoutExt);
+    if (!isOpaqueHash && baseNameWithoutExt.length > 3) {
+      const humanized = decodeURIComponent(baseNameWithoutExt)
+        .replace(/[-_]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (humanized.length > 3 && !/^(download|view|file|document|notice|tender|rfp)$/i.test(humanized)) {
+        return humanized;
+      }
+    }
+  } catch {}
+
+  const base = fallbackLabel && fallbackLabel.trim() ? fallbackLabel.trim() : 'Bidding Document';
+  if (typeof index === 'number' && index > 1) {
+    return `${base} ${index}`;
+  }
+  return base;
+}
+
+/**
  * Downloads a remote file, saves it to data/dossiers/{tenderId}/, and computes SHA-256
  */
 export async function downloadAndCacheDossier(
   tenderId: string,
   remoteUrl: string,
   label: string,
-  cookieHeader?: string
+  cookieHeader?: string,
+  docIndex?: number
 ): Promise<CachedDossier | null> {
   const tenderDir = path.resolve(DOSSIERS_ROOT, tenderId);
   if (!fs.existsSync(tenderDir)) {
     fs.mkdirSync(tenderDir, { recursive: true });
   }
 
-  // Derive a safe filename
-  let filename = label.replace(/[^a-zA-Z0-9._-]/g, '_');
+  // Derive smart label if passed label is generic or empty
+  let effectiveLabel = label?.trim() || 'Bidding Document';
+  if (!label || /^(bidding document|tender document|document|notice|tender notice image)$/i.test(label.trim())) {
+    effectiveLabel = deriveDossierLabel(remoteUrl, label, docIndex);
+  }
+
+  // Derive a safe filename based on effectiveLabel
+  let filename = effectiveLabel.replace(/[^a-zA-Z0-9._-]/g, '_');
   if (!filename.includes('.')) {
     const ext = path.extname(remoteUrl.split('?')[0]) || '.pdf';
     filename += ext;
@@ -46,6 +100,7 @@ export async function downloadAndCacheDossier(
 
     // Check if file already exists with same or different hash
     let finalPath = localFilePath;
+    let finalLabel = effectiveLabel;
     if (fs.existsSync(localFilePath)) {
       const existingBuffer = fs.readFileSync(localFilePath);
       const existingHash = crypto.createHash('sha256').update(existingBuffer).digest('hex');
@@ -55,6 +110,9 @@ export async function downloadAndCacheDossier(
         const base = path.basename(filename, ext);
         filename = `${base}_v2_${Date.now()}${ext}`;
         finalPath = path.resolve(tenderDir, filename);
+        if (!finalLabel.includes('Updated')) {
+          finalLabel = `${finalLabel} (Updated)`;
+        }
       }
     }
 
@@ -64,7 +122,7 @@ export async function downloadAndCacheDossier(
     const webUrl = `/api/dossiers/${encodeURIComponent(tenderId)}/${encodeURIComponent(filename)}`;
 
     return {
-      label,
+      label: finalLabel,
       localPath: webUrl,
       originalUrl: remoteUrl,
       mimeType,
