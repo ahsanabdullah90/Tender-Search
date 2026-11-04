@@ -42,7 +42,9 @@ import {
   analyzeTenderById,
   matchTracks,
   parseDateString,
-  formatClosingDate
+  formatClosingDate,
+  healPortalConnection,
+  getActivePortalsList
 } from './src/server/scrapers/crawlerEngine.js';
 import { saveManualDossier } from './src/server/dossierManager.js';
 import { extractTenderFromImage, CANDIDATE_MODELS } from './src/server/ocrService.js';
@@ -179,14 +181,68 @@ app.get('/api/portals', (req, res) => {
 app.put('/api/portals/:portalId', (req, res) => {
   const { portalId } = req.params;
   const updates: any = {};
-  for (const key of ['portal_name', 'base_url', 'tenders_url', 'tier', 'access_mode', 'verified_status']) {
+  for (const key of ['portal_name', 'base_url', 'tenders_url', 'tier', 'access_mode', 'verified_status', 'status', 'last_error_message']) {
     if (req.body[key] !== undefined) {
       updates[key] = req.body[key];
     }
   }
 
+  // If operator updated tenders_url, derive clean base_url origin and clear stale offline/error states
+  if (typeof updates.tenders_url === 'string' && updates.tenders_url.trim()) {
+    try {
+      const parsedOrigin = new URL(updates.tenders_url.trim()).origin;
+      if (!updates.base_url || updates.base_url === updates.tenders_url) {
+        updates.base_url = parsedOrigin;
+      }
+    } catch {}
+    if (updates.status === undefined) {
+      updates.status = 'online';
+    }
+    if (updates.last_error_message === undefined) {
+      updates.last_error_message = null;
+    }
+    if (updates.access_mode === undefined) {
+      const existing = getPortalHealthList().find(p => p.portal_id === portalId);
+      if (existing && existing.access_mode === 'offline_broken') {
+        updates.access_mode = 'public';
+      }
+    }
+  }
+
   updatePortalHealth(portalId, updates);
   res.json({ success: true, message: 'Portal updated successfully' });
+});
+
+app.post('/api/portals/:portalId/heal', async (req, res) => {
+  try {
+    const { portalId } = req.params;
+    const portals = getActivePortalsList(portalId);
+    if (portals.length === 0) {
+      return res.status(404).json({ success: false, message: 'Portal not found' });
+    }
+    const targetPortal = { ...portals[0] };
+    if (typeof req.body?.baseUrl === 'string' && req.body.baseUrl.trim()) {
+      targetPortal.baseUrl = req.body.baseUrl.trim();
+    }
+
+    const healed = await healPortalConnection(targetPortal);
+    if (!healed) {
+      return res.json({
+        success: false,
+        message: 'Could not automatically locate an active tenders page from this website.'
+      });
+    }
+
+    res.json({
+      success: true,
+      baseUrl: healed.healedPortal.baseUrl,
+      tendersUrl: healed.healedPortal.tendersUrl,
+      itemsFound: healed.result.items.length,
+      message: `Discovered tender page (${healed.result.items.length} listings found)`
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message || 'Auto-discovery failed' });
+  }
 });
 
 app.post('/api/portals/:portalId/hitl-launch', async (req, res) => {

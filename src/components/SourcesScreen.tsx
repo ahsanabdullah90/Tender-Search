@@ -165,15 +165,42 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
   const [form, setForm] = useState({ portal_name: '', website_url: '' });
   const [credentialsFor, setCredentialsFor] = useState<PortalHealth | null>(null);
   const [verifying, setVerifying] = useState<string | null>(null);
+  const [healing, setHealing] = useState(false);
+  const [healMessage, setHealMessage] = useState<string | null>(null);
 
   const working = portals.filter(p => portalState(p) === 'working').length;
 
   const startEdit = (p: PortalHealth) => {
     setEditing(p);
+    setHealMessage(null);
     setForm({
       portal_name: p.portal_name,
       website_url: p.tenders_url || p.base_url || ''
     });
+  };
+
+  const runAutoHealInDialog = async () => {
+    if (!editing) return;
+    setHealing(true);
+    setHealMessage(null);
+    try {
+      const res = await fetch(`/api/portals/${editing.portal_id}/heal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseUrl: form.website_url.trim() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.tendersUrl) {
+        setForm(prev => ({ ...prev, website_url: data.tendersUrl }));
+        setHealMessage(data.message || `Found tender page: ${data.tendersUrl}`);
+      } else {
+        setHealMessage(data.message || 'Could not auto-detect tender page from this address.');
+      }
+    } catch {
+      setHealMessage('Auto-discovery request failed.');
+    } finally {
+      setHealing(false);
+    }
   };
 
   return (
@@ -189,10 +216,14 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
           .map(p => {
             const state = portalState(p);
             const website = p.tenders_url || p.base_url;
+            const isAutoHealed = Boolean(p.verified_status && p.verified_status.startsWith('Auto-healed'));
             return (
               <div key={p.portal_id} className="flex items-center justify-between gap-4 border-b border-line px-5 py-3.5 last:border-b-0">
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-semibold">{p.portal_name}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-semibold">{p.portal_name}</span>
+                    {isAutoHealed && <Chip tone="accent">Auto-healed</Chip>}
+                  </div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[13px]">
                     {website ? (
                       <a
@@ -208,7 +239,10 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                     ) : (
                       <span className="font-mono text-[12px] font-medium text-danger">⚠️ Missing website address</span>
                     )}
-                    <span className="text-ink-muted">· {p.category} · {lastChecked(p.last_scan_at)}</span>
+                    <span className="text-ink-muted">
+                      · {p.category} · {lastChecked(p.last_scan_at)}
+                      {p.last_items_found > 0 ? ` · ${p.last_items_found} matched` : ''}
+                    </span>
                   </div>
                   {p.last_error_message && state !== 'working' && (
                     <div className="mt-1 flex items-center gap-1 text-[12px] text-danger">
@@ -218,9 +252,15 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  {state === 'working' && <Chip tone="ok">Working</Chip>}
-                  {state === 'verify' && <Chip tone="warn">Needs verification</Chip>}
-                  {state === 'offline' && <Chip tone="danger">Offline</Chip>}
+                  {p.status === 'scanning' ? (
+                    <Chip tone="accent">Scanning…</Chip>
+                  ) : (
+                    <>
+                      {state === 'working' && <Chip tone="ok">Working</Chip>}
+                      {state === 'verify' && <Chip tone="warn">Needs verification</Chip>}
+                      {state === 'offline' && <Chip tone="danger">Offline</Chip>}
+                    </>
+                  )}
 
                   {state === 'verify' && verifying !== p.portal_id && (
                     <Button size="sm" variant="primary" onClick={() => { props.onLaunchHitl(p.portal_id); setVerifying(p.portal_id); }}>Verify now</Button>
@@ -229,6 +269,9 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                     <Button size="sm" variant="primary" onClick={() => { props.onVerifyHitl(p.portal_id); setVerifying(null); }}>I've finished</Button>
                   )}
                   {state === 'offline' && <Button size="sm" onClick={() => props.onScanSinglePortal(p.portal_id)}>Retry</Button>}
+                  {state === 'working' && p.status !== 'scanning' && (
+                    <Button size="sm" variant="ghost" onClick={() => props.onScanSinglePortal(p.portal_id)}>Scan</Button>
+                  )}
                   <Button size="sm" variant="ghost" aria-label={`Edit ${p.portal_name}`} onClick={() => startEdit(p)}>
                     <Pencil className="h-4 w-4" />
                   </Button>
@@ -281,9 +324,19 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
               placeholder="https://..."
             />
           </Field>
-          <Button onClick={() => { setCredentialsFor(editing); setEditing(null); }}>
-            <KeyRound className="h-4 w-4" /> Login details
-          </Button>
+          {healMessage && (
+            <div className="rounded-lg bg-surface-2 px-3 py-2 text-xs text-ink-muted">
+              {healMessage}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button disabled={healing || !form.website_url.trim()} onClick={() => void runAutoHealInDialog()}>
+              {healing ? 'Searching website…' : 'Auto-find tender page'}
+            </Button>
+            <Button onClick={() => { setCredentialsFor(editing); setEditing(null); }}>
+              <KeyRound className="h-4 w-4" /> Login details
+            </Button>
+          </div>
         </div>
       </Dialog>
 

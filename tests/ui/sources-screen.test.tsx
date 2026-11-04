@@ -368,9 +368,22 @@ describe('SourcesScreen component', () => {
       base_url: 'https://eproc.punjab.gov.pk/home'
     }));
 
-    // Test cancel button in edit portal dialog
+    // Test Auto-find tender page button inside edit portal dialog
     await user.click(editPortalBtn);
     const editDialog3 = screen.getByRole('dialog', { name: /Edit Punjab PPRA/ });
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        tendersUrl: 'https://bpptwo.vdc.services:5451/Tenders',
+        message: 'Discovered tender page (10 listings found)'
+      })
+    } as any);
+    const autoFindBtn = within(editDialog3).getByRole('button', { name: /Auto-find tender page/i });
+    await user.click(autoFindBtn);
+    await waitFor(() => {
+      expect(within(editDialog3).getByText(/Discovered tender page/i)).toBeInTheDocument();
+    });
     const cancelPortalBtn = within(editDialog3).getByRole('button', { name: 'Cancel' });
     await user.click(cancelPortalBtn);
     expect(screen.queryByRole('dialog', { name: /Edit Punjab PPRA/ })).not.toBeInTheDocument();
