@@ -1,0 +1,241 @@
+import { db } from './connection.js';
+import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
+
+export function initDatabase() {
+  // 1. Tenders Table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tenders (
+      id TEXT PRIMARY KEY,
+      canonical_id TEXT NOT NULL,
+      reference_no TEXT,
+      title TEXT NOT NULL,
+      organization TEXT NOT NULL,
+      portal_id TEXT NOT NULL,
+      portal_name TEXT NOT NULL,
+      direct_url TEXT NOT NULL,
+      secondary_sources TEXT DEFAULT '[]',
+      domain_tracks TEXT NOT NULL DEFAULT '[]',
+      matched_keywords TEXT NOT NULL DEFAULT '[]',
+      match_score INTEGER DEFAULT 0,
+      publish_date TEXT,
+      closing_date TEXT,
+      closing_date_formatted TEXT,
+      estimated_value TEXT,
+      location TEXT,
+      description TEXT,
+      cached_dossiers TEXT DEFAULT '[]',
+      has_corrigendum INTEGER DEFAULT 0,
+      pipeline_status TEXT DEFAULT 'New Opportunity',
+      status_notes TEXT DEFAULT '',
+      is_bookmarked INTEGER DEFAULT 0,
+      viewed INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tenders_canonical ON tenders(canonical_id);
+    CREATE INDEX IF NOT EXISTS idx_tenders_status ON tenders(pipeline_status);
+    CREATE INDEX IF NOT EXISTS idx_tenders_closing ON tenders(closing_date);
+
+    -- 2. Corrigendum & Delta Alert Logs
+    CREATE TABLE IF NOT EXISTS corrigendum_logs (
+      id TEXT PRIMARY KEY,
+      tender_id TEXT NOT NULL,
+      change_type TEXT NOT NULL,
+      previous_value TEXT,
+      new_value TEXT,
+      is_acknowledged INTEGER DEFAULT 0,
+      detected_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(tender_id) REFERENCES tenders(id) ON DELETE CASCADE
+    );
+
+    -- 3. Solo Status History Log
+    CREATE TABLE IF NOT EXISTS pipeline_audit_logs (
+      id TEXT PRIMARY KEY,
+      tender_id TEXT NOT NULL,
+      previous_status TEXT,
+      new_status TEXT NOT NULL,
+      notes TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(tender_id) REFERENCES tenders(id) ON DELETE CASCADE
+    );
+
+    -- 4. Dynamic User-Configurable Domain Tracks
+    CREATE TABLE IF NOT EXISTS domain_tracks (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      positive_keywords TEXT NOT NULL,
+      negative_keywords TEXT NOT NULL,
+      is_active INTEGER DEFAULT 1
+    );
+
+    -- 5. Portal Operational Health & Watchdog
+    CREATE TABLE IF NOT EXISTS portal_health (
+      portal_id TEXT PRIMARY KEY,
+      portal_name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      tier TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      tenders_url TEXT NOT NULL,
+      login_url TEXT,
+      auth_username TEXT,
+      auth_password TEXT,
+      session_cookies TEXT,
+      status TEXT DEFAULT 'online',
+      last_scan_at TEXT,
+      last_items_found INTEGER DEFAULT 0,
+      consecutive_zero_yields INTEGER DEFAULT 0,
+      last_error_message TEXT,
+      access_mode TEXT DEFAULT 'public',
+      verified_status TEXT
+    );
+    -- 6. App Settings (Google AI Studio API Key & Preferences)
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
+
+  seedDefaultDomainTracks();
+  // Optional date the owner expects the award result. Older databases get the column here.
+  try { db.prepare('ALTER TABLE tenders ADD COLUMN result_expected_date TEXT').run(); } catch {}
+
+  seedPortalHealth();
+}
+
+export function seedDefaultDomainTracks() {
+  const count = (db.prepare('SELECT COUNT(*) as count FROM domain_tracks').get() as { count: number }).count;
+  if (count > 0) return;
+
+  const defaultTracks = [
+    {
+      id: 'track-construction',
+      name: 'Construction & Civil Works',
+      positive: ['construction', 'civil works', 'renovation', 'rehabilitation', 'infrastructure', 'masonry', 'building repair', 'prefabricated', 'asphalt', 'earthwork'],
+      negative: ['software', 'janitorial']
+    },
+    {
+      id: 'track-solar',
+      name: 'Solar & Clean Energy',
+      positive: ['solar', 'solarization', 'pv system', 'photovoltaic', 'inverter', 'net metering', 'clean energy', 'hybrid solar', 'solar panels', 'battery bank'],
+      negative: ['solar geyser repair']
+    },
+    {
+      id: 'track-education',
+      name: 'Education & Learning',
+      positive: ['education', 'curriculum', 'textbooks', 'learning material', 'school supplies', 'classroom', 'literacy', 'edtech', 'teacher training', 'scholarships'],
+      negative: []
+    },
+    {
+      id: 'track-tvet',
+      name: 'Vocational Training (TVET)',
+      positive: ['tvet', 'vocational', 'skill development', 'technical training', 'capacity building', 'youth skills', 'apprenticeship', 'employability', 'vocational courses', 'training service provider', 'skills for', 'tool kits'],
+      negative: []
+    },
+    {
+      id: 'track-stationery',
+      name: 'Stationery & Office Supplies',
+      positive: ['stationery', 'office supplies', 'printing', 'paper rim', 'toner', 'cartridge', 'office equipment', 'consumables', 'it consumables', 'photocopier'],
+      negative: []
+    },
+    {
+      id: 'track-media',
+      name: 'Media, Documentaries & Communications',
+      positive: ['documentary', 'media production', 'video production', 'digital communications', 'animation', 'short film', 'advocacy campaign', 'awareness campaign', 'public relations', 'audio visual', 'event management'],
+      negative: ['cctv', 'surveillance camera', 'security camera']
+    }
+  ];
+
+  const insertStmt = db.prepare(`
+    INSERT INTO domain_tracks (id, name, positive_keywords, negative_keywords, is_active)
+    VALUES (?, ?, ?, ?, 1)
+  `);
+
+  const insertMany = db.transaction((tracks: typeof defaultTracks) => {
+    for (const t of tracks) {
+      insertStmt.run(t.id, t.name, JSON.stringify(t.positive), JSON.stringify(t.negative));
+    }
+  });
+
+  insertMany(defaultTracks);
+}
+
+export function seedPortalHealth() {
+  // Check if columns exist; if not, add them (schema migration)
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN access_mode TEXT DEFAULT "public"').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN verified_status TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN login_url TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_username TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_password TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN session_cookies TEXT').run(); } catch {}
+
+  // INSERT OR IGNORE so user edits to URLs, access modes, tiers, and statuses are NEVER overwritten on reboot
+  const insertStmt = db.prepare(`
+    INSERT OR IGNORE INTO portal_health (
+      portal_id, portal_name, category, tier, base_url, tenders_url, login_url,
+      status, last_items_found, consecutive_zero_yields, access_mode, verified_status
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+  `);
+
+  const insertMany = db.transaction((portals: typeof PORTAL_DEFINITIONS) => {
+    for (const p of portals) {
+      const initialStatus = p.accessMode === 'login_required'
+        ? 'hitl_required'
+        : p.accessMode === 'offline_broken'
+        ? 'error'
+        : p.accessMode === 'cloudflare'
+        ? 'hitl_required'
+        : 'online';
+      insertStmt.run(p.id, p.name, p.category, p.tier, p.baseUrl, p.tendersUrl, p.loginUrl || null, initialStatus, p.accessMode, p.verifiedStatus);
+      
+      // Heal legacy DB records where a portal was previously flagged as offline_broken due to host TLS errors,
+      // but our SSL-tolerant agent now supports it as public:
+      if (p.accessMode === 'public') {
+        try {
+          db.prepare(`
+            UPDATE portal_health 
+            SET access_mode = 'public',
+                verified_status = ?,
+                status = 'online',
+                last_error_message = NULL
+            WHERE portal_id = ? AND access_mode = 'offline_broken' AND (verified_status LIKE '%TLS%' OR verified_status LIKE '%certificate%')
+          `).run(p.verifiedStatus, p.id);
+        } catch {}
+      }
+
+      // If loginUrl is defined in PORTAL_DEFINITIONS and not set in DB, populate it
+      if (p.loginUrl) {
+        try {
+          db.prepare('UPDATE portal_health SET login_url = ? WHERE portal_id = ? AND (login_url IS NULL OR login_url = "")').run(p.loginUrl, p.id);
+        } catch {}
+      }
+
+      // Repair any corrupted base_url (e.g. containing a file path) or root-downgraded auto-healed tenders_url
+      try {
+        const dbRow = db.prepare('SELECT base_url, tenders_url, verified_status FROM portal_health WHERE portal_id = ?').get(p.id) as any;
+        if (dbRow) {
+          let cleanBase = dbRow.base_url;
+          try {
+            cleanBase = new URL(dbRow.base_url).origin;
+          } catch {
+            cleanBase = p.baseUrl;
+          }
+          if (cleanBase !== dbRow.base_url) {
+            db.prepare('UPDATE portal_health SET base_url = ? WHERE portal_id = ?').run(cleanBase, p.id);
+          }
+
+          // If a previous auto-heal downgraded a specific path (like /ActiveTenders.aspx) to a bare root "/", restore canonical tendersUrl
+          const defPath = new URL(p.tendersUrl).pathname;
+          const dbPath = new URL(dbRow.tenders_url).pathname;
+          if (defPath && defPath !== '/' && (dbPath === '/' || dbPath === '') && String(dbRow.verified_status || '').startsWith('Auto-healed')) {
+            db.prepare('UPDATE portal_health SET base_url = ?, tenders_url = ?, verified_status = ? WHERE portal_id = ?')
+              .run(p.baseUrl, p.tendersUrl, p.verifiedStatus, p.id);
+          }
+        }
+      } catch {}
+    }
+  });
+
+  insertMany(PORTAL_DEFINITIONS);
+}

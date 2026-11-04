@@ -1,0 +1,213 @@
+import { db, safeJsonParse } from '../connection.js';
+import { Tender } from '../../../types.js';
+
+export function getAllTenders(filters?: {
+  track?: string;
+  status?: string;
+  search?: string;
+  bookmarkedOnly?: boolean;
+  corrigendumOnly?: boolean;
+}): Tender[] {
+  let query = 'SELECT * FROM tenders WHERE 1=1';
+  const params: any[] = [];
+
+  if (filters?.status && filters.status !== 'All') {
+    query += ' AND pipeline_status = ?';
+    params.push(filters.status);
+  }
+
+  if (filters?.bookmarkedOnly) {
+    query += ' AND is_bookmarked = 1';
+  }
+
+  if (filters?.corrigendumOnly) {
+    query += ' AND has_corrigendum = 1';
+  }
+
+  if (filters?.search && filters.search.trim()) {
+    const term = `%${filters.search.trim()}%`;
+    query += ' AND (title LIKE ? OR organization LIKE ? OR reference_no LIKE ? OR portal_name LIKE ?)';
+    params.push(term, term, term, term);
+  }
+
+  if (filters?.track && filters.track !== 'All') {
+    query += ' AND EXISTS (SELECT 1 FROM json_each(tenders.domain_tracks) WHERE value = ?)';
+    params.push(filters.track);
+  }
+
+  query += ' ORDER BY CASE WHEN closing_date IS NULL THEN 1 ELSE 0 END, closing_date ASC, updated_at DESC';
+
+  const rows = db.prepare(query).all(...params) as any[];
+
+  return rows.map(row => ({
+    ...row,
+    secondary_sources: safeJsonParse(row.secondary_sources, []),
+    domain_tracks: safeJsonParse(row.domain_tracks, []),
+    matched_keywords: safeJsonParse(row.matched_keywords, []),
+    cached_dossiers: safeJsonParse(row.cached_dossiers, [])
+  }));
+}
+
+export function getTenderById(id: string): Tender | null {
+  const row = db.prepare('SELECT * FROM tenders WHERE id = ?').get(id) as any;
+  if (!row) return null;
+  return {
+    ...row,
+    secondary_sources: safeJsonParse(row.secondary_sources, []),
+    domain_tracks: safeJsonParse(row.domain_tracks, []),
+    matched_keywords: safeJsonParse(row.matched_keywords, []),
+    cached_dossiers: safeJsonParse(row.cached_dossiers, [])
+  };
+}
+
+export function updateTenderStatus(id: string, newStatus: string, notes?: string) {
+  const tender = getTenderById(id);
+  if (!tender) return false;
+
+  const previousStatus = tender.pipeline_status;
+
+  const updateTx = db.transaction(() => {
+    db.prepare(`
+      UPDATE tenders 
+      SET pipeline_status = ?, status_notes = COALESCE(?, status_notes), updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(newStatus, notes, id);
+
+    db.prepare(`
+      INSERT INTO pipeline_audit_logs (id, tender_id, previous_status, new_status, notes)
+      VALUES (?, ?, ?, ?, ?)
+    `).run('log-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6), id, previousStatus, newStatus, notes || null);
+  });
+
+  updateTx();
+  return true;
+}
+
+export function toggleTenderBookmark(id: string): { success: boolean; is_bookmarked: number } {
+  const tender = getTenderById(id);
+  if (!tender) return { success: false, is_bookmarked: 0 };
+
+  const nextState = tender.is_bookmarked === 1 ? 0 : 1;
+  db.prepare(`
+    UPDATE tenders 
+    SET is_bookmarked = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(nextState, id);
+
+  return { success: true, is_bookmarked: nextState };
+}
+
+export function updateTenderNotes(id: string, notes: string): boolean {
+  const res = db.prepare(`
+    UPDATE tenders SET status_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+  `).run(notes, id);
+  return res.changes > 0;
+}
+
+/** Pass null or an empty string to clear the date. */
+export function updateTenderResultDate(id: string, date: string | null): boolean {
+  const res = db.prepare(`
+    UPDATE tenders SET result_expected_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+  `).run(date || null, id);
+  return res.changes > 0;
+}
+
+export function updateTenderFields(
+  id: string,
+  fields: Partial<{
+    title: string;
+    organization: string;
+    reference_no: string | null;
+    closing_date: string | null;
+    closing_date_formatted: string;
+    estimated_value: string | null;
+    description: string;
+    direct_url: string;
+    location: string | null;
+    cached_dossiers: any[];
+    has_corrigendum: number;
+  }>
+): Tender | null {
+  const existing = getTenderById(id);
+  if (!existing) return null;
+
+  db.prepare(`
+    UPDATE tenders
+    SET title = ?,
+        organization = ?,
+        reference_no = ?,
+        closing_date = ?,
+        closing_date_formatted = ?,
+        estimated_value = ?,
+        description = ?,
+        direct_url = ?,
+        location = ?,
+        cached_dossiers = ?,
+        has_corrigendum = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    fields.title !== undefined ? fields.title : existing.title,
+    fields.organization !== undefined ? fields.organization : existing.organization,
+    fields.reference_no !== undefined ? fields.reference_no : existing.reference_no,
+    fields.closing_date !== undefined ? fields.closing_date : existing.closing_date,
+    fields.closing_date_formatted !== undefined ? fields.closing_date_formatted : existing.closing_date_formatted,
+    fields.estimated_value !== undefined ? fields.estimated_value : existing.estimated_value,
+    fields.description !== undefined ? fields.description : existing.description,
+    fields.direct_url !== undefined ? fields.direct_url : existing.direct_url,
+    fields.location !== undefined ? fields.location : existing.location,
+    fields.cached_dossiers !== undefined ? JSON.stringify(fields.cached_dossiers) : JSON.stringify(existing.cached_dossiers || []),
+    fields.has_corrigendum !== undefined ? fields.has_corrigendum : existing.has_corrigendum,
+    id
+  );
+
+  return getTenderById(id);
+}
+
+export function createManualTender(input: {
+  title: string;
+  organization: string;
+  reference_no?: string | null;
+  portal_name?: string;
+  direct_url?: string;
+  closing_date?: string | null;
+  closing_date_formatted?: string;
+  estimated_value?: string | null;
+  location?: string | null;
+  description?: string;
+  domain_tracks?: string[];
+  matched_keywords?: string[];
+  match_score?: number;
+  cached_dossiers?: any[];
+}): Tender {
+  const id = `tender-manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const today = new Date().toISOString().slice(0, 10);
+
+  db.prepare(`
+    INSERT INTO tenders (
+      id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
+      domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
+      estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status
+    ) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'New Opportunity')
+  `).run(
+    id,
+    id,
+    input.reference_no || null,
+    input.title.trim(),
+    input.organization.trim(),
+    input.portal_name?.trim() || 'Manual Entry',
+    input.direct_url?.trim() || '#',
+    JSON.stringify(input.domain_tracks || []),
+    JSON.stringify(input.matched_keywords || []),
+    input.match_score ?? 80,
+    today,
+    input.closing_date || null,
+    input.closing_date_formatted || 'Not Available',
+    input.estimated_value || null,
+    input.location || 'Pakistan',
+    input.description ?? '',
+    JSON.stringify(input.cached_dossiers || [])
+  );
+
+  return getTenderById(id)!;
+}
