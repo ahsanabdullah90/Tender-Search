@@ -7,9 +7,11 @@ import {
   getStorageStats,
   pruneDossiersForPassed,
   getGeminiApiKey,
-  setAppSetting
+  setAppSetting,
+  db
 } from '../db.js';
 import { CANDIDATE_MODELS, extractTenderFromImage } from '../ocrService.js';
+import { getEmbeddingEngineStatus } from '../embeddingService.js';
 
 export const systemRouter = Router();
 
@@ -157,4 +159,21 @@ systemRouter.post('/ai/extract-file', async (req, res) => {
     return res.status(422).json({ error: 'Could not extract structured tender information from this file.' });
   }
   res.json({ success: true, extracted });
+});
+
+// 5. Local Hybrid Embedding Engine Status
+systemRouter.get('/system/embedding-status', (req, res) => {
+  const engineStatus = getEmbeddingEngineStatus();
+  let indexedTenders = 0;
+  let totalTenders = 0;
+  try {
+    totalTenders = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any)?.c || 0;
+    indexedTenders = (db.prepare('SELECT COUNT(*) as c FROM tenders WHERE embedding IS NOT NULL').get() as any)?.c || 0;
+  } catch {}
+
+  res.json({
+    ...engineStatus,
+    indexedTenders,
+    totalTenders
+  });
 });

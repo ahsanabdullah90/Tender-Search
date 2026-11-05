@@ -5,10 +5,12 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import {
   initDatabase,
+  reScoreTendersAgainstTracks,
   DOSSIERS_DIR,
   db
 } from './src/server/db.js';
 import { initStartupScheduler, stopStartupScheduler } from './src/server/scheduler.js';
+import { initEmbeddingModel } from './src/server/embeddingService.js';
 import { apiRouter } from './src/server/routes/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -48,6 +50,9 @@ export function createApp(): express.Express {
 export async function startServer() {
   initDatabase();
   initStartupScheduler();
+  void initEmbeddingModel().then(() => {
+    try { reScoreTendersAgainstTracks(); } catch {}
+  });
 
   const app = createApp();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;

@@ -1,5 +1,22 @@
 import { db, safeJsonParse } from '../connection.js';
 import { Tender } from '../../../types.js';
+import {
+  buildTenderEmbeddingText,
+  computeFastSemanticEmbedding,
+  computeTextSemanticSimilarity,
+  serializeEmbedding
+} from '../../embeddingService.js';
+
+function mapTenderRow(row: any): Tender {
+  const { embedding, ...rest } = row;
+  return {
+    ...rest,
+    secondary_sources: safeJsonParse(row.secondary_sources, []),
+    domain_tracks: safeJsonParse(row.domain_tracks, []),
+    matched_keywords: safeJsonParse(row.matched_keywords, []),
+    cached_dossiers: safeJsonParse(row.cached_dossiers, [])
+  };
+}
 
 export function getAllTenders(filters?: {
   track?: string;
@@ -24,12 +41,6 @@ export function getAllTenders(filters?: {
     query += ' AND has_corrigendum = 1';
   }
 
-  if (filters?.search && filters.search.trim()) {
-    const term = `%${filters.search.trim()}%`;
-    query += ' AND (title LIKE ? OR organization LIKE ? OR reference_no LIKE ? OR portal_name LIKE ?)';
-    params.push(term, term, term, term);
-  }
-
   if (filters?.track && filters.track !== 'All') {
     query += ' AND EXISTS (SELECT 1 FROM json_each(tenders.domain_tracks) WHERE value = ?)';
     params.push(filters.track);
@@ -37,27 +48,42 @@ export function getAllTenders(filters?: {
 
   query += ' ORDER BY CASE WHEN closing_date IS NULL THEN 1 ELSE 0 END, closing_date ASC, updated_at DESC';
 
-  const rows = db.prepare(query).all(...params) as any[];
+  let rows = db.prepare(query).all(...params) as any[];
 
-  return rows.map(row => ({
-    ...row,
-    secondary_sources: safeJsonParse(row.secondary_sources, []),
-    domain_tracks: safeJsonParse(row.domain_tracks, []),
-    matched_keywords: safeJsonParse(row.matched_keywords, []),
-    cached_dossiers: safeJsonParse(row.cached_dossiers, [])
-  }));
+  if (filters?.search && filters.search.trim()) {
+    const rawSearch = filters.search.trim();
+    const lowerSearch = rawSearch.toLowerCase();
+
+    rows = rows.filter(row => {
+      const titleMatch = (row.title || '').toLowerCase().includes(lowerSearch);
+      const orgMatch = (row.organization || '').toLowerCase().includes(lowerSearch);
+      const refMatch = (row.reference_no || '').toLowerCase().includes(lowerSearch);
+      const portalMatch = (row.portal_name || '').toLowerCase().includes(lowerSearch);
+
+      if (titleMatch || orgMatch || refMatch || portalMatch) {
+        return true;
+      }
+
+      // Hybrid Semantic Search fallback for natural-language queries (>= 4 chars)
+      if (lowerSearch.length >= 4) {
+        const candidateText = `${row.title || ''} ${row.organization || ''}`;
+        const sim = computeTextSemanticSimilarity(lowerSearch, candidateText, null, row.embedding);
+        if (sim >= 0.58) {
+          return true;
+        }
+      }
+
+      return false;
+    });
+  }
+
+  return rows.map(mapTenderRow);
 }
 
 export function getTenderById(id: string): Tender | null {
   const row = db.prepare('SELECT * FROM tenders WHERE id = ?').get(id) as any;
   if (!row) return null;
-  return {
-    ...row,
-    secondary_sources: safeJsonParse(row.secondary_sources, []),
-    domain_tracks: safeJsonParse(row.domain_tracks, []),
-    matched_keywords: safeJsonParse(row.matched_keywords, []),
-    cached_dossiers: safeJsonParse(row.cached_dossiers, [])
-  };
+  return mapTenderRow(row);
 }
 
 export function updateTenderStatus(id: string, newStatus: string, notes?: string) {
@@ -131,6 +157,13 @@ export function updateTenderFields(
   const existing = getTenderById(id);
   if (!existing) return null;
 
+  const nextTitle = fields.title !== undefined ? fields.title : existing.title;
+  const nextOrg = fields.organization !== undefined ? fields.organization : existing.organization;
+  const nextDesc = fields.description !== undefined ? fields.description : existing.description;
+  const embeddingBuf = serializeEmbedding(
+    computeFastSemanticEmbedding(buildTenderEmbeddingText({ title: nextTitle, organization: nextOrg, description: nextDesc }))
+  );
+
   db.prepare(`
     UPDATE tenders
     SET title = ?,
@@ -144,20 +177,22 @@ export function updateTenderFields(
         location = ?,
         cached_dossiers = ?,
         has_corrigendum = ?,
+        embedding = ?,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(
-    fields.title !== undefined ? fields.title : existing.title,
-    fields.organization !== undefined ? fields.organization : existing.organization,
+    nextTitle,
+    nextOrg,
     fields.reference_no !== undefined ? fields.reference_no : existing.reference_no,
     fields.closing_date !== undefined ? fields.closing_date : existing.closing_date,
     fields.closing_date_formatted !== undefined ? fields.closing_date_formatted : existing.closing_date_formatted,
     fields.estimated_value !== undefined ? fields.estimated_value : existing.estimated_value,
-    fields.description !== undefined ? fields.description : existing.description,
+    nextDesc,
     fields.direct_url !== undefined ? fields.direct_url : existing.direct_url,
     fields.location !== undefined ? fields.location : existing.location,
     fields.cached_dossiers !== undefined ? JSON.stringify(fields.cached_dossiers) : JSON.stringify(existing.cached_dossiers || []),
     fields.has_corrigendum !== undefined ? fields.has_corrigendum : existing.has_corrigendum,
+    embeddingBuf,
     id
   );
 
@@ -182,13 +217,22 @@ export function createManualTender(input: {
 }): Tender {
   const id = `tender-manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const today = new Date().toISOString().slice(0, 10);
+  const embeddingBuf = serializeEmbedding(
+    computeFastSemanticEmbedding(
+      buildTenderEmbeddingText({
+        title: input.title,
+        organization: input.organization,
+        description: input.description
+      })
+    )
+  );
 
   db.prepare(`
     INSERT INTO tenders (
       id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
       domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
-      estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status
-    ) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'New Opportunity')
+      estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status, embedding
+    ) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'New Opportunity', ?)
   `).run(
     id,
     id,
@@ -206,7 +250,8 @@ export function createManualTender(input: {
     input.estimated_value || null,
     input.location || 'Pakistan',
     input.description ?? '',
-    JSON.stringify(input.cached_dossiers || [])
+    JSON.stringify(input.cached_dossiers || []),
+    embeddingBuf
   );
 
   return getTenderById(id)!;

@@ -15,8 +15,9 @@ export const DATA_DIR = process.env.TENDER_DATA_DIR
 export const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
 export const DOSSIERS_DIR = path.resolve(DATA_DIR, 'dossiers');
 export const SESSIONS_DIR = path.resolve(DATA_DIR, 'sessions');
+export const MODELS_DIR = path.resolve(DATA_DIR, 'models');
 
-for (const dir of [DATA_DIR, BACKUPS_DIR, DOSSIERS_DIR, SESSIONS_DIR]) {
+for (const dir of [DATA_DIR, BACKUPS_DIR, DOSSIERS_DIR, SESSIONS_DIR, MODELS_DIR]) {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }

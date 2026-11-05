@@ -1,4 +1,5 @@
 import { db } from './db.js';
+import { computeTextSemanticSimilarity } from './embeddingService.js';
 
 /**
  * Calculates Dice's coefficient (Bigram similarity) between two strings.
@@ -72,18 +73,19 @@ export function isValidReferenceNo(ref?: string | null): boolean {
 
 /**
  * Checks if a tender matches an existing active opportunity in the database.
- * Matches if:
+ * Matches via 3 Tiers:
  * 1. Normalized Reference Numbers match exactly (if valid genuine ref with digits)
- * OR
- * 2. Title + Organization similarity >= 0.85 AND closing dates within ±1.5 days (or both null)
+ * 2. Lexical Bigram similarity (Title + Organization) >= 0.85 AND closing dates within ±1.5 days (or both null)
+ * 3. Semantic Vector similarity >= 0.88 with matching/related Organization (>= 0.50) AND closing dates within ±1.5 days
  */
 export function findCanonicalMatch(candidate: {
   referenceNo?: string | null;
   title: string;
   organization: string;
   closingDate?: string | null;
+  embedding?: Buffer | Uint8Array | null;
 }): DuplicateMatchResult {
-  // 1. Exact Reference Number check (if valid genuine ref number with numbers)
+  // Tier 1: Exact Reference Number check (if valid genuine ref number with numbers)
   if (isValidReferenceNo(candidate.referenceNo)) {
     const rawRef = candidate.referenceNo!.trim();
     const cleanRef = rawRef.replace(/[-/_\s]/g, '').toLowerCase();
@@ -103,18 +105,18 @@ export function findCanonicalMatch(candidate: {
     }
   }
 
-  // 2. Query candidates by closing date proximity
+  // Query candidates by closing date proximity
   let candidates: any[] = [];
   if (candidate.closingDate) {
     candidates = db.prepare(`
-      SELECT id, canonical_id, title, organization, closing_date 
+      SELECT id, canonical_id, title, organization, closing_date, embedding
       FROM tenders 
       WHERE closing_date IS NOT NULL 
       AND ABS(julianday(closing_date) - julianday(?)) <= 1.5
     `).all(candidate.closingDate);
   } else {
     candidates = db.prepare(`
-      SELECT id, canonical_id, title, organization, closing_date 
+      SELECT id, canonical_id, title, organization, closing_date, embedding
       FROM tenders 
       WHERE closing_date IS NULL
       AND created_at >= datetime('now', '-14 days')
@@ -125,16 +127,37 @@ export function findCanonicalMatch(candidate: {
   let bestMatch: DuplicateMatchResult = { isDuplicate: false, similarity: 0 };
 
   for (const existing of candidates) {
+    // Tier 2: Lexical Bigram Similarity
     const existingString = existing.organization + ' ' + existing.title;
-    const similarity = calculateStringSimilarity(targetString, existingString);
+    const lexicalSim = calculateStringSimilarity(targetString, existingString);
 
-    if (similarity >= 0.85 && similarity > bestMatch.similarity) {
+    if (lexicalSim >= 0.85 && lexicalSim > bestMatch.similarity) {
       bestMatch = {
         isDuplicate: true,
         canonicalId: existing.canonical_id,
         matchedTenderId: existing.id,
-        similarity
+        similarity: lexicalSim
       };
+      continue;
+    }
+
+    // Tier 3: Semantic Vector Similarity for reworded cross-portal duplicates from the same organization
+    const orgSim = calculateStringSimilarity(candidate.organization, existing.organization);
+    if (orgSim >= 0.50) {
+      const semanticSim = computeTextSemanticSimilarity(
+        candidate.title,
+        existing.title,
+        candidate.embedding,
+        existing.embedding
+      );
+      if (semanticSim >= 0.88 && semanticSim > bestMatch.similarity) {
+        bestMatch = {
+          isDuplicate: true,
+          canonicalId: existing.canonical_id,
+          matchedTenderId: existing.id,
+          similarity: semanticSim
+        };
+      }
     }
   }
 

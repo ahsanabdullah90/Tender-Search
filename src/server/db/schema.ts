@@ -96,10 +96,13 @@ export function initDatabase() {
     );
   `);
 
-  seedDefaultDomainTracks();
-  // Optional date the owner expects the award result. Older databases get the column here.
+  // Optional date the owner expects the award result and hybrid embedding columns.
   try { db.prepare('ALTER TABLE tenders ADD COLUMN result_expected_date TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE tenders ADD COLUMN embedding BLOB').run(); } catch {}
+  try { db.prepare('ALTER TABLE tenders ADD COLUMN semantic_score REAL DEFAULT 0').run(); } catch {}
+  try { db.prepare('ALTER TABLE domain_tracks ADD COLUMN embedding BLOB').run(); } catch {}
 
+  seedDefaultDomainTracks();
   seedPortalHealth();
 }
 

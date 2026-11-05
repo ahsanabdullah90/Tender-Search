@@ -5,6 +5,13 @@ import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, H
 import { ScanStatus, Tender } from '../../types.js';
 import { downloadAndCacheDossier, deriveDossierLabel } from '../dossierManager.js';
 import { extractTenderFromImage, summarizeTenderTextWithAI, extractTenderListFromHtmlWithAI, discoverTenderLinkWithAI } from '../ocrService.js';
+import {
+  buildTrackEmbeddingText,
+  buildTenderEmbeddingText,
+  computeTextSemanticSimilarity,
+  generateEmbeddingAsync,
+  serializeEmbedding
+} from '../embeddingService.js';
 import * as cheerio from 'cheerio';
 import https from 'https';
 import http from 'http';
@@ -1131,41 +1138,72 @@ export function fetchHtmlWithTolerantAgent(url: string, redirectCount: number = 
 const DEFAULT_PORTAL_NAMES = new Set(PORTAL_DEFINITIONS.map(p => p.name.toLowerCase()));
 
 /**
- * Matches scraped tender against active domain tracks and computes keyword match score
+ * Matches scraped tender against active domain tracks using the Hybrid Keyword + Semantic Engine
  */
 export function matchTracks(
   item: RawScrapedItem,
   activeTracks: any[]
-): { matchedTracks: string[]; matchedKeywords: string[]; matchScore: number } {
+): { matchedTracks: string[]; matchedKeywords: string[]; matchScore: number; semanticScore?: number } {
   // Exclude generic portal name from keyword matching to prevent 100% false-positive matches on education/skills portals
   const orgLower = (item.organization || '').toLowerCase();
   const orgForMatching = DEFAULT_PORTAL_NAMES.has(orgLower) ? '' : orgLower;
   const combinedText = `${item.title} ${item.description || ''} ${orgForMatching} ${item.referenceNo || ''}`.toLowerCase();
+  const tenderSemanticText = `${item.title} ${item.description || ''} ${orgForMatching}`.trim();
 
   const matchedTracks: string[] = [];
-  const matchedKeywords: string[] = [];
+  const exactKeywords: string[] = [];
+  const semanticTags: string[] = [];
+  const semanticDiscoveryScores: number[] = [];
+  let maxSemanticSim = 0;
 
   for (const track of activeTracks) {
-    // Check negative keywords (exclusions)
+    // Stage 1: Hard Negative Keyword Gate (AI never overrides negative keywords)
     const hasNegative = track.negative_keywords?.some((neg: string) => combinedText.includes(neg.toLowerCase()));
     if (hasNegative) continue;
 
-    // Check positive keywords
+    const posKeywords: string[] = track.positive_keywords || [];
+    if (posKeywords.length === 0) continue;
+
+    // Stage 2: Exact Positive Keyword Check
     const hitKeywords: string[] = [];
-    for (const pos of (track.positive_keywords || [])) {
+    for (const pos of posKeywords) {
       if (combinedText.includes(pos.toLowerCase())) {
         hitKeywords.push(pos);
       }
     }
 
+    // Stage 3: Semantic Vector Similarity
+    const trackText = buildTrackEmbeddingText({ name: track.name, positive_keywords: posKeywords });
+    const sim = computeTextSemanticSimilarity(tenderSemanticText, trackText);
+    if (sim > maxSemanticSim) maxSemanticSim = sim;
+
     if (hitKeywords.length > 0) {
       matchedTracks.push(track.name);
-      matchedKeywords.push(...hitKeywords);
+      exactKeywords.push(...hitKeywords);
+    } else if (sim >= 0.58) {
+      matchedTracks.push(track.name);
+      const pct = Math.round(sim * 100);
+      semanticTags.push(`✨ Semantic (${pct}%)`);
+      semanticDiscoveryScores.push(Math.min(85, Math.max(35, pct)));
     }
   }
 
-  const matchScore = matchedTracks.length === 0 ? 0 : Math.min(100, Math.max(30, matchedKeywords.length * 20));
-  return { matchedTracks, matchedKeywords, matchScore };
+  const matchedKeywords = exactKeywords.length > 0 ? exactKeywords : semanticTags;
+  let matchScore = 0;
+  if (matchedTracks.length > 0) {
+    if (exactKeywords.length > 0) {
+      matchScore = Math.min(100, Math.max(30, exactKeywords.length * 20));
+    } else if (semanticDiscoveryScores.length > 0) {
+      matchScore = Math.max(...semanticDiscoveryScores);
+    }
+  }
+
+  return {
+    matchedTracks,
+    matchedKeywords,
+    matchScore,
+    semanticScore: Math.round(maxSemanticSim * 1000) / 1000
+  };
 }
 
 /**
@@ -1176,20 +1214,24 @@ export async function processAndSaveTender(
   portal: PortalDefinition,
   activeTracks: any[]
 ): Promise<{ isNew: boolean; hasCorrigendum: boolean; matched: boolean }> {
-  // Keyword Matching across tracks
-  const { matchedTracks, matchedKeywords, matchScore } = matchTracks(item, activeTracks);
+  // Hybrid Keyword + Semantic Matching across tracks
+  const { matchedTracks, matchedKeywords, matchScore, semanticScore } = matchTracks(item, activeTracks);
 
   // If no track matched, skip saving
   if (matchedTracks.length === 0) {
     return { isNew: false, hasCorrigendum: false, matched: false };
   }
 
-  // Check Deduplication
+  const tenderEmbeddingVec = await generateEmbeddingAsync(buildTenderEmbeddingText(item));
+  const tenderEmbeddingBuf = serializeEmbedding(tenderEmbeddingVec);
+
+  // Check Deduplication (3-Tier: Reference No -> Bigram -> Semantic Vector)
   const dedupMatch = findCanonicalMatch({
     referenceNo: item.referenceNo,
     title: item.title,
     organization: item.organization,
-    closingDate: item.closingDate
+    closingDate: item.closingDate,
+    embedding: tenderEmbeddingBuf
   });
 
   const formattedDate = formatClosingDate(item.closingDate || null);
@@ -1255,11 +1297,13 @@ export async function processAndSaveTender(
     const insertStmt = db.prepare(`
       INSERT INTO tenders (
         id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
-        domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
+        domain_tracks, matched_keywords, match_score, semantic_score, embedding, publish_date, closing_date, closing_date_formatted,
         estimated_value, location, description, has_corrigendum, pipeline_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity')
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity')
       ON CONFLICT(id) DO UPDATE SET
         match_score = excluded.match_score,
+        semantic_score = excluded.semantic_score,
+        embedding = COALESCE(excluded.embedding, tenders.embedding),
         domain_tracks = excluded.domain_tracks,
         matched_keywords = excluded.matched_keywords,
         updated_at = CURRENT_TIMESTAMP
@@ -1277,6 +1321,8 @@ export async function processAndSaveTender(
       JSON.stringify(matchedTracks),
       JSON.stringify(Array.from(new Set(matchedKeywords))),
       matchScore,
+      semanticScore ?? 0,
+      tenderEmbeddingBuf,
       item.publishDate || new Date().toISOString().slice(0, 10),
       item.closingDate || null,
       formattedDate,
