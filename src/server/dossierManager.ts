@@ -206,7 +206,7 @@ function fetchFileBuffer(url: string, cookie?: string, redirectCount: number = 0
     const req = client.get(url, {
       agent: isHttps ? sslTolerantAgent : undefined,
       headers,
-      timeout: 20000
+      timeout: 45000
     }, res => {
       // Follow redirects cleanly
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {

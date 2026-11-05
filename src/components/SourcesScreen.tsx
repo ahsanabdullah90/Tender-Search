@@ -12,6 +12,8 @@ interface SourcesScreenProps {
   onSaveTrack: (track: { id?: string; name: string; positive_keywords: string[]; negative_keywords: string[] }) => void;
   onDeleteTrack: (id: string) => void;
   onUpdatePortal: (portalId: string, updates: Partial<PortalHealth>) => void;
+  onAddPortal?: (portal: { portal_name: string; tenders_url: string; base_url?: string; category?: string; tier?: string; access_mode?: string; login_url?: string }) => Promise<boolean> | void;
+  onDeletePortal?: (portalId: string) => Promise<boolean> | void;
   onLaunchHitl: (portalId: string) => void;
   onVerifyHitl: (portalId: string) => void;
   onScanSinglePortal: (portalId: string) => void;
@@ -159,10 +161,21 @@ function lastChecked(iso: string | null) {
   return `Checked ${Math.round(mins / 1440)} days ago`;
 }
 
-function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal' | 'onLaunchHitl' | 'onVerifyHitl' | 'onScanSinglePortal'>) {
+function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal' | 'onAddPortal' | 'onDeletePortal' | 'onLaunchHitl' | 'onVerifyHitl' | 'onScanSinglePortal'>) {
   const { portals } = props;
   const [editing, setEditing] = useState<PortalHealth | null>(null);
   const [form, setForm] = useState({ portal_name: '', website_url: '' });
+  const [adding, setAdding] = useState(false);
+  const [addForm, setAddForm] = useState({
+    portal_name: '',
+    website_url: '',
+    category: 'Provincial',
+    tier: 'cheerio',
+    access_mode: 'public',
+    login_url: ''
+  });
+  const [addError, setAddError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<PortalHealth | null>(null);
   const [credentialsFor, setCredentialsFor] = useState<PortalHealth | null>(null);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [healing, setHealing] = useState(false);
@@ -237,10 +250,15 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
 
   return (
     <div className="space-y-4">
-      <p className="text-ink-muted">
-        <span className="font-semibold text-ink">{working} of {portals.length} portals are working.</span>{' '}
-        Portals that need a person (a CAPTCHA or a login) are listed first.
-      </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-ink-muted">
+          <span className="font-semibold text-ink">{working} of {portals.length} portals are working.</span>{' '}
+          Portals that need a person (a CAPTCHA or a login) are listed first.
+        </p>
+        <Button variant="primary" onClick={() => { setAdding(true); setAddError(null); }}>
+          <Plus className="h-4 w-4" /> Add portal
+        </Button>
+      </div>
 
       <Panel>
         {[...portals]
@@ -309,6 +327,14 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                   )}
                   <Button size="sm" variant="ghost" aria-label={`Edit ${p.portal_name}`} onClick={() => startEdit(p)}>
                     <Pencil className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Delete ${p.portal_name}`}
+                    onClick={() => setDeleting(p)}
+                  >
+                    <Trash2 className="h-4 w-4 text-ink-muted hover:text-danger" />
                   </Button>
                 </div>
               </div>
@@ -384,6 +410,157 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
         onClose={() => setCredentialsFor(null)}
         onSuccess={() => { if (credentialsFor) props.onUpdatePortal(credentialsFor.portal_id, { status: 'online' }); }}
       />
+
+      <Dialog
+        open={adding}
+        onClose={() => setAdding(false)}
+        title="Add procurement portal"
+        footer={
+          <>
+            <Button onClick={() => setAdding(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={!addForm.portal_name.trim() || !addForm.website_url.trim()}
+              onClick={async () => {
+                if (!addForm.portal_name.trim() || !addForm.website_url.trim()) return;
+                try {
+                  if (props.onAddPortal) {
+                    await props.onAddPortal({
+                      portal_name: addForm.portal_name.trim(),
+                      tenders_url: addForm.website_url.trim(),
+                      base_url: addForm.website_url.trim(),
+                      category: addForm.category,
+                      tier: addForm.tier,
+                      access_mode: addForm.access_mode,
+                      login_url: addForm.login_url.trim() || undefined
+                    });
+                  } else {
+                    await fetch('/api/portals', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        portal_name: addForm.portal_name.trim(),
+                        tenders_url: addForm.website_url.trim(),
+                        category: addForm.category,
+                        tier: addForm.tier,
+                        access_mode: addForm.access_mode,
+                        login_url: addForm.login_url.trim() || undefined
+                      })
+                    });
+                  }
+                  setAdding(false);
+                  setAddForm({
+                    portal_name: '',
+                    website_url: '',
+                    category: 'Provincial',
+                    tier: 'cheerio',
+                    access_mode: 'public',
+                    login_url: ''
+                  });
+                } catch (err: any) {
+                  setAddError(err?.message || 'Failed to add portal');
+                }
+              }}
+            >
+              Add portal
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <Field label="Portal name">
+            <input
+              autoFocus
+              value={addForm.portal_name}
+              onChange={e => setAddForm({ ...addForm, portal_name: e.target.value })}
+              className={inputClass}
+              placeholder="e.g. Sindh Irrigation Department"
+            />
+          </Field>
+          <Field label="Tenders website address">
+            <input
+              value={addForm.website_url}
+              onChange={e => setAddForm({ ...addForm, website_url: e.target.value })}
+              className={`${inputClass} font-mono text-[13px]`}
+              placeholder="https://example.gov.pk/tenders"
+            />
+          </Field>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="Category">
+              <select
+                value={addForm.category}
+                onChange={e => setAddForm({ ...addForm, category: e.target.value })}
+                className={inputClass}
+              >
+                <option value="Federal">Federal</option>
+                <option value="Provincial">Provincial</option>
+                <option value="Regulatory">Regulatory</option>
+                <option value="Energy & Power">Energy & Power</option>
+                <option value="Education & Skills">Education & Skills</option>
+                <option value="Autonomous">Autonomous</option>
+                <option value="Multilateral">Multilateral</option>
+              </select>
+            </Field>
+            <Field label="Access type">
+              <select
+                value={addForm.access_mode}
+                onChange={e => setAddForm({ ...addForm, access_mode: e.target.value })}
+                className={inputClass}
+              >
+                <option value="public">Public / Open</option>
+                <option value="login_required">Login Required</option>
+                <option value="cloudflare">Cloudflare / CAPTCHA</option>
+              </select>
+            </Field>
+          </div>
+          {addForm.access_mode === 'login_required' && (
+            <Field label="Login page URL (optional)">
+              <input
+                value={addForm.login_url}
+                onChange={e => setAddForm({ ...addForm, login_url: e.target.value })}
+                className={`${inputClass} font-mono text-[13px]`}
+                placeholder="https://example.gov.pk/login"
+              />
+            </Field>
+          )}
+          {addError && (
+            <div className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+              {addError}
+            </div>
+          )}
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deleting)}
+        onClose={() => setDeleting(null)}
+        title="Delete this portal?"
+        footer={
+          <>
+            <Button onClick={() => setDeleting(null)}>Keep it</Button>
+            <Button
+              variant="danger"
+              onClick={async () => {
+                if (deleting) {
+                  if (props.onDeletePortal) {
+                    await props.onDeletePortal(deleting.portal_id);
+                  } else {
+                    await fetch(`/api/portals/${deleting.portal_id}`, { method: 'DELETE' });
+                  }
+                }
+                setDeleting(null);
+              }}
+            >
+              Delete
+            </Button>
+          </>
+        }
+      >
+        <p className="text-ink-muted">
+          Are you sure you want to remove <span className="font-semibold text-ink">{deleting?.portal_name}</span>?
+          This will exclude it from future scans and crawler runs.
+        </p>
+      </Dialog>
     </div>
   );
 }
@@ -658,6 +835,8 @@ export function SourcesScreen(props: SourcesScreenProps) {
         <PortalsTab
           portals={props.portals}
           onUpdatePortal={props.onUpdatePortal}
+          onAddPortal={props.onAddPortal}
+          onDeletePortal={props.onDeletePortal}
           onLaunchHitl={props.onLaunchHitl}
           onVerifyHitl={props.onVerifyHitl}
           onScanSinglePortal={props.onScanSinglePortal}

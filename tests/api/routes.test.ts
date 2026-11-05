@@ -352,6 +352,54 @@ describe('Server API Routes', () => {
       expect(verifyRes.status).toBe(200);
       expect(verifyRes.body.success).toBe(true);
     });
+
+    it('creates a new portal and validates required inputs', async () => {
+      // Missing name
+      const badRes1 = await request(app).post('/api/portals').send({ tenders_url: 'https://foo.bar' });
+      expect(badRes1.status).toBe(400);
+
+      // Missing url
+      const badRes2 = await request(app).post('/api/portals').send({ portal_name: 'Test Portal' });
+      expect(badRes2.status).toBe(400);
+
+      // Success
+      const createRes = await request(app)
+        .post('/api/portals')
+        .send({
+          portal_name: 'Custom WAPDA Unit',
+          tenders_url: 'https://wapda.custom.gov.pk/tenders',
+          category: 'Federal',
+          access_mode: 'public'
+        });
+
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.success).toBe(true);
+      expect(createRes.body.portal.portal_name).toBe('Custom WAPDA Unit');
+      expect(createRes.body.portal.portal_id).toBeDefined();
+
+      // Verify portal is present in portal list
+      const listRes = await request(app).get('/api/portals');
+      const found = listRes.body.find((p: any) => p.portal_id === createRes.body.portal.portal_id);
+      expect(found).toBeDefined();
+    });
+
+    it('deletes an existing portal and returns 404 for unknown portal', async () => {
+      const createRes = await request(app)
+        .post('/api/portals')
+        .send({
+          portal_name: 'Portal To Delete API',
+          tenders_url: 'https://delete-me.gov.pk/tenders'
+        });
+      const portalId = createRes.body.portal.portal_id;
+
+      const deleteRes = await request(app).delete(`/api/portals/${portalId}`);
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body.success).toBe(true);
+
+      // 404 on subsequent delete
+      const deleteAgainRes = await request(app).delete(`/api/portals/${portalId}`);
+      expect(deleteAgainRes.status).toBe(404);
+    });
   });
 
   describe('Scan Control API (/api/scan)', () => {

@@ -399,6 +399,42 @@ export default function App() {
     }
   };
 
+  const handleAddPortal = async (portal: { portal_name: string; tenders_url: string; base_url?: string; category?: string; tier?: string; access_mode?: string; login_url?: string }) => {
+    try {
+      const res = await fetch('/api/portals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(portal)
+      });
+      if (res.ok) {
+        fetchPortals();
+        fetchKpis();
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Failed to add portal:', err);
+      return false;
+    }
+  };
+
+  const handleDeletePortal = async (portalId: string) => {
+    try {
+      const res = await fetch(`/api/portals/${portalId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        fetchPortals();
+        fetchKpis();
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Failed to delete portal:', err);
+      return false;
+    }
+  };
+
   const handleUpdatePortal = async (portalId: string, updates: Partial<PortalHealth>) => {
     try {
       const res = await fetch(`/api/portals/${portalId}`, {
@@ -489,6 +525,8 @@ export default function App() {
             onSaveTrack={handleSaveTrack}
             onDeleteTrack={handleDeleteTrack}
             onUpdatePortal={handleUpdatePortal}
+            onAddPortal={handleAddPortal}
+            onDeletePortal={handleDeletePortal}
             onLaunchHitl={handleLaunchHitl}
             onVerifyHitl={handleVerifyHitl}
             onScanSinglePortal={handleRunScan}

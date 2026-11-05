@@ -161,6 +161,14 @@ export function seedDefaultDomainTracks() {
 }
 
 export function seedPortalHealth() {
+  // Ensure deleted_portals tracking table exists so user deletions persist across reboots
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS deleted_portals (
+      portal_id TEXT PRIMARY KEY,
+      deleted_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
   // Check if columns exist; if not, add them (schema migration)
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN access_mode TEXT DEFAULT "public"').run(); } catch {}
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN verified_status TEXT').run(); } catch {}
@@ -168,6 +176,10 @@ export function seedPortalHealth() {
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_username TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_password TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN session_cookies TEXT').run(); } catch {}
+
+  const deletedRows = (db.prepare('SELECT portal_id FROM deleted_portals').all() || []) as { portal_id: string }[];
+  const deletedSet = new Set(deletedRows.map(r => r.portal_id));
+  const activeDefinitions = PORTAL_DEFINITIONS.filter(p => !deletedSet.has(p.id));
 
   // INSERT OR IGNORE so user edits to URLs, access modes, tiers, and statuses are NEVER overwritten on reboot
   const insertStmt = db.prepare(`
@@ -237,5 +249,5 @@ export function seedPortalHealth() {
     }
   });
 
-  insertMany(PORTAL_DEFINITIONS);
+  insertMany(activeDefinitions);
 }

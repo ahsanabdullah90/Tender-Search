@@ -85,7 +85,7 @@ export interface DomainTrack {
 export interface PortalHealth {
   portal_id: string;
   portal_name: string;
-  category: 'Regulatory' | 'Federal/Regional' | 'Tech & Skills' | 'Multilateral' | 'Aggregator';
+  category: 'Regulatory' | 'Federal/Regional' | 'Tech & Skills' | 'Multilateral' | 'Aggregator' | string;
   tier: 'playwright' | 'http';
   base_url: string;
   tenders_url: string;
@@ -98,7 +98,7 @@ export interface PortalHealth {
   last_items_found: number;
   consecutive_zero_yields: number;
   last_error_message: string | null;
-  access_mode?: 'public' | 'login_required' | 'cloudflare' | 'offline_broken';
+  access_mode?: 'public' | 'login_required' | 'cloudflare' | 'offline_broken' | string;
   verified_status?: string;
 }
 

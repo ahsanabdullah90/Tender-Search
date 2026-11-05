@@ -15,6 +15,9 @@ import {
   deleteDomainTrack,
   reScoreTendersAgainstTracks,
   getPortalHealthList,
+  getPortalById,
+  createPortal,
+  deletePortal,
   updatePortalHealth,
   savePortalCredentials,
   getPortalAuthCredentials,
@@ -630,6 +633,51 @@ describe('Database and Repository Layer', () => {
       expect(healed.access_mode).toBe('public');
       expect(healed.status).toBe('online');
       expect(healed.verified_status).toContain('SSL-tolerant');
+    });
+  });
+
+  describe('Portal CRUD and Persistent Deletion', () => {
+    it('creates a new portal and retrieves it by id', () => {
+      const created = createPortal({
+        portal_name: 'Custom Test Portal',
+        tenders_url: 'https://test.custom-portal.gov.pk/tenders',
+        base_url: 'https://test.custom-portal.gov.pk',
+        category: 'Provincial',
+        access_mode: 'public'
+      });
+
+      expect(created.portal_id).toBeDefined();
+      expect(created.portal_name).toBe('Custom Test Portal');
+      expect(created.tenders_url).toBe('https://test.custom-portal.gov.pk/tenders');
+      expect(created.status).toBe('online');
+
+      const found = getPortalById(created.portal_id);
+      expect(found).not.toBeNull();
+      expect(found?.portal_name).toBe('Custom Test Portal');
+    });
+
+    it('deletes a portal and records it in deleted_portals to prevent re-seeding', () => {
+      const created = createPortal({
+        portal_id: 'portal_to_delete',
+        portal_name: 'Ephemeral Portal',
+        tenders_url: 'https://ephemeral.gov.pk/tenders',
+        category: 'Regulatory'
+      });
+
+      expect(getPortalById('portal_to_delete')).not.toBeNull();
+
+      const success = deletePortal('portal_to_delete');
+      expect(success).toBe(true);
+      expect(getPortalById('portal_to_delete')).toBeNull();
+
+      // Verify recorded in deleted_portals
+      const record = db.prepare('SELECT portal_id FROM deleted_portals WHERE portal_id = ?').get('portal_to_delete') as any;
+      expect(record).toBeDefined();
+      expect(record.portal_id).toBe('portal_to_delete');
+
+      // Re-run initDatabase to simulate server restart; ensure it does not revive deleted portal
+      initDatabase();
+      expect(getPortalById('portal_to_delete')).toBeNull();
     });
   });
 });

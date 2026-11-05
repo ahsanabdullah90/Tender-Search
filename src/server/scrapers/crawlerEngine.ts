@@ -48,25 +48,30 @@ function broadcastProgress() {
  */
 export function getActivePortalsList(targetPortalId?: string): PortalDefinition[] {
   const dbPortals = getPortalHealthList();
-  const dbMap = new Map<string, any>(dbPortals.map(p => [p.portal_id, p]));
+  const canonicalMap = new Map<string, PortalDefinition>(PORTAL_DEFINITIONS.map(def => [def.id, def]));
 
-  let list: PortalDefinition[] = PORTAL_DEFINITIONS.map(def => {
-    const dbP = dbMap.get(def.id);
-    if (!dbP) return def;
-
-    return {
-      ...def,
-      name: dbP.portal_name || def.name,
-      category: (dbP.category as any) || def.category,
-      tier: (dbP.tier as any) || def.tier,
-      baseUrl: dbP.base_url || def.baseUrl,
-      tendersUrl: dbP.tenders_url || def.tendersUrl,
-      loginUrl: dbP.login_url || def.loginUrl,
-      accessMode: (dbP.access_mode as any) || def.accessMode,
-      verifiedStatus: dbP.verified_status || def.verifiedStatus,
-      sessionCookies: dbP.session_cookies || undefined
-    };
-  });
+  let list: PortalDefinition[];
+  if (dbPortals.length > 0) {
+    list = dbPortals.map(dbP => {
+      const def = canonicalMap.get(dbP.portal_id);
+      return {
+        id: dbP.portal_id,
+        name: dbP.portal_name || def?.name || dbP.portal_id,
+        category: (dbP.category as any) || def?.category || 'Federal',
+        tier: (dbP.tier as any) || def?.tier || 'cheerio',
+        baseUrl: dbP.base_url || def?.baseUrl || '',
+        tendersUrl: dbP.tenders_url || def?.tendersUrl || '',
+        loginUrl: dbP.login_url || def?.loginUrl,
+        accessMode: (dbP.access_mode as any) || def?.accessMode || 'public',
+        verifiedStatus: dbP.verified_status || def?.verifiedStatus || 'Active',
+        sessionCookies: dbP.session_cookies || undefined,
+        description: def?.description || '',
+        defaultKeywords: def?.defaultKeywords || []
+      };
+    });
+  } else {
+    list = [...PORTAL_DEFINITIONS];
+  }
 
   if (targetPortalId) {
     list = list.filter(p => p.id === targetPortalId);

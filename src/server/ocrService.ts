@@ -51,7 +51,7 @@ export function getAiClient(apiKey: string): GoogleGenAI {
   const client = new GoogleGenAI({
     apiKey,
     httpOptions: {
-      timeout: 20000,
+      timeout: 45000,
       retryOptions: {
         attempts: 1
       }
@@ -126,6 +126,10 @@ async function generateWithFallback(
     } catch (err: any) {
       lastErr = err;
       console.warn(`[Gemini] Model ${model} generation attempt failed:`, err?.message || err);
+      // Brief pause before trying fallback model if rate-limited or experiencing high demand
+      if (model !== CANDIDATE_MODELS[CANDIDATE_MODELS.length - 1]) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+      }
     }
   }
   if (lastErr) {

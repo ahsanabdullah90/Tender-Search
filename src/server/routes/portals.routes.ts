@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import {
   getPortalHealthList,
+  getPortalById,
+  createPortal,
+  deletePortal,
   updatePortalHealth,
   savePortalCredentials,
   getPortalAuthCredentials
@@ -15,6 +18,58 @@ export const portalsRouter = Router();
 portalsRouter.get('/', (req, res) => {
   const portals = getPortalHealthList();
   res.json(portals);
+});
+
+portalsRouter.post('/', (req, res) => {
+  const { portal_name, tenders_url, base_url, category, tier, access_mode, login_url, portal_id } = req.body || {};
+  if (!portal_name || typeof portal_name !== 'string' || !portal_name.trim()) {
+    return res.status(400).json({ success: false, message: 'Portal name is required.' });
+  }
+
+  const effectiveUrl = (tenders_url || base_url || '').trim();
+  if (!effectiveUrl) {
+    return res.status(400).json({ success: false, message: 'Portal website or tenders URL is required.' });
+  }
+
+  try {
+    const portal = createPortal({
+      portal_id,
+      portal_name: portal_name.trim(),
+      tenders_url: effectiveUrl,
+      base_url: (base_url || effectiveUrl).trim(),
+      category,
+      tier,
+      access_mode,
+      login_url
+    });
+
+    res.status(201).json({
+      success: true,
+      portal,
+      message: `Added portal "${portal.portal_name}" successfully.`
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'Failed to create portal.' });
+  }
+});
+
+portalsRouter.delete('/:portalId', (req, res) => {
+  const { portalId } = req.params;
+  const existing = getPortalById(portalId);
+  if (!existing) {
+    return res.status(404).json({ success: false, message: 'Portal not found.' });
+  }
+
+  const success = deletePortal(portalId);
+  if (!success) {
+    return res.status(500).json({ success: false, message: 'Failed to delete portal.' });
+  }
+
+  res.json({
+    success: true,
+    portal_id: portalId,
+    message: `Deleted portal "${existing.portal_name}" successfully.`
+  });
 });
 
 portalsRouter.put('/:portalId', (req, res) => {

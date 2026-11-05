@@ -556,4 +556,100 @@ describe('SourcesScreen component', () => {
       expect(screen.getByText('Could not delete the files.')).toBeInTheDocument();
     });
   });
+
+  it('allows adding a new procurement portal through the dialog', async () => {
+    const user = userEvent.setup();
+    const handleAddPortal = vi.fn().mockResolvedValue(true);
+
+    render(
+      <SourcesScreen
+        portals={samplePortals}
+        tracks={sampleTracks}
+        onSaveTrack={vi.fn()}
+        onDeleteTrack={vi.fn()}
+        onClearInbox={vi.fn()}
+        onEraseAll={vi.fn()}
+        onUpdatePortal={vi.fn()}
+        onAddPortal={handleAddPortal}
+        onDeletePortal={vi.fn()}
+        onLaunchHitl={vi.fn()}
+        onVerifyHitl={vi.fn()}
+        onScanSinglePortal={vi.fn()}
+      />
+    );
+
+    // Switch to Portals tab
+    const portalsTab = screen.getByRole('tab', { name: /Portals/ });
+    await user.click(portalsTab);
+
+    // Click "+ Add portal"
+    const addBtn = screen.getByRole('button', { name: /Add portal/i });
+    await user.click(addBtn);
+
+    // Dialog appears
+    const dialog = screen.getByRole('dialog', { name: 'Add procurement portal' });
+    expect(dialog).toBeInTheDocument();
+
+    const nameInput = screen.getByPlaceholderText('e.g. Sindh Irrigation Department');
+    const urlInput = screen.getByPlaceholderText('https://example.gov.pk/tenders');
+
+    await user.type(nameInput, 'Custom Irrigation Department');
+    await user.type(urlInput, 'https://irrigation.punjab.gov.pk/tenders');
+
+    const submitBtn = within(dialog).getByRole('button', { name: 'Add portal' });
+    await user.click(submitBtn);
+
+    await waitFor(() => {
+      expect(handleAddPortal).toHaveBeenCalledTimes(1);
+      expect(handleAddPortal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          portal_name: 'Custom Irrigation Department',
+          tenders_url: 'https://irrigation.punjab.gov.pk/tenders',
+          category: 'Provincial'
+        })
+      );
+    });
+  });
+
+  it('allows deleting a portal through the confirmation dialog', async () => {
+    const user = userEvent.setup();
+    const handleDeletePortal = vi.fn().mockResolvedValue(true);
+
+    render(
+      <SourcesScreen
+        portals={samplePortals}
+        tracks={sampleTracks}
+        onSaveTrack={vi.fn()}
+        onDeleteTrack={vi.fn()}
+        onClearInbox={vi.fn()}
+        onEraseAll={vi.fn()}
+        onUpdatePortal={vi.fn()}
+        onAddPortal={vi.fn()}
+        onDeletePortal={handleDeletePortal}
+        onLaunchHitl={vi.fn()}
+        onVerifyHitl={vi.fn()}
+        onScanSinglePortal={vi.fn()}
+      />
+    );
+
+    const portalsTab = screen.getByRole('tab', { name: /Portals/ });
+    await user.click(portalsTab);
+
+    // Click delete on first portal
+    const deleteBtn = screen.getByRole('button', { name: /Delete Punjab PPRA/i });
+    await user.click(deleteBtn);
+
+    // Confirm dialog appears
+    const dialog = screen.getByRole('dialog', { name: 'Delete this portal?' });
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByText(/Are you sure you want to remove/i)).toBeInTheDocument();
+
+    const confirmBtn = within(dialog).getByRole('button', { name: 'Delete' });
+    await user.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(handleDeletePortal).toHaveBeenCalledTimes(1);
+      expect(handleDeletePortal).toHaveBeenCalledWith('punjab_eproc');
+    });
+  });
 });

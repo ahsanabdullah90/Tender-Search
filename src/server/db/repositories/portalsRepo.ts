@@ -75,3 +75,109 @@ export function getPortalAuthCredentials(portalId: string): { username?: string;
     cookies: row.session_cookies
   };
 }
+
+export function getPortalById(portalId: string): PortalHealth | null {
+  const r = db.prepare('SELECT * FROM portal_health WHERE portal_id = ?').get(portalId) as any;
+  if (!r) return null;
+  return {
+    portal_id: r.portal_id,
+    portal_name: r.portal_name,
+    category: r.category,
+    tier: r.tier,
+    base_url: r.base_url,
+    tenders_url: r.tenders_url,
+    login_url: r.login_url,
+    auth_username: r.auth_username,
+    has_credentials: Boolean(r.auth_password),
+    session_cookies: r.session_cookies,
+    status: r.status,
+    last_scan_at: r.last_scan_at,
+    last_items_found: r.last_items_found,
+    consecutive_zero_yields: r.consecutive_zero_yields,
+    last_error_message: r.last_error_message,
+    access_mode: r.access_mode,
+    verified_status: r.verified_status
+  };
+}
+
+export function createPortal(input: {
+  portal_id?: string;
+  portal_name: string;
+  tenders_url: string;
+  base_url?: string;
+  category?: string;
+  tier?: string;
+  access_mode?: string;
+  login_url?: string;
+}): PortalHealth {
+  const name = input.portal_name.trim();
+  const tendersUrl = input.tenders_url.trim();
+  let baseUrl = (input.base_url || '').trim();
+  if (!baseUrl) {
+    try {
+      baseUrl = new URL(tendersUrl).origin;
+    } catch {
+      baseUrl = tendersUrl;
+    }
+  } else {
+    try {
+      baseUrl = new URL(baseUrl).origin;
+    } catch {}
+  }
+
+  // Derive unique portal_id slug
+  let portalId = (input.portal_id || '').trim();
+  if (!portalId) {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    portalId = slug || `portal-${Date.now()}`;
+  }
+
+  // Ensure unique ID in SQLite
+  const existing = db.prepare('SELECT portal_id FROM portal_health WHERE portal_id = ?').get(portalId);
+  if (existing) {
+    portalId = `${portalId}-${Math.random().toString(36).substring(2, 6)}`;
+  }
+
+  const category = input.category?.trim() || 'Provincial';
+  const tier = (input.tier === 'playwright' ? 'playwright' : 'cheerio');
+  const accessMode = (input.access_mode || 'public');
+  const status = accessMode === 'login_required' || accessMode === 'cloudflare' ? 'hitl_required' : 'online';
+  const loginUrl = input.login_url?.trim() || null;
+
+  const insertTx = db.transaction(() => {
+    // If this portal was previously deleted, remove it from deleted_portals tracking
+    try {
+      db.prepare('DELETE FROM deleted_portals WHERE portal_id = ?').run(portalId);
+    } catch {}
+
+    db.prepare(`
+      INSERT INTO portal_health (
+        portal_id, portal_name, category, tier, base_url, tenders_url, login_url,
+        status, last_items_found, consecutive_zero_yields, access_mode, verified_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 'User-added portal')
+    `).run(portalId, name, category, tier, baseUrl, tendersUrl, loginUrl, status, accessMode);
+  });
+
+  insertTx();
+
+  return getPortalById(portalId)!;
+}
+
+export function deletePortal(portalId: string): boolean {
+  const deleteTx = db.transaction(() => {
+    try {
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS deleted_portals (
+          portal_id TEXT PRIMARY KEY,
+          deleted_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+      db.prepare('INSERT OR IGNORE INTO deleted_portals (portal_id) VALUES (?)').run(portalId);
+    } catch {}
+
+    const res = db.prepare('DELETE FROM portal_health WHERE portal_id = ?').run(portalId);
+    return res.changes > 0;
+  });
+
+  return deleteTx();
+}
