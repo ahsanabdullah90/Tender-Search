@@ -90,6 +90,7 @@ export default function App() {
   const [section, setSection] = useState<Section>(readSection);
   // A tender to open when arriving from an alert banner.
   const [focusTenderId, setFocusTenderId] = useState<string | null>(null);
+  const [sourcesTab, setSourcesTab] = useState<'keywords' | 'portals' | 'data'>('keywords');
 
   const handleNavigate = (next: Section) => {
     setSection(next);
@@ -478,7 +479,7 @@ export default function App() {
         onAcknowledgeCorrigendum={handleAcknowledgeCorrigendum}
         onLaunchHitl={handleLaunchHitl}
         onSelectTenderById={handleSelectTenderById}
-        onOpenSources={() => handleNavigate('sources')}
+        onOpenSources={() => { setSourcesTab('portals'); handleNavigate('sources'); }}
       />
 
       {/* 2. TAB A: Tenders Pipeline View */}

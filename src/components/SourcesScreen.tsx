@@ -7,6 +7,7 @@ import { PortalCredentialsModal } from './PortalCredentialsModal';
 type Tab = 'keywords' | 'portals' | 'data';
 
 interface SourcesScreenProps {
+  initialTab?: Tab;
   tracks: DomainTrack[];
   portals: PortalHealth[];
   onSaveTrack: (track: { id?: string; name: string; positive_keywords: string[]; negative_keywords: string[] }) => void;
@@ -250,12 +251,18 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-ink-muted">
-          <span className="font-semibold text-ink">{working} of {portals.length} portals are working.</span>{' '}
-          Portals that need a person (a CAPTCHA or a login) are listed first.
-        </p>
-        <Button variant="primary" onClick={() => { setAdding(true); setAddError(null); }}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-xl border border-line bg-surface p-4">
+        <div>
+          <h2 className="text-base font-bold text-ink flex items-center gap-2">
+            Procurement Portals
+            <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs font-semibold text-ink-muted">{portals.length}</span>
+          </h2>
+          <p className="text-xs text-ink-muted mt-0.5">
+            <span className="font-semibold text-ink">{working} of {portals.length} portals are working.</span>{' '}
+            Automated crawlers monitor these endpoints. Add new provincial/federal portals or delete portals at any time.
+          </p>
+        </div>
+        <Button variant="primary" className="shrink-0" onClick={() => { setAdding(true); setAddError(null); }}>
           <Plus className="h-4 w-4" /> Add portal
         </Button>
       </div>
@@ -331,10 +338,12 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                   <Button
                     size="sm"
                     variant="ghost"
+                    title={`Delete ${p.portal_name}`}
                     aria-label={`Delete ${p.portal_name}`}
+                    className="text-ink-muted hover:bg-danger-soft hover:text-danger"
                     onClick={() => setDeleting(p)}
                   >
-                    <Trash2 className="h-4 w-4 text-ink-muted hover:text-danger" />
+                    <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
               </div>
@@ -347,25 +356,37 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
         onClose={() => setEditing(null)}
         title={editing ? `Edit ${editing.portal_name}` : ''}
         footer={
-          <>
-            <Button onClick={() => setEditing(null)}>Cancel</Button>
+          <div className="flex w-full items-center justify-between">
             <Button
-              variant="primary"
+              variant="danger"
               onClick={() => {
-                if (editing) {
-                  const url = form.website_url.trim();
-                  props.onUpdatePortal(editing.portal_id, {
-                    portal_name: form.portal_name.trim(),
-                    tenders_url: url,
-                    base_url: url
-                  });
-                }
+                const toDel = editing;
                 setEditing(null);
+                setDeleting(toDel);
               }}
             >
-              Save
+              <Trash2 className="h-4 w-4" /> Delete portal
             </Button>
-          </>
+            <div className="flex items-center gap-2">
+              <Button onClick={() => setEditing(null)}>Cancel</Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  if (editing) {
+                    const url = form.website_url.trim();
+                    props.onUpdatePortal(editing.portal_id, {
+                      portal_name: form.portal_name.trim(),
+                      tenders_url: url,
+                      base_url: url
+                    });
+                  }
+                  setEditing(null);
+                }}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
         }
       >
         <div className="space-y-4">
@@ -816,7 +837,13 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
 /* --------------------------------- Page --------------------------------- */
 
 export function SourcesScreen(props: SourcesScreenProps) {
-  const [tab, setTab] = useState<Tab>('keywords');
+  const [tab, setTab] = useState<Tab>(props.initialTab || 'keywords');
+
+  useEffect(() => {
+    if (props.initialTab) {
+      setTab(props.initialTab);
+    }
+  }, [props.initialTab]);
   return (
     <div className="mx-auto w-full max-w-4xl space-y-5 p-6">
       <h1 className="text-xl font-bold">Sources & Keywords</h1>
