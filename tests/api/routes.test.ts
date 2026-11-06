@@ -30,13 +30,13 @@ describe('Server API Routes', () => {
         description, estimated_value, location, publish_date, closing_date,
         direct_url, secondary_sources, domain_tracks, matched_keywords,
         match_score, pipeline_status, is_bookmarked, status_notes, result_expected_date,
-        cached_dossiers, has_corrigendum
+        cached_dossiers, has_corrigendum, viewed
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
-        ?, ?
+        ?, ?, ?
       )
     `).run(
       id,
@@ -61,7 +61,8 @@ describe('Server API Routes', () => {
       overrides.status_notes || '',
       overrides.result_expected_date || null,
       JSON.stringify(overrides.cached_dossiers || []),
-      overrides.has_corrigendum || 0
+      overrides.has_corrigendum || 0,
+      overrides.viewed !== undefined ? overrides.viewed : 0
     );
   };
 
@@ -83,9 +84,9 @@ describe('Server API Routes', () => {
       expect(res.body[0].matched_keywords).toEqual(['construction']);
     });
 
-    it('filters by status, bookmarkedOnly, and search query params', async () => {
-      insertTestTender('t-1', { pipeline_status: 'New Opportunity', is_bookmarked: 1 });
-      insertTestTender('t-2', { pipeline_status: 'Preparing Bid', is_bookmarked: 0 });
+    it('filters by status, bookmarkedOnly, unreadOnly, and search query params', async () => {
+      insertTestTender('t-1', { pipeline_status: 'New Opportunity', is_bookmarked: 1, viewed: 0 });
+      insertTestTender('t-2', { pipeline_status: 'Preparing Bid', is_bookmarked: 0, viewed: 1 });
 
       const statusRes = await request(app).get('/api/tenders?status=Preparing Bid');
       expect(statusRes.body.length).toBe(1);
@@ -94,6 +95,10 @@ describe('Server API Routes', () => {
       const bookmarkRes = await request(app).get('/api/tenders?bookmarkedOnly=true');
       expect(bookmarkRes.body.length).toBe(1);
       expect(bookmarkRes.body[0].id).toBe('t-1');
+
+      const unreadRes = await request(app).get('/api/tenders?unreadOnly=true');
+      expect(unreadRes.body.length).toBe(1);
+      expect(unreadRes.body[0].id).toBe('t-1');
 
       const searchRes = await request(app).get('/api/tenders?search=Cloud Setup');
       expect(searchRes.body.length).toBe(2);
@@ -241,6 +246,29 @@ describe('Server API Routes', () => {
       const res = await request(app).post('/api/tenders/missing/bookmark');
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(false);
+    });
+  });
+
+  describe('PATCH & POST /api/tenders/:id/viewed', () => {
+    it('marks tender as viewed', async () => {
+      insertTestTender('t-view', { viewed: 0 });
+
+      const res = await request(app)
+        .patch('/api/tenders/t-view/viewed')
+        .send({ viewed: true });
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.viewed).toBe(1);
+
+      expect(getTenderById('t-view')?.viewed).toBe(1);
+    });
+
+    it('returns 404 when marking missing tender as viewed', async () => {
+      const res = await request(app)
+        .patch('/api/tenders/missing/viewed')
+        .send({ viewed: true });
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Tender not found');
     });
   });
 

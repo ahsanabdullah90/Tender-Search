@@ -287,6 +287,19 @@ export default function App() {
     }
   };
 
+  const handleMarkViewed = async (tenderId: string) => {
+    setTenders(prev => prev.map(t => (t.id === tenderId ? { ...t, viewed: 1 } : t)));
+    try {
+      await fetch(`/api/tenders/${tenderId}/viewed`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ viewed: true })
+      });
+    } catch {
+      // Best-effort read state persistence
+    }
+  };
+
   const handleSaveNotes = async (tenderId: string, notes: string): Promise<void> => {
     const res = await fetch(`/api/tenders/${tenderId}/notes`, {
       method: 'PATCH',
@@ -500,6 +513,7 @@ export default function App() {
           onAcknowledgeCorrigendum={handleAcknowledgeCorrigendum}
           onSaveNotes={handleSaveNotes}
           onToggleBookmark={handleToggleBookmark}
+          onMarkViewed={handleMarkViewed}
           focusId={focusTenderId}
           onTenderUpdated={updated => setTenders(prev => prev.map(t => (t.id === updated.id ? updated : t)))}
           onTenderCreated={created => {

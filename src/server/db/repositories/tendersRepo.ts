@@ -24,6 +24,7 @@ export function getAllTenders(filters?: {
   search?: string;
   bookmarkedOnly?: boolean;
   corrigendumOnly?: boolean;
+  unreadOnly?: boolean;
 }): Tender[] {
   let query = 'SELECT * FROM tenders WHERE 1=1';
   const params: any[] = [];
@@ -39,6 +40,10 @@ export function getAllTenders(filters?: {
 
   if (filters?.corrigendumOnly) {
     query += ' AND has_corrigendum = 1';
+  }
+
+  if (filters?.unreadOnly) {
+    query += ' AND viewed = 0';
   }
 
   if (filters?.track && filters.track !== 'All') {
@@ -127,6 +132,13 @@ export function updateTenderNotes(id: string, notes: string): boolean {
   const res = db.prepare(`
     UPDATE tenders SET status_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
   `).run(notes, id);
+  return res.changes > 0;
+}
+
+export function markTenderViewed(id: string, viewed: boolean = true): boolean {
+  const res = db.prepare(`
+    UPDATE tenders SET viewed = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+  `).run(viewed ? 1 : 0, id);
   return res.changes > 0;
 }
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bookmark, ExternalLink, FileText, Inbox, Pencil, Plus, RotateCw, Search, SlidersHorizontal, Sparkles, TriangleAlert, Upload } from 'lucide-react';
+import { Archive, Bookmark, Check, Copy, Download, ExternalLink, FileText, Inbox, Paperclip, Pencil, Plus, RotateCw, Search, SlidersHorizontal, Sparkles, TriangleAlert, Undo2, Upload, X } from 'lucide-react';
 import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus } from '../types';
 import { Button, Chip, DeadlineChip, Dialog, EmptyState, Panel, Popover } from '../ui';
 
@@ -21,6 +21,7 @@ interface InboxScreenProps {
   onAcknowledgeCorrigendum: (logId: string) => Promise<void>;
   onSaveNotes: (tenderId: string, notes: string) => Promise<void>;
   onToggleBookmark: (tenderId: string) => void;
+  onMarkViewed?: (tenderId: string) => void;
   /** Tender to select when the screen opens, for example from an alert banner. */
   focusId?: string | null;
   onTenderUpdated?: (tender: Tender) => void;
@@ -73,19 +74,76 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-function TenderRow({ tender, selected, onSelect }: { tender: Tender; selected: boolean; onSelect: () => void }) {
+function LiveCountdown({ closingDate }: { closingDate: string | null }) {
+  useTick(1000);
+  const countdown = formatCountdown(closingDate);
+  if (!countdown) return null;
+  const urgent = closingDate ? new Date(closingDate).getTime() - Date.now() < 86_400_000 : false;
+  return (
+    <div>
+      <div className="text-xs text-ink-muted">Time left</div>
+      <div className={`font-mono text-sm font-semibold ${urgent ? 'text-danger' : ''}`}>{countdown}</div>
+    </div>
+  );
+}
+
+function TenderRow({
+  tender,
+  selected,
+  unread,
+  onSelect,
+}: {
+  tender: Tender;
+  selected: boolean;
+  unread: boolean;
+  onSelect: () => void;
+}) {
   const tracks = asList<string>(tender.domain_tracks);
+  const keywords = asList<string>(tender.matched_keywords);
+  const files = asList<{ label?: string; localPath: string }>(tender.cached_dossiers);
+  const isSemanticMatch = keywords.some(k => k.startsWith('✨'));
+
   return (
     <button
       onClick={onSelect}
+      data-tender-id={tender.id}
       aria-current={selected ? 'true' : undefined}
-      className={`block w-full cursor-pointer border-b border-line px-4 py-3 text-left ${
+      className={`block w-full cursor-pointer border-b border-line px-4 py-3 text-left transition-colors ${
         selected ? 'bg-accent-soft' : 'hover:bg-surface-2'
       }`}
     >
       <div className="flex items-center justify-between gap-2">
-        <DeadlineChip closingDate={tender.closing_date} />
-        <span className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          {unread && (
+            <span
+              className="h-2 w-2 shrink-0 rounded-full bg-accent"
+              title="Unread tender"
+              aria-label="Unread tender"
+            />
+          )}
+          <DeadlineChip closingDate={tender.closing_date} />
+          {tender.match_score > 0 && (
+            <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-ink-muted">
+              {tender.match_score}%
+            </span>
+          )}
+          {isSemanticMatch && (
+            <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[11px] font-semibold text-accent">
+              ✨ Semantic
+            </span>
+          )}
+        </div>
+        <span className="flex shrink-0 items-center gap-2">
+          {files.length > 0 && (
+            <span
+              className="inline-flex items-center gap-0.5 font-mono text-xs text-ink-muted"
+              title={`${files.length} attached document(s)`}
+              aria-label={`${files.length} attached document(s)`}
+            >
+              <Paperclip className="h-3.5 w-3.5" />
+              {files.length}
+            </span>
+          )}
           {Boolean(tender.has_corrigendum) && <TriangleAlert className="h-4 w-4 text-warn" aria-label="Amended" />}
           {Boolean(tender.is_bookmarked) && <Bookmark className="h-4 w-4 fill-current text-accent" aria-label="Bookmarked" />}
         </span>
@@ -94,7 +152,16 @@ function TenderRow({ tender, selected, onSelect }: { tender: Tender; selected: b
       <div className="mt-1 truncate text-[13px] text-ink-muted">
         {tender.organization} · {tender.portal_name}
       </div>
-      {tracks.length > 0 && <div className="mt-1 truncate text-xs text-ink-muted">{tracks.join(' · ')}</div>}
+      {(tracks.length > 0 || tender.estimated_value) && (
+        <div className="mt-1 flex items-center justify-between gap-2 text-xs text-ink-muted">
+          <span className="truncate">{tracks.join(' · ')}</span>
+          {tender.estimated_value && (
+            <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] font-medium text-ink">
+              {tender.estimated_value}
+            </span>
+          )}
+        </div>
+      )}
     </button>
   );
 }
@@ -138,10 +205,10 @@ export function Detail({
   onToggleBookmark: () => void;
   onTenderUpdated?: (tender: Tender) => void;
 }) {
-  useTick(1000);
   const [currentTender, setCurrentTender] = useState<Tender>(tender);
   const [notes, setNotes] = useState(tender.status_notes || '');
   const [noteState, setNoteState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  const lastSavedNotesRef = useRef(tender.status_notes || '');
   const [analyzing, setAnalyzing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -149,6 +216,7 @@ export function Detail({
   const [editingDetails, setEditingDetails] = useState(false);
   const [savingDetails, setSavingDetails] = useState(false);
   const [previewPdfIndex, setPreviewPdfIndex] = useState<number | null>(null);
+  const [copiedSummary, setCopiedSummary] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [editForm, setEditForm] = useState({
@@ -164,10 +232,12 @@ export function Detail({
   useEffect(() => {
     setCurrentTender(tender);
     setNotes(tender.status_notes || '');
+    lastSavedNotesRef.current = tender.status_notes || '';
     setNoteState('idle');
     setAiStatusMessage(null);
     setEditingDetails(false);
     setPreviewPdfIndex(null);
+    setCopiedSummary(false);
     setEditForm({
       title: tender.title || '',
       organization: tender.organization || '',
@@ -183,8 +253,6 @@ export function Detail({
   const files = asList<{ label?: string; localPath: string; mimeType?: string }>(currentTender.cached_dossiers);
   const otherSources = asList<{ portalName: string; directUrl: string }>(currentTender.secondary_sources);
   const amendments = corrigenda.filter(c => c.tender_id === currentTender.id);
-  const countdown = formatCountdown(currentTender.closing_date);
-  const urgent = currentTender.closing_date ? new Date(currentTender.closing_date).getTime() - Date.now() < 86_400_000 : false;
 
   const hasCleanDescription = Boolean(
     currentTender.description &&
@@ -192,14 +260,59 @@ export function Detail({
       currentTender.description.trim().toLowerCase() !== currentTender.title.trim().toLowerCase()
   );
 
-  const saveNotes = async () => {
-    if (notes === (currentTender.status_notes || '')) return;
+  const saveNotes = async (notesToSave: string = notes) => {
+    if (notesToSave === lastSavedNotesRef.current) return;
     setNoteState('saving');
     try {
-      await onSaveNotes(currentTender.id, notes);
+      await onSaveNotes(currentTender.id, notesToSave);
+      lastSavedNotesRef.current = notesToSave;
       setNoteState('saved');
     } catch {
       setNoteState('failed');
+    }
+  };
+
+  useEffect(() => {
+    if (notes === lastSavedNotesRef.current) return;
+    const timer = setTimeout(() => {
+      void saveNotes(notes);
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [notes, currentTender.id]);
+
+  const handleTrackClick = () => {
+    if (notes !== lastSavedNotesRef.current) {
+      void saveNotes(notes);
+    }
+    onTrack?.();
+  };
+
+  const handlePassClick = () => {
+    if (notes !== lastSavedNotesRef.current) {
+      void saveNotes(notes);
+    }
+    onPass?.();
+  };
+
+  const handleCopySummary = async () => {
+    const summaryLines = [
+      `📋 ${currentTender.title}`,
+      `🏛 Organization: ${currentTender.organization}`,
+      `🔖 Ref No: ${currentTender.reference_no || 'N/A'}`,
+      `⏰ Closes: ${currentTender.closing_date_formatted || 'No deadline stated'}`,
+      currentTender.estimated_value ? `💰 Estimated Value: ${currentTender.estimated_value}` : null,
+      `🌐 Portal: ${currentTender.portal_name}`,
+      currentTender.direct_url && currentTender.direct_url !== '#' ? `🔗 Link: ${currentTender.direct_url}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      await navigator.clipboard?.writeText(summaryLines);
+      setCopiedSummary(true);
+      setTimeout(() => setCopiedSummary(false), 2000);
+    } catch {
+      // Clipboard API may be unavailable in restricted contexts
     }
   };
 
@@ -326,12 +439,7 @@ export function Detail({
             <div className="text-xs text-ink-muted">Closes</div>
             <div className="text-sm font-semibold">{currentTender.closing_date_formatted || 'No deadline stated'}</div>
           </div>
-          {countdown && (
-            <div>
-              <div className="text-xs text-ink-muted">Time left</div>
-              <div className={`font-mono text-sm font-semibold ${urgent ? 'text-danger' : ''}`}>{countdown}</div>
-            </div>
-          )}
+          <LiveCountdown closingDate={currentTender.closing_date} />
           {onSetResultDate && (
             <label>
               <div className="text-xs text-ink-muted">Result expected</div>
@@ -348,8 +456,8 @@ export function Detail({
         <div className="mt-5 flex flex-wrap items-center gap-2">
           {stageActions ?? (
             <>
-              <Button variant="primary" onClick={onTrack}>Track this bid</Button>
-              <Button onClick={onPass}>Pass</Button>
+              <Button variant="primary" onClick={handleTrackClick}>Track this bid</Button>
+              <Button onClick={handlePassClick}>Pass</Button>
             </>
           )}
           <Button
@@ -370,6 +478,15 @@ export function Detail({
           >
             <RotateCw className={`h-4 w-4 ${refreshing ? 'animate-spin text-accent' : ''}`} />
             {refreshing ? 'Refreshing…' : 'Refresh info'}
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void handleCopySummary()}
+            aria-label="Copy summary"
+            title="Copy formatted tender brief to clipboard"
+          >
+            {copiedSummary ? <Check className="h-4 w-4 text-ok" /> : <Copy className="h-4 w-4" />}
+            {copiedSummary ? 'Copied!' : 'Copy summary'}
           </Button>
           <a
             href={currentTender.direct_url}
@@ -650,13 +767,13 @@ export function Detail({
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted">Notes</h3>
             <span className={`text-xs ${noteState === 'failed' ? 'text-danger' : 'text-ink-muted'}`}>
-              {noteState === 'saving' ? 'Saving…' : noteState === 'saved' ? 'Saved' : noteState === 'failed' ? 'Could not save' : 'Saves when you click away'}
+              {noteState === 'saving' ? 'Saving…' : noteState === 'saved' ? 'Saved' : noteState === 'failed' ? 'Could not save' : 'Auto-saves as you type'}
             </span>
           </div>
           <textarea
             value={notes}
             onChange={e => setNotes(e.target.value)}
-            onBlur={saveNotes}
+            onBlur={() => void saveNotes()}
             rows={4}
             placeholder="Bank guarantee, partner contacts, site visit dates…"
             className="w-full rounded-lg border border-line bg-surface p-3 text-sm placeholder:text-ink-muted"
@@ -671,6 +788,11 @@ export function InboxScreen(props: InboxScreenProps) {
   const { tenders, tracks, corrigenda, selectedTrack, searchQuery, bookmarkedOnly, corrigendumOnly } = props;
   const [sortBy, setSortBy] = useState<SortBy>('urgency');
   const [selectedId, setSelectedId] = useState<string | null>(props.focusId ?? null);
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const [viewedIds, setViewedIds] = useState<Set<string>>(() => new Set());
+  const [undoItem, setUndoItem] = useState<{ tender: Tender; status: OpportunityStatus } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [addingManual, setAddingManual] = useState(false);
   const [creatingManual, setCreatingManual] = useState(false);
   const [extractingManualAi, setExtractingManualAi] = useState(false);
@@ -688,8 +810,26 @@ export function InboxScreen(props: InboxScreenProps) {
   });
   useTick(60_000);
 
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
+
+  const isTenderViewed = (t: Tender) => Boolean(t.viewed) || viewedIds.has(t.id);
+
+  const markViewed = (id: string) => {
+    setViewedIds(prev => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    props.onMarkViewed?.(id);
+  };
+
   const sorted = useMemo(() => {
-    const list = [...tenders];
+    const list = tenders.filter(t => !unreadOnly || !Boolean(t.viewed) && !viewedIds.has(t.id));
     if (sortBy === 'score') return list.sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
     if (sortBy === 'newest') {
       const time = (t: Tender) => (t.publish_date ? new Date(t.publish_date).getTime() : 0);
@@ -703,11 +843,16 @@ export function InboxScreen(props: InboxScreenProps) {
       return at < now ? Number.MAX_SAFE_INTEGER - (now - at) : at;
     };
     return list.sort((a, b) => rank(a) - rank(b));
-  }, [tenders, sortBy]);
+  }, [tenders, sortBy, unreadOnly, viewedIds]);
 
   const withDeadline = sorted.filter(t => t.closing_date);
   const noDeadline = sorted.filter(t => !t.closing_date);
   const ordered = sortBy === 'urgency' ? [...withDeadline, ...noDeadline] : sorted;
+
+  const expiredTenders = useMemo(() => {
+    const now = Date.now();
+    return ordered.filter(t => t.closing_date && new Date(t.closing_date).getTime() <= now);
+  }, [ordered]);
 
   // Keep a selection. When the selected tender leaves the list, move to its neighbour.
   const selected = ordered.find(t => t.id === selectedId) ?? null;
@@ -720,25 +865,83 @@ export function InboxScreen(props: InboxScreenProps) {
     const index = ordered.findIndex(t => t.id === tender.id);
     const next = ordered[index + 1] ?? ordered[index - 1] ?? null;
     setSelectedId(next ? next.id : null);
+    markViewed(tender.id);
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    setUndoItem({ tender, status });
+    undoTimerRef.current = setTimeout(() => {
+      setUndoItem(null);
+    }, 6000);
     void props.onStatusChange(tender.id, status);
+  };
+
+  const handleArchiveExpired = async () => {
+    for (const t of expiredTenders) {
+      await props.onStatusChange(t.id, 'Passed');
+    }
   };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-      e.preventDefault();
-      const i = ordered.findIndex(t => t.id === selectedId);
-      const next = ordered[e.key === 'ArrowDown' ? i + 1 : i - 1];
-      if (next) setSelectedId(next.id);
+      if (addingManual || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
+
+      if (e.key === '/') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'j' || e.key === 'k') {
+        e.preventDefault();
+        const isDown = e.key === 'ArrowDown' || e.key === 'j';
+        const i = ordered.findIndex(t => t.id === selectedId);
+        const next = ordered[isDown ? i + 1 : i - 1];
+        if (next) {
+          setSelectedId(next.id);
+          markViewed(next.id);
+          const rowEl = document.querySelector(`[data-tender-id="${next.id}"]`) as HTMLElement | null;
+          rowEl?.scrollIntoView?.({ block: 'nearest' });
+        }
+        return;
+      }
+
+      if (!selected) return;
+
+      if (e.key === 't' || e.key === 'T') {
+        e.preventDefault();
+        act(selected, 'Under Review');
+      } else if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        act(selected, 'Passed');
+      } else if (e.key === 'b' || e.key === 'B') {
+        e.preventDefault();
+        props.onToggleBookmark(selected.id);
+      } else if ((e.key === 'o' || e.key === 'O') && selected.direct_url && selected.direct_url !== '#') {
+        e.preventDefault();
+        window.open(selected.direct_url, '_blank', 'noopener,noreferrer');
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [ordered, selectedId]);
+  }, [ordered, selectedId, selected, addingManual]);
 
-  const activeFilters = (selectedTrack !== 'All' ? 1 : 0) + (bookmarkedOnly ? 1 : 0) + (corrigendumOnly ? 1 : 0);
+  const activeFilters =
+    (selectedTrack !== 'All' ? 1 : 0) +
+    (bookmarkedOnly ? 1 : 0) +
+    (corrigendumOnly ? 1 : 0) +
+    (unreadOnly ? 1 : 0);
   const filtering = activeFilters > 0 || searchQuery.trim() !== '';
+
+  const exportCsvUrl = useMemo(() => {
+    const params = new URLSearchParams({ scope: 'inbox' });
+    if (selectedTrack !== 'All') params.set('track', selectedTrack);
+    if (searchQuery.trim()) params.set('search', searchQuery.trim());
+    if (bookmarkedOnly) params.set('bookmarkedOnly', 'true');
+    if (corrigendumOnly) params.set('corrigendumOnly', 'true');
+    return `/api/export/csv?${params.toString()}`;
+  }, [selectedTrack, searchQuery, bookmarkedOnly, corrigendumOnly]);
 
   const firstNoDeadlineId = sortBy === 'urgency' ? noDeadline[0]?.id : undefined;
 
@@ -828,20 +1031,65 @@ export function InboxScreen(props: InboxScreenProps) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col p-6">
-      <div className="mb-4 flex flex-wrap items-center gap-3">
+      <div className="mb-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-bold">Inbox</h1>
         <span className="font-mono text-sm text-ink-muted">{ordered.length}</span>
+        <span className="hidden text-xs text-ink-muted xl:inline" title="Keyboard shortcuts: J/K or Arrows to navigate, T to Track, P to Pass, B to Bookmark, / to Search">
+          Shortcuts: <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[11px]">J/K</kbd>{' '}
+          <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[11px]">T</kbd>{' '}
+          <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[11px]">P</kbd>{' '}
+          <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[11px]">B</kbd>{' '}
+          <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[11px]">/</kbd>
+        </span>
 
         <div className="relative ml-auto w-64">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-muted" />
           <input
+            ref={searchInputRef}
             value={searchQuery}
             onChange={e => props.onSearchChange(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Escape') {
+                if (searchQuery) props.onSearchChange('');
+                searchInputRef.current?.blur();
+              }
+            }}
             placeholder="Search tenders"
             aria-label="Search tenders"
-            className="h-10 w-full rounded-lg border border-line bg-surface pl-9 pr-3 placeholder:text-ink-muted"
+            className="h-10 w-full rounded-lg border border-line bg-surface pl-9 pr-8 placeholder:text-ink-muted"
           />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => props.onSearchChange('')}
+              aria-label="Clear search"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer text-ink-muted hover:text-ink"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
+
+        {expiredTenders.length > 0 && (
+          <Button
+            variant="ghost"
+            onClick={() => void handleArchiveExpired()}
+            title="Move all expired tenders in the current Inbox view to Passed"
+          >
+            <Archive className="h-4 w-4" />
+            Archive expired ({expiredTenders.length})
+          </Button>
+        )}
+
+        <a
+          href={exportCsvUrl}
+          download
+          className="inline-flex h-10 items-center gap-2 rounded-lg border border-line bg-surface px-3.5 text-sm font-semibold text-ink hover:bg-surface-2"
+          title="Export filtered Inbox tenders to CSV"
+        >
+          <Download className="h-4 w-4" />
+          Export CSV
+        </a>
 
         <Button onClick={() => { setManualError(null); setAddingManual(true); }}>
           <Plus className="h-4 w-4" />
@@ -875,6 +1123,10 @@ export function InboxScreen(props: InboxScreenProps) {
                 <input type="checkbox" checked={corrigendumOnly} onChange={props.onToggleCorrigendum} className="h-4 w-4 accent-[var(--accent)]" />
                 Amended only
               </label>
+              <label className="flex cursor-pointer items-center gap-2">
+                <input type="checkbox" checked={unreadOnly} onChange={() => setUnreadOnly(v => !v)} className="h-4 w-4 accent-[var(--accent)]" />
+                Unread only
+              </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-semibold text-ink-muted">Sort by</span>
                 <select value={sortBy} onChange={e => setSortBy(e.target.value as SortBy)} className="h-10 w-full rounded-lg border border-line bg-surface px-2">
@@ -888,6 +1140,81 @@ export function InboxScreen(props: InboxScreenProps) {
         </Popover>
       </div>
 
+      {(tracks.length > 0 || filtering) && (
+        <div className="mb-4 flex flex-wrap items-center gap-1.5" role="group" aria-label="Track quick filters">
+          <button
+            type="button"
+            onClick={() => props.onSelectTrack('All')}
+            aria-pressed={selectedTrack === 'All'}
+            className={`cursor-pointer rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+              selectedTrack === 'All'
+                ? 'bg-accent text-accent-ink'
+                : 'border border-line bg-surface text-ink-muted hover:bg-surface-2 hover:text-ink'
+            }`}
+          >
+            All domains
+          </button>
+          {tracks.map(track => (
+            <button
+              key={track.id}
+              type="button"
+              onClick={() => props.onSelectTrack(selectedTrack === track.name ? 'All' : track.name)}
+              aria-pressed={selectedTrack === track.name}
+              className={`cursor-pointer rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+                selectedTrack === track.name
+                  ? 'bg-accent text-accent-ink'
+                  : 'border border-line bg-surface text-ink-muted hover:bg-surface-2 hover:text-ink'
+              }`}
+            >
+              {track.name}
+            </button>
+          ))}
+
+          {bookmarkedOnly && (
+            <button
+              type="button"
+              onClick={props.onToggleBookmarked}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-accent-soft px-2.5 py-1 text-xs font-semibold text-accent"
+            >
+              Bookmarked <X className="h-3 w-3" />
+            </button>
+          )}
+          {corrigendumOnly && (
+            <button
+              type="button"
+              onClick={props.onToggleCorrigendum}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-warn-soft px-2.5 py-1 text-xs font-semibold text-warn"
+            >
+              Amended <X className="h-3 w-3" />
+            </button>
+          )}
+          {unreadOnly && (
+            <button
+              type="button"
+              onClick={() => setUnreadOnly(false)}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-accent-soft px-2.5 py-1 text-xs font-semibold text-accent"
+            >
+              Unread <X className="h-3 w-3" />
+            </button>
+          )}
+          {filtering && (
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedTrack !== 'All') props.onSelectTrack('All');
+                if (bookmarkedOnly) props.onToggleBookmarked();
+                if (corrigendumOnly) props.onToggleCorrigendum();
+                if (unreadOnly) setUnreadOnly(false);
+                if (searchQuery) props.onSearchChange('');
+              }}
+              className="ml-1 cursor-pointer text-xs font-semibold text-ink-muted underline hover:text-ink"
+            >
+              Clear all
+            </button>
+          )}
+        </div>
+      )}
+
       {ordered.length === 0 ? (
         <Panel className="flex-1">
           <EmptyState
@@ -898,7 +1225,7 @@ export function InboxScreen(props: InboxScreenProps) {
         </Panel>
       ) : (
         <div className="grid items-start gap-4 lg:grid-cols-[minmax(340px,2fr)_3fr]">
-          <Panel className="overflow-y-auto lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)]">
+          <Panel className="overflow-y-auto lg:sticky lg:top-4 lg:h-[calc(100vh-14.5rem)]">
             {ordered.map(t => (
               <React.Fragment key={t.id}>
                 {t.id === firstNoDeadlineId && (
@@ -906,11 +1233,19 @@ export function InboxScreen(props: InboxScreenProps) {
                     No deadline stated
                   </div>
                 )}
-                <TenderRow tender={t} selected={t.id === selected?.id} onSelect={() => setSelectedId(t.id)} />
+                <TenderRow
+                  tender={t}
+                  selected={t.id === selected?.id}
+                  unread={!isTenderViewed(t)}
+                  onSelect={() => {
+                    setSelectedId(t.id);
+                    markViewed(t.id);
+                  }}
+                />
               </React.Fragment>
             ))}
           </Panel>
-          <Panel className="overflow-hidden lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)]">
+          <Panel className="overflow-hidden lg:sticky lg:top-4 lg:h-[calc(100vh-14.5rem)]">
             {selected && (
               <Detail
                 tender={selected}
@@ -924,6 +1259,43 @@ export function InboxScreen(props: InboxScreenProps) {
               />
             )}
           </Panel>
+        </div>
+      )}
+
+      {undoItem && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-5 right-5 z-40 flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm shadow-lg"
+        >
+          <span>
+            Moved to <span className="font-semibold">{undoItem.status}</span>
+          </span>
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={() => {
+              const restored = undoItem.tender;
+              if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+              setUndoItem(null);
+              setSelectedId(restored.id);
+              void props.onStatusChange(restored.id, 'New Opportunity');
+            }}
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+            Undo
+          </Button>
+          <button
+            type="button"
+            onClick={() => {
+              if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+              setUndoItem(null);
+            }}
+            aria-label="Dismiss undo notification"
+            className="cursor-pointer text-xs text-ink-muted hover:text-ink"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
 

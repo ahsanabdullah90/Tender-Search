@@ -641,4 +641,174 @@ describe('InboxScreen component', () => {
 
     fetchSpy.mockRestore();
   });
+
+  it('supports single-key triage shortcuts: t, p, b, o, and / to search', async () => {
+    const handleStatusChange = vi.fn().mockResolvedValue(undefined);
+    const handleToggleBookmark = vi.fn();
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    render(
+      <InboxScreen
+        tenders={sampleTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={handleStatusChange}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={handleToggleBookmark}
+      />
+    );
+
+    // Press 'b' to toggle bookmark
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b' }));
+    expect(handleToggleBookmark).toHaveBeenCalledWith('tender-1');
+
+    // Press 'o' to open direct_url
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'o' }));
+    expect(openSpy).toHaveBeenCalledWith('https://example.com/t1', '_blank', 'noopener,noreferrer');
+
+    // Press 't' to track
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 't' }));
+    expect(handleStatusChange).toHaveBeenCalledWith('tender-1', 'Under Review');
+
+    // Press '/' to focus search input
+    const searchInput = screen.getByPlaceholderText(/Search tenders/i);
+    const focusSpy = vi.spyOn(searchInput, 'focus');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '/' }));
+    expect(focusSpy).toHaveBeenCalled();
+
+    openSpy.mockRestore();
+  });
+
+  it('renders Undo toast bar after Pass action and restores status on Undo click', async () => {
+    const user = userEvent.setup();
+    const handleStatusChange = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <InboxScreen
+        tenders={sampleTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={handleStatusChange}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    const passBtn = screen.getByRole('button', { name: /Pass/i });
+    await user.click(passBtn);
+    expect(handleStatusChange).toHaveBeenCalledWith('tender-1', 'Passed');
+
+    // Undo toast should appear
+    const undoToast = screen.getByRole('status');
+    expect(undoToast).toHaveTextContent(/Moved to Passed/i);
+
+    const undoBtn = screen.getByRole('button', { name: /^Undo$/i });
+    await user.click(undoBtn);
+    expect(handleStatusChange).toHaveBeenCalledWith('tender-1', 'New Opportunity');
+  });
+
+  it('renders Domain pill bar, active filter chips, Export CSV, and Copy summary', async () => {
+    const user = userEvent.setup();
+    const handleSelectTrack = vi.fn();
+    const handleToggleBookmarked = vi.fn();
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: writeTextMock },
+      writable: true,
+      configurable: true,
+    });
+
+    render(
+      <InboxScreen
+        tenders={sampleTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="Solar & Clean Energy"
+        onSelectTrack={handleSelectTrack}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={true}
+        onToggleBookmarked={handleToggleBookmarked}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    // 1. Domain pill bar
+    const allDomainsBtn = screen.getByRole('button', { name: 'All domains' });
+    await user.click(allDomainsBtn);
+    expect(handleSelectTrack).toHaveBeenCalledWith('All');
+
+    // 2. Active filter chip
+    const bookmarkedChip = screen.getByRole('button', { name: /Bookmarked/i });
+    await user.click(bookmarkedChip);
+    expect(handleToggleBookmarked).toHaveBeenCalled();
+
+    // 3. Export CSV link
+    const exportCsvLink = screen.getByTitle(/Export filtered Inbox tenders to CSV/i);
+    expect(exportCsvLink).toHaveAttribute('href', expect.stringContaining('/api/export/csv?scope=inbox'));
+
+    // 4. Copy summary
+    const copySummaryBtn = screen.getByRole('button', { name: /Copy summary/i });
+    await user.click(copySummaryBtn);
+    expect(writeTextMock).toHaveBeenCalledWith(expect.stringContaining('Solarization of District Headquarters Hospitals'));
+    expect(screen.getByText('Copied!')).toBeInTheDocument();
+  });
+
+  it('renders Archive expired button when past tenders exist and sweeps them to Passed', async () => {
+    const user = userEvent.setup();
+    const handleStatusChange = vi.fn().mockResolvedValue(undefined);
+    const expiredTender: Tender = {
+      ...sampleTenders[0],
+      id: 'tender-expired-1',
+      title: 'Expired Tender',
+      closing_date: new Date(Date.now() - 86400000).toISOString()
+    };
+
+    render(
+      <InboxScreen
+        tenders={[expiredTender]}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={handleStatusChange}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    const archiveBtn = screen.getByRole('button', { name: /Archive expired \(1\)/i });
+    await user.click(archiveBtn);
+    expect(handleStatusChange).toHaveBeenCalledWith('tender-expired-1', 'Passed');
+  });
 });

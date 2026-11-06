@@ -37,6 +37,7 @@ export interface Tender {
   domain_tracks: string[]; // e.g. ["Construction & Civil Works", "Solar & Clean Energy"]
   matched_keywords: string[];
   match_score: number; // 0 - 100
+  semantic_score?: number;
   publish_date: string | null;
   closing_date: string | null; // ISO string or null for "Not Available"
   closing_date_formatted: string;

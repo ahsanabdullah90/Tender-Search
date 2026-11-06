@@ -6,6 +6,7 @@ import {
   updateTenderNotes,
   updateTenderResultDate,
   toggleTenderBookmark,
+  markTenderViewed,
   updateTenderFields,
   createManualTender,
   getAllDomainTracks
@@ -21,13 +22,14 @@ export const tendersRouter = Router();
 // 1. Tenders Listing & Filtering
 tendersRouter.get('/', (req, res) => {
   try {
-    const { track, status, search, bookmarkedOnly, corrigendumOnly } = req.query;
+    const { track, status, search, bookmarkedOnly, corrigendumOnly, unreadOnly } = req.query;
     const tenders = getAllTenders({
       track: track as string,
       status: status as string,
       search: search as string,
       bookmarkedOnly: bookmarkedOnly === 'true',
-      corrigendumOnly: corrigendumOnly === 'true'
+      corrigendumOnly: corrigendumOnly === 'true',
+      unreadOnly: unreadOnly === 'true'
     });
     res.json(tenders);
   } catch (err: any) {
@@ -83,6 +85,17 @@ const handleBookmarkToggle = (req: any, res: any) => {
 };
 tendersRouter.patch('/:id/bookmark', handleBookmarkToggle);
 tendersRouter.post('/:id/bookmark', handleBookmarkToggle);
+
+const handleViewedUpdate = (req: any, res: any) => {
+  const viewed = req.body?.viewed !== undefined ? Boolean(req.body.viewed) : true;
+  const success = markTenderViewed(req.params.id, viewed);
+  if (!success) {
+    return res.status(404).json({ success: false, error: 'Tender not found' });
+  }
+  res.json({ success: true, viewed: viewed ? 1 : 0 });
+};
+tendersRouter.patch('/:id/viewed', handleViewedUpdate);
+tendersRouter.post('/:id/viewed', handleViewedUpdate);
 
 // 3. On-Demand Tender AI Analysis & Live Refresh
 tendersRouter.post('/:id/analyze', async (req, res) => {
