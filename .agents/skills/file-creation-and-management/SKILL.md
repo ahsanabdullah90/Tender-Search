@@ -100,6 +100,7 @@ When creating a new file, find its exact home using this decision table:
   - `portalsRepo.ts`
   - `tracksRepo.ts`
   - `systemRepo.ts`
+  - `ingestJobsRepo.ts` (document ingest retry queue)
 - `src/server/db/index.ts` must re-export all connection and repository symbols.
 - `src/server/db.ts` acts as a backward-compatible barrel export (`export * from './db/index.js'`) so existing consumers never break.
 

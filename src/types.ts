@@ -60,6 +60,13 @@ export interface Tender {
   viewed: number;
   created_at: string;
   updated_at: string;
+  // Ingestion provenance (docs/13-ingestion-pipeline-plan.md, Phase 1)
+  ingestion_status?: 'staging' | 'ready' | 'failed_verification';
+  deadline_source?: 'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual' | null;
+  deadline_confidence?: 'high' | 'medium' | 'low' | null;
+  doc_fetch_status?: 'none' | 'pending' | 'partial' | 'complete' | 'failed';
+  needs_review?: number;
+  review_reason?: string | null;
 }
 
 export interface CorrigendumLog {

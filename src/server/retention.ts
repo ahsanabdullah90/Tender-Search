@@ -8,8 +8,10 @@ import {
   getAgedOutPassedTenderIds,
   cleanExpiredDeletedTenderRecords,
   slimPassedTenders,
-  deleteTenders
+  deleteTenders,
+  releaseStaleStagingTenders
 } from './db/repositories/tendersRepo.js';
+import { releaseExpiredLeases } from './db/repositories/ingestJobsRepo.js';
 import {
   retryPendingFilePurges,
   reconcileDossiers,
@@ -69,6 +71,14 @@ export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolea
   const graceDays = Math.max(1, parseInt(getAppSetting('retention_grace_days') || '2', 10));
   const passedRetentionDays = Math.max(1, parseInt(getAppSetting('retention_passed_days') || '10', 10));
   const batchCap = 200;
+
+  // 0. Release tenders stuck in 'staging' (e.g. the process died mid-ingest) so they become
+  // visible and subject to the expiry rules below.
+  if (!isDryRun) {
+    releaseStaleStagingTenders(60);
+    // Return document jobs whose worker died mid-download to the queue.
+    releaseExpiredLeases();
+  }
 
   // 1. Slim Passed tenders (undo window: 2 minutes)
   const pendingSlim = getPassedTendersPendingSlim(2, batchCap);

@@ -115,6 +115,25 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_deleted_tenders_canonical ON deleted_tenders(canonical_id);
+
+    -- 9. Document Ingest Jobs (durable retry queue for tender document downloads + extraction)
+    CREATE TABLE IF NOT EXISTS document_ingest_jobs (
+      id TEXT PRIMARY KEY,
+      tender_id TEXT NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
+      url TEXT NOT NULL,
+      label TEXT,
+      priority INTEGER NOT NULL DEFAULT 50,      -- lower runs first: corrigendum=10, rfp/notice=20, other=50
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      status TEXT NOT NULL DEFAULT 'pending',    -- pending | processing | done | failed
+      lease_until TEXT,                          -- crash recovery for 'processing'
+      last_error TEXT,
+      next_retry_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tender_id, url)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ingest_jobs_due ON document_ingest_jobs(status, next_retry_at);
+    CREATE INDEX IF NOT EXISTS idx_ingest_jobs_tender ON document_ingest_jobs(tender_id);
   `);
 
   // Migrations for columns added over time
@@ -125,8 +144,53 @@ export function initDatabase() {
   try { db.prepare('ALTER TABLE tenders ADD COLUMN semantic_score REAL DEFAULT 0').run(); } catch {}
   try { db.prepare('ALTER TABLE domain_tracks ADD COLUMN embedding BLOB').run(); } catch {}
 
+  migrateIngestionProvenanceColumns();
+
   seedDefaultDomainTracks();
   seedPortalHealth();
+}
+
+/**
+ * Ingestion-pipeline provenance columns (docs/13-ingestion-pipeline-plan.md, Phase 1):
+ *   ingestion_status    'staging' | 'ready' | 'failed_verification'  (staging rows are hidden from every read path)
+ *   deadline_source     'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual' | NULL
+ *   deadline_confidence 'high' | 'medium' | 'low' | NULL
+ *   doc_fetch_status    'none' | 'pending' | 'partial' | 'complete' | 'failed'
+ *   needs_review        1 when the operator must confirm something (e.g. a corrigendum moved the deadline earlier)
+ *   review_reason       human-readable reason for needs_review
+ *
+ * Existing rows are backfilled only on the run that adds each column, so later rows written by the
+ * pipeline (which sets these explicitly) are never relabelled.
+ */
+function migrateIngestionProvenanceColumns() {
+  const addColumn = (ddl: string): boolean => {
+    try {
+      db.prepare(`ALTER TABLE tenders ADD COLUMN ${ddl}`).run();
+      return true;
+    } catch {
+      return false; // column already exists
+    }
+  };
+
+  addColumn(`ingestion_status TEXT DEFAULT 'ready'`);
+  if (addColumn('deadline_source TEXT')) {
+    db.prepare(`
+      UPDATE tenders
+      SET deadline_source = CASE WHEN portal_id = 'manual' THEN 'manual' ELSE 'html_row' END
+      WHERE closing_date IS NOT NULL
+    `).run();
+  }
+  addColumn('deadline_confidence TEXT');
+  if (addColumn(`doc_fetch_status TEXT DEFAULT 'none'`)) {
+    db.prepare(`
+      UPDATE tenders SET doc_fetch_status = 'complete'
+      WHERE cached_dossiers IS NOT NULL AND cached_dossiers != '[]'
+    `).run();
+  }
+  addColumn('needs_review INTEGER DEFAULT 0');
+  addColumn('review_reason TEXT');
+
+  try { db.prepare('CREATE INDEX IF NOT EXISTS idx_tenders_ingestion ON tenders(ingestion_status)').run(); } catch {}
 }
 
 export function seedDefaultDomainTracks() {

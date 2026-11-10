@@ -143,8 +143,31 @@ The primary entity representing scraped, matched, and tracked procurement opport
 | `result_expected_date` | `TEXT` | `NULL` | Target date when bid award results are expected (YYYY-MM-DD). |
 | `is_bookmarked` | `INTEGER`| `DEFAULT 0` | Starred tender flag (0 or 1). |
 | `viewed` | `INTEGER`| `DEFAULT 0` | Read indicator (0 or 1). |
-| `created_at` | `TEXT` | `NOT NULL` | Discovery timestamp. |
+| `created_at` | `TEXT` | `NOT NULL` | Discovery timestamp. Also the ageing fallback for undated tenders with no `publish_date`. |
 | `updated_at` | `TEXT` | `NOT NULL` | Last update or rescrape timestamp. |
+| `ingestion_status` | `TEXT` | `DEFAULT 'ready'` | `staging` (mid-ingest; hidden from listings, KPIs and retention), `ready`, or `failed_verification`. Staging rows older than 60 minutes are released to `ready` by the retention cycle. |
+| `deadline_source` | `TEXT` | `NULL` | Where `closing_date` came from: `corrigendum_doc`, `primary_doc`, `html_detail`, `html_row`, `manual`. |
+| `deadline_confidence` | `TEXT` | `NULL` | `high`, `medium` or `low`. |
+| `doc_fetch_status` | `TEXT` | `DEFAULT 'none'` | Derived from `document_ingest_jobs`: `none`, `pending`, `partial`, `complete`, `failed`. |
+| `needs_review` | `INTEGER` | `DEFAULT 0` | `1` when the operator must confirm something, e.g. a corrigendum moved the deadline earlier. |
+| `review_reason` | `TEXT` | `NULL` | Human-readable reason for `needs_review`. |
+
+### `document_ingest_jobs`
+Durable retry queue for tender document downloads and extraction. Rows are deleted with their tender (`ON DELETE CASCADE`). All access goes through `src/server/db/repositories/ingestJobsRepo.ts`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `TEXT PRIMARY KEY` | `job-<uuid>` |
+| `tender_id` | `TEXT NOT NULL` | `REFERENCES tenders(id) ON DELETE CASCADE` |
+| `url` | `TEXT NOT NULL` | `UNIQUE (tender_id, url)`, so queueing the same file twice is a no-op |
+| `label` | `TEXT` | Display label |
+| `priority` | `INTEGER DEFAULT 50` | Lower runs first: corrigendum 10, RFP/notice 20, other 50 |
+| `attempts` / `max_attempts` | `INTEGER` | Attempt counted when a job is claimed; default max 3 |
+| `status` | `TEXT DEFAULT 'pending'` | `pending`, `processing`, `done`, `failed` |
+| `lease_until` | `TEXT` | Expired leases return to `pending` (or `failed` if out of attempts) |
+| `last_error` | `TEXT` | Last failure message |
+| `next_retry_at` | `TEXT` | Backoff 2 → 10 → 30 minutes after each failed attempt |
+| `created_at` | `TEXT` | |
 
 Indexes:
 - `idx_tenders_canonical`: `ON tenders(canonical_id)`

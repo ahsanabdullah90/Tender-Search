@@ -10,6 +10,31 @@ import {
   MINILM_BLOB_HEADER_HEX
 } from '../../embeddingService.js';
 
+/**
+ * Rows in 'staging' are mid-ingest (documents still being checked) and must not be visible as
+ * opportunities: excluded from listing, portal summary, KPIs and retention sweeps. They remain
+ * visible to duplicate detection and suppression checks, which query `tenders` directly.
+ */
+export const NOT_STAGING_SQL = "COALESCE(ingestion_status, 'ready') != 'staging'";
+
+export type IngestionStatus = 'staging' | 'ready' | 'failed_verification';
+
+export function setTenderIngestionStatus(id: string, status: IngestionStatus): boolean {
+  return db.prepare('UPDATE tenders SET ingestion_status = ? WHERE id = ?').run(status, id).changes > 0;
+}
+
+/**
+ * Crash recovery: a tender left in 'staging' longer than `olderThanMinutes` (e.g. the process
+ * died mid-ingest) is released to 'ready' so it is neither invisible nor exempt from retention.
+ */
+export function releaseStaleStagingTenders(olderThanMinutes: number = 60): number {
+  return db.prepare(`
+    UPDATE tenders SET ingestion_status = 'ready'
+    WHERE ingestion_status = 'staging'
+      AND julianday(COALESCE(updated_at, created_at)) <= julianday('now', '-' || ? || ' minutes')
+  `).run(olderThanMinutes).changes;
+}
+
 export interface EmbeddingBackfillRow {
   id: string;
   title: string;
@@ -75,7 +100,7 @@ export function getAllTenders(filters?: {
   unreadOnly?: boolean;
   excludeExpired?: boolean;
 }): Tender[] {
-  let query = 'SELECT * FROM tenders WHERE 1=1';
+  let query = `SELECT * FROM tenders WHERE ${NOT_STAGING_SQL}`;
   const params: any[] = [];
 
   if (filters?.status && filters.status !== 'All') {
@@ -274,6 +299,7 @@ export function getExpiredUnreviewedTenderIds(graceDays: number = 2, limit: numb
     SELECT id FROM tenders
     WHERE pipeline_status = 'New Opportunity'
       AND is_bookmarked = 0
+      AND ${NOT_STAGING_SQL}
       AND (
         (closing_date IS NOT NULL AND julianday(closing_date) <= julianday('now', '-' || ? || ' days'))
         OR
@@ -377,6 +403,7 @@ export function getPortalTenderSummary(): {
       SUM(CASE WHEN viewed = 0 THEN 1 ELSE 0 END) as unread_count
     FROM tenders
     WHERE pipeline_status = 'New Opportunity'
+      AND ${NOT_STAGING_SQL}
       AND (closing_date IS NULL OR julianday(closing_date) >= julianday('now') OR is_bookmarked = 1)
     GROUP BY portal_id, portal_name
     ORDER BY unread_count DESC, total_count DESC

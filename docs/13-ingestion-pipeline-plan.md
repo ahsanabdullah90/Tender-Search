@@ -58,6 +58,8 @@ Add a `verify` script that runs `npm run lint` before `vite build`. `npm run bui
 
 Comes before the extractor so that extraction results have somewhere to go.
 
+> **Phase 1 status (2026-11-10): complete.** Migration verified twice on a copy of the live DB: 49 tenders `ready`; 16 dated tenders backfilled `html_row`; 4 with documents `complete`; integrity OK. `ingestJobsRepo.ts` added with 14 tests (`tests/db/ingestJobsRepo.test.ts`). Additions beyond the spec: `releaseStaleStagingTenders` (the retention cycle releases rows stuck in `staging` over 60 minutes, so a crash can't hide a tender forever), `requeueFailedJobs` (for the Phase 4 retry button), and `refreshTenderDocFetchStatus`. The retention cycle also calls `releaseExpiredLeases`. Nothing writes `staging` or queues jobs yet; that starts in Phase 3.
+
 ### 1.1 Schema migration (`src/server/db/schema.ts`)
 Non-breaking `ALTER TABLE tenders ADD COLUMN` (wrapped in try/catch like the existing migrations):
 

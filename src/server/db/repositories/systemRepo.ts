@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { db, BACKUPS_DIR, DOSSIERS_DIR } from '../connection.js';
-import { deleteTenders } from './tendersRepo.js';
+import { deleteTenders, NOT_STAGING_SQL } from './tendersRepo.js';
 
 export function getAppSetting(key: string): string | null {
   try {
@@ -37,12 +37,14 @@ export function getGeminiApiKey(): string | null {
 }
 
 export function getKpiStats() {
-  const totalTracked = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c;
-  
+  // Staging rows (mid-ingest) are not counted until they are ready.
+  const totalTracked = (db.prepare(`SELECT COUNT(*) as c FROM tenders WHERE ${NOT_STAGING_SQL}`).get() as any).c;
+
   // Accurate Julian-day comparison handles both ISO 'T' and SQLite space formats cleanly
   const closingSoon = (db.prepare(`
-    SELECT COUNT(*) as c FROM tenders 
-    WHERE closing_date IS NOT NULL 
+    SELECT COUNT(*) as c FROM tenders
+    WHERE ${NOT_STAGING_SQL}
+    AND closing_date IS NOT NULL
     AND julianday(closing_date) > julianday('now')
     AND julianday(closing_date) <= julianday('now', '+3 days')
     AND pipeline_status NOT IN ('Won', 'Passed')
