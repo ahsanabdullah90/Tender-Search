@@ -1142,6 +1142,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
       const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
         referenceNo: 'PSEB-CLOUD-2026',
+        organization: '',
+        title: '',
         closingDateISO: '2026-12-20T15:00:00+05:00',
         closingDateFormatted: '20 Dec 2026, 03:00 PM PKT',
         summaryScope: 'Full cloud migration and hosting services for Pakistani tech export firms.',
@@ -1199,6 +1201,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       // Extracted deadline is Oct 22, 2026 (past deadline relative to simulated/current Nov 10, 2026)
       const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
         referenceNo: 'FFW10221',
+        organization: '',
+        title: '',
         closingDateISO: '2026-10-22T15:00:00+05:00',
         closingDateFormatted: '22 Oct 2026, 03:00 PM PKT',
         summaryScope: 'Purchase of stationery items for PSEB.',
@@ -1232,6 +1236,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
       const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
         referenceNo: 'FDE-LAB-2025',
+        organization: '',
+        title: '',
         closingDateISO: '2025-10-30T11:00:00+05:00',
         closingDateFormatted: '30 Oct 2025, 11:00 AM PKT',
         summaryScope: 'Expired Science Lab RFP',
@@ -1240,7 +1246,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       });
 
       const result = await fetchDocumentsForTender(testId);
-      expect((result.tender as any).pipeline_status).toBe('Deleted');
+      expect(result.expired).toBe(true);
+      expect(result.tender).toBeNull();
 
       const foundAfter = getTenderById(testId);
       expect(foundAfter).toBeNull();
@@ -1272,6 +1279,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
       const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
         referenceNo: 'FDE-SEC-2025',
+        organization: '',
+        title: '',
         closingDateISO: '2025-12-23T11:00:00+05:00',
         closingDateFormatted: '23 Dec 2025, 11:00 AM PKT',
         summaryScope: 'Security guard provision',
@@ -1494,7 +1503,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       );
 
       const result = await fetchDocumentsForTender('tender-audit-fetch-1');
-      expect(result.tender.pipeline_status).toBe('New Opportunity');
+      expect(result.expired).toBe(false);
+      expect(result.tender?.pipeline_status).toBe('New Opportunity');
       expect(getTenderById('tender-audit-fetch-1')?.closing_date).toBe(future);
     });
 

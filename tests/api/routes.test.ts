@@ -681,6 +681,52 @@ describe('Server API Routes', () => {
     });
   });
 
+  describe('Auto-expire responses & expired-tender visibility (Phase 0)', () => {
+    it('fetch-documents reports expired:true (not a fake Deleted tender) when the document deadline has passed', async () => {
+      const ocrSvc = await import('../../src/server/ocrService.js');
+      const origBuf = crawlerDeps.fetchFileBuffer;
+      crawlerDeps.fetchFileBuffer = vi.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake'));
+      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
+        referenceNo: 'OLD-1', organization: '', title: '',
+        closingDateISO: '2025-10-30T11:00:00+05:00', closingDateFormatted: '30 Oct 2025',
+        summaryScope: 'Expired notice', estimatedValue: null, isCorrigendum: false
+      });
+      insertTestTender('t-expire-docs', {
+        reference_no: 'OLD-1',
+        closing_date: null,
+        direct_url: 'https://example.com/download/old-notice.pdf'
+      });
+
+      const res = await request(app).post('/api/tenders/t-expire-docs/fetch-documents');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ success: true, expired: true, id: 't-expire-docs' });
+      expect(res.body.tender).toBeUndefined();
+      expect(getTenderById('t-expire-docs')).toBeNull();
+
+      crawlerDeps.fetchFileBuffer = origBuf;
+      vi.restoreAllMocks();
+    });
+
+    it('refresh and analyze still return 404 for a tender that never existed', async () => {
+      expect((await request(app).post('/api/tenders/no-such-tender/refresh')).status).toBe(404);
+      await request(app).post('/api/ai/config').send({ apiKey: 'test-key' });
+      expect((await request(app).post('/api/tenders/no-such-tender/analyze')).status).toBe(404);
+      await request(app).post('/api/ai/config').send({ apiKey: '' });
+    });
+
+    it('excludeExpired ages undated tenders from created_at when there is no publish date', async () => {
+      insertTestTender('t-undated-fresh', { closing_date: null, reference_no: 'U-1' });
+      insertTestTender('t-undated-stale', { closing_date: null, reference_no: 'U-2' });
+      db.prepare(`UPDATE tenders SET publish_date = NULL WHERE id IN ('t-undated-fresh', 't-undated-stale')`).run();
+      db.prepare(`UPDATE tenders SET created_at = datetime('now', '-75 days') WHERE id = 't-undated-stale'`).run();
+
+      const res = await request(app).get('/api/tenders?status=New Opportunity&excludeExpired=true');
+      const ids = res.body.map((t: any) => t.id);
+      expect(ids).toContain('t-undated-fresh');
+      expect(ids).not.toContain('t-undated-stale');
+    });
+  });
+
   describe('Server SSE & Startup Integration', () => {
     it('serves SSE scan progress and closes cleanly', async () => {
       const http = await import('http');

@@ -29,7 +29,8 @@ describe('InboxScreen component', () => {
       estimated_value: 'PKR 45,000,000',
       location: 'Lahore',
       publish_date: '2026-05-01',
-      closing_date: '2026-08-30T14:00:00+05:00',
+      // Relative to now so the sample stays an open tender (closed ones are hidden by default)
+      closing_date: new Date(Date.now() + 30 * 86400000).toISOString(),
       closing_date_formatted: '30-08-2026',
       direct_url: 'https://example.com/t1',
       secondary_sources: [],
@@ -248,7 +249,9 @@ describe('InboxScreen component', () => {
         ...sampleTenders[0],
         id: 'undated-1',
         title: 'Undated Tender Opportunity',
-        closing_date: null
+        closing_date: null,
+        // Recently published: undated tenders older than 60 days count as closed and are hidden
+        publish_date: new Date().toISOString().slice(0, 10)
       }
     ];
 
@@ -511,6 +514,10 @@ describe('InboxScreen component', () => {
         onToggleBookmark={vi.fn()}
       />
     );
+
+    // A closed tender is hidden even when it is the only one; the empty state offers to show it
+    expect(screen.queryByText('Past Tender')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Show closed$/i }));
 
     const passBtn = screen.getByRole('button', { name: /Pass/i });
     await user.click(passBtn);
@@ -807,8 +814,83 @@ describe('InboxScreen component', () => {
       />
     );
 
+    // Hidden by default (Phase 0.2): revealed only on request
+    expect(screen.getByText('Your Inbox is clear')).toBeInTheDocument();
+    expect(screen.getByText(/1 closed tender\(s\) are hidden/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Show closed$/i }));
+
     const archiveBtn = screen.getByRole('button', { name: /Archive expired \(1\)/i });
     await user.click(archiveBtn);
     expect(handleStatusChange).toHaveBeenCalledWith('tender-expired-1', 'Passed');
+  });
+
+  it('hides expired tenders alongside open ones and keeps bookmarked expired tenders visible', () => {
+    const open: Tender = { ...sampleTenders[0], id: 't-open', title: 'Open Solar Tender' };
+    const expired: Tender = { ...sampleTenders[0], id: 't-closed', title: 'Closed Solar Tender', closing_date: new Date(Date.now() - 3600000).toISOString() };
+    const bookmarkedExpired: Tender = { ...expired, id: 't-closed-bm', title: 'Bookmarked Closed Tender', is_bookmarked: 1 };
+
+    render(
+      <InboxScreen
+        tenders={[open, expired, bookmarkedExpired]}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />
+    );
+
+    expect(screen.getAllByText('Open Solar Tender').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Bookmarked Closed Tender').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('Closed Solar Tender')).not.toBeInTheDocument();
+    expect(screen.getByText(/closed tender\(s\) hidden/)).toBeInTheDocument();
+  });
+
+  it('removes the tender from the list when the server reports it auto-expired', async () => {
+    const user = userEvent.setup();
+    const onTenderDeleted = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, expired: true, id: 'tender-1', message: 'Deadline has passed: tender removed from the Inbox.' })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <InboxScreen
+        tenders={sampleTenders}
+        tracks={sampleTracks}
+        corrigenda={[]}
+        selectedTrack="All"
+        onSelectTrack={vi.fn()}
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        bookmarkedOnly={false}
+        onToggleBookmarked={vi.fn()}
+        corrigendumOnly={false}
+        onToggleCorrigendum={vi.fn()}
+        onStatusChange={vi.fn()}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+        onTenderDeleted={onTenderDeleted}
+      />
+    );
+
+    await user.click(screen.getAllByText('Solarization of District Headquarters Hospitals')[0]);
+    await user.click(screen.getByRole('button', { name: /Fetch documents/i }));
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/tenders/tender-1/fetch-documents', { method: 'POST' });
+    expect(onTenderDeleted).toHaveBeenCalledWith('tender-1');
+    expect(screen.queryByText('Solarization of District Headquarters Hospitals')).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
   });
 });

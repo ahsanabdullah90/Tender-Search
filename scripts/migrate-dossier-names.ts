@@ -21,7 +21,7 @@ async function main() {
   if (isLive) {
     console.log('[1/4] Creating database safety backup before migration...');
     const backup = await backupNow();
-    console.log(`  -> Safety backup created: ${backup?.filename || 'OK'}`);
+    console.log(`  -> Safety backup created: ${backup?.name || 'OK'}`);
   } else {
     console.log('[1/4] Dry run mode active. No files or database rows will be modified.');
   }

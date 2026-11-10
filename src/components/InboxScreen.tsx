@@ -344,13 +344,22 @@ export function Detail({
     } catch {}
   };
 
+  // The server auto-expired (deleted) this tender because its deadline has passed:
+  // drop it from the list instead of leaving a ghost row the operator can still act on.
+  const handleTenderExpired = (message?: string) => {
+    setAiStatusMessage({ text: message || 'Deadline has passed: tender removed from the Inbox.' });
+    onTenderDeleted?.(currentTender.id);
+  };
+
   const handleFetchDocuments = async () => {
     setFetchingDocs(true);
     setAiStatusMessage(null);
     try {
       const res = await fetch(`/api/tenders/${currentTender.id}/fetch-documents`, { method: 'POST' });
       const data = await res.json();
-      if (res.ok && data.tender) {
+      if (res.ok && data.expired) {
+        handleTenderExpired(data.message);
+      } else if (res.ok && data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
         setAiStatusMessage({ text: data.message || `Fetched ${data.newlyFetched} document(s) from portal.` });
@@ -370,7 +379,9 @@ export function Detail({
     try {
       const res = await fetch(`/api/tenders/${currentTender.id}/analyze`, { method: 'POST' });
       const data = await res.json();
-      if (res.ok && data.tender) {
+      if (res.ok && data.expired) {
+        handleTenderExpired(data.message);
+      } else if (res.ok && data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
         setAiStatusMessage({ text: data.message || 'Tender summary extracted with AI.' });
@@ -390,7 +401,9 @@ export function Detail({
     try {
       const res = await fetch(`/api/tenders/${currentTender.id}/refresh`, { method: 'POST' });
       const data = await res.json();
-      if (res.ok && data.tender) {
+      if (res.ok && data.expired) {
+        handleTenderExpired(data.message);
+      } else if (res.ok && data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
         setAiStatusMessage({ text: data.message || 'Tender information refreshed from portal.' });
@@ -966,29 +979,23 @@ export function InboxScreen(props: InboxScreenProps) {
 
   // Filter and sort tenders
   const now = Date.now();
+  // Closed = deadline passed, or undated and first published/seen over 60 days ago. Bookmarked
+  // tenders are never treated as closed. Closed tenders are always hidden unless the operator
+  // turns on "Show closed" (previously they were shown as normal whenever no open tender
+  // remained, so an all-expired Inbox looked active).
   const isClosedUntracked = (t: Tender) => {
     if (t.is_bookmarked) return false;
     if (t.closing_date && new Date(t.closing_date).getTime() < now) return true;
-    if (!t.closing_date && t.publish_date && now - new Date(t.publish_date).getTime() > 60 * 86400000) return true;
+    const seenAt = t.publish_date || t.created_at;
+    if (!t.closing_date && seenAt && now - new Date(seenAt).getTime() > 60 * 86400000) return true;
     return false;
   };
-
-  // Check if there are any genuinely open tenders in the active dataset
-  const hasOpenTenders = useMemo(() => {
-    return activeTenders.some(t => {
-      if (!t.closing_date) {
-        if (t.publish_date && now - new Date(t.publish_date).getTime() > 60 * 86400000) return false;
-        return true;
-      }
-      return new Date(t.closing_date).getTime() > now;
-    });
-  }, [activeTenders, now]);
 
   // Dynamic portal summary computed directly from active tenders
   const computedPortalSummary: PortalSummaryItem[] = useMemo(() => {
     const map = new Map<string, PortalSummaryItem>();
     for (const t of activeTenders) {
-      if (hasOpenTenders && !showClosedTenders && isClosedUntracked(t)) {
+      if (!showClosedTenders && isClosedUntracked(t)) {
         continue;
       }
       const pid = t.portal_id || 'other';
@@ -1007,7 +1014,7 @@ export function InboxScreen(props: InboxScreenProps) {
       }
     }
     return Array.from(map.values()).sort((a, b) => b.unread_count - a.unread_count || b.total_count - a.total_count);
-  }, [activeTenders, hasOpenTenders, showClosedTenders, viewedIds]);
+  }, [activeTenders, showClosedTenders, viewedIds]);
 
   const portalSummary = props.portalSummary ?? computedPortalSummary;
 
@@ -1036,14 +1043,13 @@ export function InboxScreen(props: InboxScreenProps) {
     return filteredTenders.filter(isClosedUntracked);
   }, [filteredTenders]);
 
-  // Final list displayed in triage column:
-  // If hasOpenTenders is true and showClosedTenders is false, untracked closed tenders are excluded.
+  // Final list displayed in triage column: closed tenders are excluded unless "Show closed" is on.
   const displayTenders = useMemo(() => {
-    if (hasOpenTenders && !showClosedTenders) {
+    if (!showClosedTenders) {
       return filteredTenders.filter(t => !isClosedUntracked(t));
     }
     return filteredTenders;
-  }, [filteredTenders, hasOpenTenders, showClosedTenders]);
+  }, [filteredTenders, showClosedTenders]);
 
   // Sort display tenders
   const sorted = useMemo(() => {
@@ -1052,7 +1058,10 @@ export function InboxScreen(props: InboxScreenProps) {
       return list.sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
     }
     if (sortBy === 'newest') {
-      const time = (t: Tender) => (t.publish_date ? new Date(t.publish_date).getTime() : 0);
+      const time = (t: Tender) => {
+        const at = t.publish_date || t.created_at;
+        return at ? new Date(at).getTime() : 0;
+      };
       return list.sort((a, b) => time(b) - time(a));
     }
 
@@ -1541,14 +1550,27 @@ export function InboxScreen(props: InboxScreenProps) {
           <EmptyState
             icon={<Inbox className="h-8 w-8" />}
             title={filtering ? 'Nothing matches these filters' : 'Your Inbox is clear'}
-            body={filtering ? 'Try removing a filter or clearing the search.' : 'New tenders from your portals will appear here after the next scan.'}
+            body={
+              hiddenClosedTenders.length > 0 && !showClosedTenders
+                ? `${hiddenClosedTenders.length} closed tender(s) are hidden because their deadline has passed.`
+                : filtering
+                  ? 'Try removing a filter or clearing the search.'
+                  : 'New tenders from your portals will appear here after the next scan.'
+            }
+            action={
+              hiddenClosedTenders.length > 0 && !showClosedTenders ? (
+                <Button variant="ghost" onClick={() => setShowClosedTenders(true)}>
+                  Show closed
+                </Button>
+              ) : undefined
+            }
           />
         </Panel>
       ) : (
         <div className="grid items-start gap-4 lg:grid-cols-[minmax(340px,2fr)_3fr]">
           <Panel className="overflow-y-auto lg:sticky lg:top-4 lg:h-[calc(100vh-14.5rem)]">
             {/* Auto-hidden Closed Tenders Banner */}
-            {hasOpenTenders && hiddenClosedTenders.length > 0 && !showClosedTenders && (
+            {hiddenClosedTenders.length > 0 && !showClosedTenders && (
               <div className="flex items-center justify-between border-b border-line bg-surface-2 px-4 py-2 text-xs">
                 <span className="text-ink-muted">
                   📁 <strong className="text-ink font-semibold">{hiddenClosedTenders.length}</strong> closed tender(s) hidden

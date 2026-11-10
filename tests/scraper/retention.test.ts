@@ -202,4 +202,19 @@ describe('Retention Lifecycle Daemon', () => {
     expect(typeof status.pendingSlimCount).toBe('number');
     expect(typeof status.expiredUnreviewedCount).toBe('number');
   });
+
+  it('expires undated tenders with no publish date 90 days after they were first seen (Phase 0.3)', async () => {
+    const { getExpiredUnreviewedTenderIds } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const insert = db.prepare(`
+      INSERT INTO tenders (id, canonical_id, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, publish_date, closing_date, pipeline_status, created_at)
+      VALUES (?, ?, ?, 'Org', 'epads', 'Federal PPRA', ?, '[]', '[]', 80, NULL, NULL, 'New Opportunity', datetime('now', ?))
+    `);
+    insert.run(tenderExpiredUnreviewed, tenderExpiredUnreviewed, 'Undated seen 100 days ago', 'https://example.com/u1', '-100 days');
+    insert.run(tenderTrackedActive, tenderTrackedActive, 'Undated seen 10 days ago', 'https://example.com/u2', '-10 days');
+
+    const ids = getExpiredUnreviewedTenderIds(2, 500);
+    expect(ids).toContain(tenderExpiredUnreviewed);
+    expect(ids).not.toContain(tenderTrackedActive);
+  });
 });

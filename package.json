@@ -10,6 +10,7 @@
     "start": "tsx server.ts",
     "clean": "node -e \"try{fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('server.js',{force:true})}catch(e){}\"",
     "lint": "tsc --noEmit",
+    "verify": "tsc --noEmit && vitest run --testTimeout=30000 && vite build",
     "seed:sample": "tsx scripts/seed-sample.ts",
     "test": "vitest run",
     "test:watch": "vitest",

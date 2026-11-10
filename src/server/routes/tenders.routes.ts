@@ -118,18 +118,24 @@ tendersRouter.patch('/:id/viewed', handleViewedUpdate);
 tendersRouter.post('/:id/viewed', handleViewedUpdate);
 
 // 3. On-Demand Tender AI Analysis & Live Refresh
+// When analysis finds the deadline has passed, the tender is auto-expired (deleted). Report that
+// explicitly so the Inbox removes the row, rather than a 404 that left a ghost row behind.
+const EXPIRED_MESSAGE = 'Deadline has passed: tender removed from the Inbox.';
+
 tendersRouter.post('/:id/analyze', async (req, res) => {
   if (!getGeminiApiKey()) {
     return res.status(400).json({ error: 'Google AI Studio API key is not configured. Add it in Sources & Keywords > Data.' });
   }
+  if (!getTenderById(req.params.id)) return res.status(404).json({ error: 'Tender not found' });
   const tender = await analyzeTenderById(req.params.id);
-  if (!tender) return res.status(404).json({ error: 'Tender not found' });
+  if (!tender) return res.json({ success: true, expired: true, id: req.params.id, message: EXPIRED_MESSAGE });
   res.json({ success: true, tender, message: 'Tender analyzed with Google AI.' });
 });
 
 tendersRouter.post('/:id/refresh', async (req, res) => {
+  if (!getTenderById(req.params.id)) return res.status(404).json({ error: 'Tender not found' });
   const tender = await analyzeTenderById(req.params.id, { forceRefresh: true });
-  if (!tender) return res.status(404).json({ error: 'Tender not found' });
+  if (!tender) return res.json({ success: true, expired: true, id: req.params.id, message: EXPIRED_MESSAGE });
   res.json({
     success: true,
     tender,
@@ -144,6 +150,9 @@ tendersRouter.post('/:id/fetch-documents', async (req, res) => {
     const existing = getTenderById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Tender not found' });
     const result = await fetchDocumentsForTender(req.params.id, { forceRefresh: true });
+    if (result.expired) {
+      return res.json({ success: true, expired: true, id: req.params.id, newlyFetched: result.newlyFetched, message: EXPIRED_MESSAGE });
+    }
     res.json({
       success: true,
       tender: result.tender,

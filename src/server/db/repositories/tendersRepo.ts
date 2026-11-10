@@ -89,7 +89,8 @@ export function getAllTenders(filters?: {
   }
 
   if (filters?.excludeExpired) {
-    query += " AND ((closing_date IS NULL AND (publish_date IS NULL OR julianday('now') - julianday(publish_date) <= 60)) OR julianday(closing_date) >= julianday('now') OR is_bookmarked = 1)";
+    // Undated tenders age from their publish date, or from when we first saw them if the portal gave none.
+    query += " AND ((closing_date IS NULL AND (COALESCE(publish_date, created_at) IS NULL OR julianday('now') - julianday(COALESCE(publish_date, created_at)) <= 60)) OR julianday(closing_date) >= julianday('now') OR is_bookmarked = 1)";
   }
 
   if (filters?.bookmarkedOnly) {
@@ -276,7 +277,10 @@ export function getExpiredUnreviewedTenderIds(graceDays: number = 2, limit: numb
       AND (
         (closing_date IS NOT NULL AND julianday(closing_date) <= julianday('now', '-' || ? || ' days'))
         OR
-        (closing_date IS NULL AND publish_date IS NOT NULL AND julianday(publish_date) <= julianday('now', '-90 days'))
+        -- Undated: age from publish date, falling back to first-seen time. Without the fallback,
+        -- undated tenders with no publish date would never expire.
+        (closing_date IS NULL AND COALESCE(publish_date, created_at) IS NOT NULL
+          AND julianday(COALESCE(publish_date, created_at)) <= julianday('now', '-90 days'))
       )
     ORDER BY closing_date ASC
     LIMIT ?

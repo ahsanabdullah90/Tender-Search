@@ -228,7 +228,8 @@ export interface ScrapeResult {
 export const crawlerDeps = {
   fetchHtml: fetchHtmlWithTolerantAgent,
   sleep: (ms: number) => sleep(ms),
-  downloadAndCacheDossier: (tenderId: string, url: string, label?: string) => downloadAndCacheDossier(tenderId, url, label),
+  downloadAndCacheDossier: (tenderId: string, url: string, label?: string) =>
+    downloadAndCacheDossier(tenderId, url, label || deriveDossierLabel(url, 'Tender Document')),
   fetchFileBuffer: (url: string, cookie?: string) => fetchFileBuffer(url, cookie)
 };
 
@@ -1485,7 +1486,9 @@ export async function processAndSaveTender(
       matchScore,
       semanticScore ?? 0,
       tenderEmbeddingBuf,
-      item.publishDate || new Date().toISOString().slice(0, 10),
+      // Unknown publish dates stay NULL: defaulting to today made old archive items look fresh
+      // and reset their age on every re-import. Ageing falls back to created_at instead.
+      item.publishDate || null,
       item.closingDate || null,
       formattedDate,
       item.estimatedValue || null,
@@ -1603,7 +1606,7 @@ export function isGenericListingUrl(url: string, portalDef?: PortalDefinition): 
 export async function fetchDocumentsForTender(
   tenderId: string,
   options: { forceRefresh?: boolean } = {}
-): Promise<{ tender: Tender; dossiers: CachedDossier[]; newlyFetched: number }> {
+): Promise<{ tender: Tender | null; dossiers: CachedDossier[]; newlyFetched: number; expired: boolean }> {
   const tender = getTenderById(tenderId);
   if (!tender) {
     throw new Error(`Tender not found: ${tenderId}`);
@@ -1724,11 +1727,9 @@ export async function fetchDocumentsForTender(
                 if (resolved.isExpired && tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked) {
                   console.log(`[FetchDocs] Tender ${tender.id} extracted deadline is in the past (${resolved.closingDate}). Auto-expiring.`);
                   deleteTenders([tender.id], 'auto-expired');
-                  return {
-                    tender: { ...tender, pipeline_status: 'Deleted' as any },
-                    dossiers,
-                    newlyFetched
-                  };
+                  // Signal the removal explicitly instead of returning a fake 'Deleted' tender,
+                  // which the Inbox kept rendering as a ghost row.
+                  return { tender: null, dossiers, newlyFetched, expired: true };
                 }
                 if (resolved.closingDate && resolved.closingDate !== tender.closing_date) {
                   updates.closing_date = resolved.closingDate;
@@ -1751,7 +1752,8 @@ export async function fetchDocumentsForTender(
   return {
     tender: updatedTender,
     dossiers,
-    newlyFetched
+    newlyFetched,
+    expired: false
   };
 }
 

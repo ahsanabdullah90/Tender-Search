@@ -27,7 +27,9 @@ Goal: move the **Scrape → Document Ingest → Verification → Inbox** pipelin
 
 Small, low-risk fixes that the later phases depend on.
 
-### 0.1 Typecheck gate
+> **Phase 0 status (2026-11-10): complete.** `tsc` 0 errors; `npm run verify` added; 302 server-side and 99 UI tests pass; build succeeds.
+
+### 0.1 Typecheck gate ✅ done
 Fix the 6 existing `tsc --noEmit` errors so "0 errors" can be a real gate:
 - `src/server/scrapers/crawlerEngine.ts:232` (`string | undefined` passed as `string`)
 - `scripts/migrate-dossier-names.ts:24` (`BackupInfo.filename`)
@@ -35,16 +37,15 @@ Fix the 6 existing `tsc --noEmit` errors so "0 errors" can be a real gate:
 
 Add a `verify` script that runs `npm run lint` before `vite build`. `npm run build` alone does not type-check.
 
-### 0.2 Inbox shows expired tenders during the grace window (audit finding 6)
-- `src/App.tsx` (Inbox fetch): send `excludeExpired=true` whenever `inboxMode` is on.
-- Test: a tender that closed 1 hour ago is not returned for the Inbox but is still returned for the Pipeline.
+### 0.2 Inbox shows expired tenders during the grace window (audit finding 6) ✅ done
+- **As built:** fixed on the client instead of sending `excludeExpired=true`, because the Inbox has a deliberate *Show closed (n)* toggle and a *Delete now* action that need the closed rows. The bug was that closed tenders were hidden only while at least one open tender existed, so an all-expired Inbox looked active. Now `InboxScreen.tsx` always hides closed, unbookmarked tenders unless the operator turns on *Show closed*. When everything is closed, the empty state says how many are hidden and offers *Show closed*. The server-side `excludeExpired` filter is kept and also ages undated rows from `created_at`.
 
-### 0.3 Stop defaulting `publish_date` to today
+### 0.3 Stop defaulting `publish_date` to today ✅ done
 - `processAndSaveTender` insert (`item.publishDate || new Date().toISOString().slice(0, 10)`): store `NULL` when unknown.
 - Retention (`getExpiredUnreviewedTenderIds`) and `excludeExpired`: age undated rows on `COALESCE(publish_date, created_at)`. Without this fallback, undated tenders with a null publish date would **never** age out.
-- Check `tenders` has `created_at`; if not, add it in this phase's migration.
+- Check `tenders` has `created_at`; if not, add it in this phase's migration. *(It exists; no migration needed. The Inbox "Newest" sort also falls back to `created_at`.)*
 
-### 0.4 Ghost rows after auto-expire (audit finding 7)
+### 0.4 Ghost rows after auto-expire (audit finding 7) ✅ done (kept the inline `InboxScreen` pane; deleted the unused `TenderDetailPane.tsx`)
 - `POST /api/tenders/:id/fetch-documents`, `/analyze`, `/refresh`: when the tender was auto-expired, return `200 { success: true, expired: true, id }` instead of a fake `pipeline_status: 'Deleted'` tender or a 404.
 - Inbox handlers: on `expired: true`, call `onTenderDeleted(id)` and show "Deadline passed: removed from Inbox".
 - Pick **one** detail pane: `InboxScreen.tsx` renders its own; `src/components/inbox/TenderDetailPane.tsx` is unused. Either wire in `TenderDetailPane` and delete the inline copy, or delete `TenderDetailPane.tsx`. Phase 4 badges go into the survivor only.
