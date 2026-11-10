@@ -181,7 +181,7 @@ export function saveManualDossier(
   };
 }
 
-function fetchFileBuffer(url: string, cookie?: string, redirectCount: number = 0): Promise<Buffer> {
+export function fetchFileBuffer(url: string, cookie?: string, redirectCount: number = 0): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
       return reject(new Error('Too many redirects while downloading dossier'));

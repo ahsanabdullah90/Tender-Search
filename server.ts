@@ -12,6 +12,7 @@ import {
 import { initStartupScheduler, stopStartupScheduler } from './src/server/scheduler.js';
 import { initEmbeddingModel } from './src/server/embeddingService.js';
 import { apiRouter } from './src/server/routes/index.js';
+import { initSessionLogger, closeSessionLogger, requestLoggerMiddleware } from './src/server/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,13 +20,10 @@ const __dirname = path.dirname(__filename);
 export function createApp(): express.Express {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
+  app.use(requestLoggerMiddleware);
 
   // Mount modular API domain routers
   app.use('/api', apiRouter);
-
-  // Serve Cached Local Dossiers (Static mount + direct route)
-  app.use('/dossiers', express.static(DOSSIERS_DIR));
-  app.use('/data/dossiers', express.static(DOSSIERS_DIR));
 
   app.get('/api/dossiers/:tenderId/:filename', (req, res) => {
     const { tenderId, filename } = req.params;
@@ -40,6 +38,10 @@ export function createApp(): express.Express {
       return res.status(404).send('Dossier file not found on disk');
     }
 
+    if (req.query?.download === '1' || req.query?.download === 'true') {
+      return res.download(filePath, filename);
+    }
+
     res.sendFile(filePath);
   });
 
@@ -48,6 +50,7 @@ export function createApp(): express.Express {
 
 // Vite Integration & Server Startup
 export async function startServer() {
+  initSessionLogger();
   initDatabase();
   initStartupScheduler();
   void initEmbeddingModel().then(() => {
@@ -87,6 +90,7 @@ export async function startServer() {
       db.close();
       console.log('[Tender Tracker] Database closed cleanly.');
     } catch {}
+    closeSessionLogger('Clean Shutdown');
     server.close(() => {
       process.exit(0);
     });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDateString, formatClosingDate } from '../../src/server/scrapers/crawlerEngine.js';
+import { parseDateString, formatClosingDate, extractDatesFromText } from '../../src/server/scrapers/crawlerEngine.js';
 
 describe('parseDateString - Pakistani Procurement Date Formats', () => {
   it('parses standard DD/MM/YYYY and DD-MM-YYYY formats', () => {
@@ -114,5 +114,64 @@ describe('formatClosingDate', () => {
     expect(formatted).toContain('PKT');
     expect(formatted).toMatch(/15\s+Nov\s+2026/);
     expect(formatted).toMatch(/(AM|PM)/);
+  });
+});
+
+describe('extractDatesFromText', () => {
+  it('extracts publishDate from Create Date / Creation labels', () => {
+    const res1 = extractDatesFromText('Create Date October 22, 2025 Last Updated October 22, 2025');
+    expect(res1.publishDate).toContain('2025-10-22');
+
+    const res2 = extractDatesFromText('Create Date: 15/11/2026 Submission Deadline: 30/11/2026');
+    expect(res2.publishDate).toContain('2026-11-15');
+    expect(res2.closingDate).toContain('2026-11-30');
+
+    const res3 = extractDatesFromText('Creation Date: 05-Oct-2025 Due Date: 20-Oct-2025');
+    expect(res3.publishDate).toContain('2025-10-05');
+    expect(res3.closingDate).toContain('2025-10-20');
+  });
+});
+
+import { normalizeExtractedDate, reconcileDeadline } from '../../src/server/scrapers/dateParser.js';
+
+describe('Extracted date normalization & deadline reconciliation (audit findings 1 & 4)', () => {
+  const NOW = Date.parse('2026-11-10T09:00:00.000Z');
+
+  it('does not shift explicit-offset ISO timestamps by the PKT offset', () => {
+    expect(parseDateString('2026-12-20T10:00:00Z')).toBe('2026-12-20T10:00:00.000Z');
+    expect(parseDateString('2026-12-20T10:00:00.000Z')).toBe('2026-12-20T10:00:00.000Z');
+    expect(parseDateString('2026-12-20T15:00:00+05:00')).toBe('2026-12-20T10:00:00.000Z');
+    // Round-tripping a stored value is now idempotent
+    const once = parseDateString('20/12/2026 15:00')!;
+    expect(parseDateString(once)).toBe(once);
+  });
+
+  it('normalizes OCR dates and rejects unparseable model output', () => {
+    expect(normalizeExtractedDate('2026-12-20T15:00:00+05:00')).toBe('2026-12-20T10:00:00.000Z');
+    expect(normalizeExtractedDate('20/12/2026')).toBe('2026-12-20T09:00:00.000Z');
+    expect(normalizeExtractedDate('next Friday')).toBeNull();
+    expect(normalizeExtractedDate('Not Available')).toBeNull();
+    expect(normalizeExtractedDate('')).toBeNull();
+    expect(normalizeExtractedDate(null)).toBeNull();
+  });
+
+  it('keeps a later known deadline when an attachment shows an earlier, past one', () => {
+    const r = reconcileDeadline('2026-12-01T09:00:00.000Z', '2026-10-01T09:00:00.000Z', NOW);
+    expect(r.closingDate).toBe('2026-12-01T09:00:00.000Z');
+    expect(r.isExpired).toBe(false);
+    expect(r.isExtension).toBe(false);
+  });
+
+  it('adopts a later extracted deadline as an extension', () => {
+    const r = reconcileDeadline('2026-12-01T09:00:00.000Z', '2026-12-15T09:00:00.000Z', NOW);
+    expect(r.closingDate).toBe('2026-12-15T09:00:00.000Z');
+    expect(r.isExtension).toBe(true);
+    expect(r.isExpired).toBe(false);
+  });
+
+  it('expires only when no later valid deadline is known', () => {
+    expect(reconcileDeadline(null, '2026-10-01T09:00:00Z', NOW).isExpired).toBe(true);
+    expect(reconcileDeadline('garbage', '2026-10-01T09:00:00Z', NOW).isExpired).toBe(true);
+    expect(reconcileDeadline(null, 'garbage', NOW)).toEqual({ closingDate: null, isExtension: false, isExpired: false });
   });
 });

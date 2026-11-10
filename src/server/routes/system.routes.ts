@@ -12,6 +12,9 @@ import {
 } from '../db.js';
 import { CANDIDATE_MODELS, extractTenderFromImage } from '../ocrService.js';
 import { getEmbeddingEngineStatus } from '../embeddingService.js';
+import { listSessionLogs, readSessionLog, getCurrentSessionFilename } from '../logger.js';
+import { getRetentionStatus, runRetentionCycle } from '../retention.js';
+import { reconcileDossiers } from '../dossierStore.js';
 
 export const systemRouter = Router();
 
@@ -104,7 +107,9 @@ systemRouter.get('/storage', (req, res) => {
   res.json({
     ...getStorageStats(),
     ai_configured: Boolean(key),
-    ai_masked_key: maskedKey
+    ai_masked_key: maskedKey,
+    session_logs: listSessionLogs(),
+    retention: getRetentionStatus()
   });
 });
 
@@ -177,3 +182,66 @@ systemRouter.get('/system/embedding-status', (req, res) => {
     totalTenders
   });
 });
+
+// 6. Session Execution Logs (Strict Last 3 Retained)
+const handleListLogs = (req: any, res: any) => {
+  res.json({
+    currentSession: getCurrentSessionFilename(),
+    sessions: listSessionLogs()
+  });
+};
+
+const handleGetLogFile = (req: any, res: any) => {
+  const { filename } = req.params;
+  const content = readSessionLog(filename);
+  if (content === null) {
+    return res.status(404).json({ error: 'Session log file not found or invalid filename' });
+  }
+
+  if (req.query?.download === 'true') {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(content);
+  }
+
+  res.json({ filename, content });
+};
+
+systemRouter.get('/logs', handleListLogs);
+systemRouter.get('/system/logs', handleListLogs);
+systemRouter.get('/logs/:filename', handleGetLogFile);
+systemRouter.get('/system/logs/:filename', handleGetLogFile);
+
+// 7. Automated Retention & Dossier Reconciliation
+const handleGetRetention = (req: any, res: any) => {
+  res.json(getRetentionStatus());
+};
+
+const handleRunRetention = (req: any, res: any) => {
+  const dryRun = req.query.dryRun === 'true' || req.query.dryRun === '1' || req.body?.dryRun === true;
+  const report = runRetentionCycle({ dryRun, forceAll: true });
+  res.json(report);
+};
+
+const handleUpdateRetentionSettings = (req: any, res: any) => {
+  const { autoClean, graceDays, passedDays } = req.body || {};
+  if (autoClean !== undefined) setAppSetting('retention_auto_clean', String(Boolean(autoClean)));
+  if (graceDays !== undefined) setAppSetting('retention_grace_days', String(Math.max(1, Number(graceDays) || 2)));
+  if (passedDays !== undefined) setAppSetting('retention_passed_days', String(Math.max(1, Number(passedDays) || 10)));
+  res.json({ success: true, status: getRetentionStatus() });
+};
+
+const handleReconcileDossiers = (req: any, res: any) => {
+  const dryRun = req.query.dryRun === 'true' || req.query.dryRun === '1' || req.body?.dryRun === true;
+  const result = reconcileDossiers({ dryRun, graceMinutes: 60 });
+  res.json(result);
+};
+
+systemRouter.get('/retention', handleGetRetention);
+systemRouter.get('/system/retention', handleGetRetention);
+systemRouter.post('/retention/run', handleRunRetention);
+systemRouter.post('/system/retention/run', handleRunRetention);
+systemRouter.post('/retention/settings', handleUpdateRetentionSettings);
+systemRouter.post('/system/retention/settings', handleUpdateRetentionSettings);
+systemRouter.post('/dossiers/reconcile', handleReconcileDossiers);
+systemRouter.post('/system/dossiers/reconcile', handleReconcileDossiers);

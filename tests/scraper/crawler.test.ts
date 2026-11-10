@@ -25,6 +25,7 @@ import {
   compactHtmlForAiExtraction,
   isGenericListingUrl,
   analyzeTenderById,
+  fetchDocumentsForTender,
   scoreCandidateTenderLinks,
   healPortalConnection,
   sanitizeBaseOrigin,
@@ -33,7 +34,8 @@ import {
   isValidHealedTendersUrl,
   hasVerifiedTenderYield,
   isNonBidEvaluationOrPlanTitle,
-  crawlerDeps
+  crawlerDeps,
+  currentScanStatus
 } from '../../src/server/scrapers/crawlerEngine.js';
 import http from 'http';
 import * as ocrSvc from '../../src/server/ocrService.js';
@@ -47,12 +49,16 @@ const FIXTURES_DIR = path.resolve(__dirname, '..', 'fixtures', 'portals');
 describe('Crawler Engine & Scraper Pipeline', () => {
   const originalFetch = crawlerDeps.fetchHtml;
   const originalSleep = crawlerDeps.sleep;
+  const originalDownload = crawlerDeps.downloadAndCacheDossier;
+  const originalFetchBuffer = crawlerDeps.fetchFileBuffer;
 
   beforeEach(() => {
     initDatabase();
+    currentScanStatus.isScanning = false;
     db.prepare('DELETE FROM corrigendum_logs').run();
     db.prepare('DELETE FROM pipeline_audit_logs').run();
     db.prepare('DELETE FROM tenders').run();
+    db.prepare('DELETE FROM deleted_tenders').run();
 
     crawlerDeps.sleep = vi.fn().mockResolvedValue(undefined);
   });
@@ -60,6 +66,9 @@ describe('Crawler Engine & Scraper Pipeline', () => {
   afterEach(() => {
     crawlerDeps.fetchHtml = originalFetch;
     crawlerDeps.sleep = originalSleep;
+    crawlerDeps.downloadAndCacheDossier = originalDownload;
+    crawlerDeps.fetchFileBuffer = originalFetchBuffer;
+    currentScanStatus.isScanning = false;
     vi.restoreAllMocks();
   });
 
@@ -544,7 +553,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
       const updated = getAllTenders().find(t => t.title === 'Procurement of Solar PV Modules');
       expect(updated?.reference_no).toBe('OCR-REF-999');
-      expect(updated?.closing_date).toBe('2026-12-25T14:00:00+05:00');
+      // OCR dates are normalized to canonical UTC ISO (14:00 PKT = 09:00 UTC)
+      expect(updated?.closing_date).toBe('2026-12-25T09:00:00.000Z');
 
       spyOcr.mockRestore();
       await new Promise<void>((resolve) => srv.close(() => resolve()));
@@ -780,6 +790,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         }
         throw new Error(`Unexpected URL: ${url}`);
       });
+
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockResolvedValue(null);
 
       await startCrawlerScan('bppra', true);
 
@@ -1093,6 +1105,455 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(ungmRes.items[0].referenceNo).toBe('UNDP-PAK-00921');
       expect(ungmRes.items[0].organization).toContain('UNDP');
       expect(ungmRes.items[0].directUrl).toBe('https://www.ungm.org/Public/Notice/299104');
+    });
+  });
+
+  describe('Document Pre-Fetch & Automated Deadline Enforcement', () => {
+    it('pre-fetches document upfront when tender lacks closingDate and saves extracted metadata with cached_dossier', async () => {
+      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === 'pseb')!;
+      const testItem: RawScrapedItem = {
+        title: 'Procurement of Enterprise Cloud Services',
+        organization: 'Pakistan Software Export Board',
+        directUrl: 'https://techdestination.com/wp-content/uploads/2026/11/Cloud-Procurement.pdf',
+        attachmentUrls: ['https://techdestination.com/wp-content/uploads/2026/11/Cloud-Procurement.pdf']
+      };
+
+      const tracks = [{
+        id: 'track-it',
+        name: 'IT & Software',
+        positive_keywords: ['cloud', 'enterprise'],
+        negative_keywords: [],
+        is_active: 1
+      }];
+
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, label) => {
+        const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+        fs.mkdirSync(tenderDir, { recursive: true });
+        fs.writeFileSync(path.resolve(tenderDir, 'Cloud-Procurement.pdf'), 'fake-pdf-content');
+        return {
+          label: 'Cloud Procurement',
+          localPath: `/api/dossiers/${tenderId}/Cloud-Procurement.pdf`,
+          originalUrl: url,
+          mimeType: 'application/pdf',
+          sha256: 'cloud123sha',
+          sizeBytes: 1024
+        };
+      });
+
+      const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
+        referenceNo: 'PSEB-CLOUD-2026',
+        closingDateISO: '2026-12-20T15:00:00+05:00',
+        closingDateFormatted: '20 Dec 2026, 03:00 PM PKT',
+        summaryScope: 'Full cloud migration and hosting services for Pakistani tech export firms.',
+        estimatedValue: 'PKR 85,000,000',
+        isCorrigendum: false
+      });
+
+      const res = await processAndSaveTender(testItem, portalDef, tracks);
+      expect(res.isNew).toBe(true);
+
+      const saved = getAllTenders().find(t => t.title === testItem.title);
+      expect(saved).toBeDefined();
+      expect(saved?.reference_no).toBe('PSEB-CLOUD-2026');
+      // OCR dates are normalized to canonical UTC ISO before persisting (15:00 PKT = 10:00 UTC)
+      expect(saved?.closing_date).toBe('2026-12-20T10:00:00.000Z');
+      expect(saved?.estimated_value).toBe('PKR 85,000,000');
+      expect(saved?.description).toContain('Full cloud migration');
+      expect(saved?.cached_dossiers?.length).toBe(1);
+      expect(saved?.cached_dossiers?.[0].sha256).toBe('cloud123sha');
+
+      spyOcr.mockRestore();
+    });
+
+    it('strictly skips saving and suppresses tender when extracted document deadline is in the past (Rule B6)', async () => {
+      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === 'pseb')!;
+      const expiredItem: RawScrapedItem = {
+        title: 'RFP for Purchase of Stationery Computer Stationery Items through Close Frame Work Agreement',
+        organization: 'Pakistan Software Export Board (TechDestination)',
+        directUrl: 'https://techdestination.com/wp-content/uploads/2026/10/RFP-for-Purchase-of-Stationery.pdf',
+        attachmentUrls: ['https://techdestination.com/wp-content/uploads/2026/10/RFP-for-Purchase-of-Stationery.pdf']
+      };
+
+      const tracks = [{
+        id: 'track-stationery',
+        name: 'Office Stationery',
+        positive_keywords: ['stationery', 'computer'],
+        negative_keywords: [],
+        is_active: 1
+      }];
+
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, label) => {
+        const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+        fs.mkdirSync(tenderDir, { recursive: true });
+        fs.writeFileSync(path.resolve(tenderDir, 'RFP-for-Purchase-of-Stationery.pdf'), 'fake-pdf-content');
+        return {
+          label: 'Stationery RFP',
+          localPath: `/api/dossiers/${tenderId}/RFP-for-Purchase-of-Stationery.pdf`,
+          originalUrl: url,
+          mimeType: 'application/pdf',
+          sha256: 'stationerysha',
+          sizeBytes: 2048
+        };
+      });
+
+      // Extracted deadline is Oct 22, 2026 (past deadline relative to simulated/current Nov 10, 2026)
+      const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
+        referenceNo: 'FFW10221',
+        closingDateISO: '2026-10-22T15:00:00+05:00',
+        closingDateFormatted: '22 Oct 2026, 03:00 PM PKT',
+        summaryScope: 'Purchase of stationery items for PSEB.',
+        estimatedValue: null,
+        isCorrigendum: false
+      });
+
+      const res = await processAndSaveTender(expiredItem, portalDef, tracks);
+      expect(res.isNew).toBe(false);
+
+      // Verify tender was never inserted into SQLite
+      const foundInDb = getAllTenders().find(t => t.title === expiredItem.title);
+      expect(foundInDb).toBeUndefined();
+
+      // Verify suppression record was created in deleted_tenders
+      const deletedRecord = db.prepare('SELECT * FROM deleted_tenders WHERE id LIKE ?').get('%pseb%') as any;
+      expect(deletedRecord).toBeDefined();
+
+      spyOcr.mockRestore();
+    });
+
+    it('auto-expires unreviewed tender when fetchDocumentsForTender extracts an expired deadline', async () => {
+      // Insert a fresh opportunity without closing date
+      const testId = 'tender-test-fetch-expired-1';
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, title, organization, portal_id, portal_name, direct_url, pipeline_status, closing_date)
+        VALUES (?, ?, 'Tender Under Fetch Review', 'Org', 'fde', 'Federal Directorate of Education', 'https://fde.gov.pk/download/rfp-science.pdf', 'New Opportunity', NULL)
+      `).run(testId, testId);
+
+      crawlerDeps.fetchFileBuffer = vi.fn().mockResolvedValue(Buffer.from('dummy-pdf-content'));
+
+      const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
+        referenceNo: 'FDE-LAB-2025',
+        closingDateISO: '2025-10-30T11:00:00+05:00',
+        closingDateFormatted: '30 Oct 2025, 11:00 AM PKT',
+        summaryScope: 'Expired Science Lab RFP',
+        estimatedValue: null,
+        isCorrigendum: false
+      });
+
+      const result = await fetchDocumentsForTender(testId);
+      expect((result.tender as any).pipeline_status).toBe('Deleted');
+
+      const foundAfter = getTenderById(testId);
+      expect(foundAfter).toBeNull();
+
+      spyOcr.mockRestore();
+    });
+
+    it('auto-expires unreviewed tender when analyzeTenderById extracts an expired deadline', async () => {
+      const testId = 'tender-test-analyze-expired-1';
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, title, organization, portal_id, portal_name, direct_url, pipeline_status, closing_date, cached_dossiers)
+        VALUES (?, ?, 'Tender For AI Analysis', 'Org', 'fde', 'Federal Directorate of Education', 'https://fde.gov.pk/test2', 'New Opportunity', NULL, ?)
+      `).run(
+        testId,
+        testId,
+        JSON.stringify([{
+          label: 'Notice',
+          localPath: `/api/dossiers/${testId}/notice.pdf`,
+          originalUrl: 'https://fde.gov.pk/notice.pdf',
+          mimeType: 'application/pdf',
+          sha256: 'notice999',
+          sizeBytes: 1024
+        }])
+      );
+
+      const tenderDir = path.resolve(DOSSIERS_DIR, testId);
+      fs.mkdirSync(tenderDir, { recursive: true });
+      fs.writeFileSync(path.resolve(tenderDir, 'notice.pdf'), 'pdf-bytes');
+
+      const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
+        referenceNo: 'FDE-SEC-2025',
+        closingDateISO: '2025-12-23T11:00:00+05:00',
+        closingDateFormatted: '23 Dec 2025, 11:00 AM PKT',
+        summaryScope: 'Security guard provision',
+        estimatedValue: null,
+        isCorrigendum: false
+      });
+
+      const result = await analyzeTenderById(testId);
+      expect(result).toBeNull();
+
+      const foundAfter = getTenderById(testId);
+      expect(foundAfter).toBeNull();
+
+      spyOcr.mockRestore();
+    });
+  });
+
+  describe('Pipeline audit regressions (findings 1-5)', () => {
+    const DAY = 86400000;
+    const psebPortal = () => PORTAL_DEFINITIONS.find(p => p.id === 'pseb')!;
+    const itTracks = [{
+      id: 'track-it',
+      name: 'IT & Software',
+      positive_keywords: ['cloud', 'servers'],
+      negative_keywords: [],
+      is_active: 1
+    }];
+    const ocrResult = (closingDateISO: string | null) => ({
+      referenceNo: 'AUDIT-REF-1',
+      closingDateISO,
+      closingDateFormatted: 'Not Available',
+      summaryScope: 'Audit regression scope',
+      estimatedValue: null,
+      isCorrigendum: false,
+      organization: null,
+      title: null
+    } as any);
+    const mockDownloadWritingPdf = () => {
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId: string, url: string) => {
+        const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+        fs.mkdirSync(tenderDir, { recursive: true });
+        fs.writeFileSync(path.resolve(tenderDir, 'notice.pdf'), 'fake-pdf');
+        return {
+          label: 'Notice',
+          localPath: `/api/dossiers/${tenderId}/notice.pdf`,
+          originalUrl: url,
+          mimeType: 'application/pdf',
+          sha256: `sha-${tenderId}`,
+          sizeBytes: 8
+        };
+      });
+    };
+    const insertTender = (id: string, extra: { closing_date?: string | null; status?: string; bookmarked?: number; directUrl?: string; dossiers?: any[] } = {}) => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, title, organization, portal_id, portal_name, direct_url, pipeline_status, closing_date, is_bookmarked, cached_dossiers)
+        VALUES (?, ?, 'Cloud Servers Supply', 'Org', 'fde', 'Federal Directorate of Education', ?, ?, ?, ?, ?)
+      `).run(
+        id, id,
+        extra.directUrl ?? 'https://fde.gov.pk/download/cloud-servers.pdf',
+        extra.status ?? 'New Opportunity',
+        extra.closing_date ?? null,
+        extra.bookmarked ?? 0,
+        JSON.stringify(extra.dossiers ?? [])
+      );
+    };
+
+    // Finding 1
+    it('never persists an unparseable OCR deadline (it would escape B6 and every retention query)', async () => {
+      mockDownloadWritingPdf();
+      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(ocrResult('next Friday'));
+
+      const res = await processAndSaveTender({
+        title: 'Supply of Cloud Servers',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/wp-content/uploads/2026/11/cloud-servers.pdf'
+      }, psebPortal(), itTracks);
+
+      expect(res.isNew).toBe(true);
+      const saved = getAllTenders()[0];
+      expect(saved.closing_date).toBeNull();
+      expect(saved.closing_date_formatted).toBe('Not Available');
+    });
+
+    it('drops an unparseable scraped closing date instead of storing it', async () => {
+      const res = await processAndSaveTender({
+        title: 'Supply of Cloud Servers for Data Centre',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/tenders/cloud-servers',
+        closingDate: 'To be announced'
+      }, psebPortal(), itTracks);
+
+      expect(res.isNew).toBe(true);
+      const row = db.prepare('SELECT closing_date FROM tenders').get() as any;
+      expect(row.closing_date).toBeNull();
+    });
+
+    it('rejects a direct-document tender whose OCR deadline (with Z offset) is in the past', async () => {
+      mockDownloadWritingPdf();
+      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
+        ocrResult(new Date(Date.now() - 3 * DAY).toISOString())
+      );
+
+      const res = await processAndSaveTender({
+        title: 'Cloud Servers Annual Maintenance',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/wp-content/uploads/2026/11/cloud-amc.pdf'
+      }, psebPortal(), itTracks);
+
+      expect(res.isNew).toBe(false);
+      expect(getAllTenders().length).toBe(0);
+      expect((db.prepare('SELECT COUNT(*) c FROM deleted_tenders').get() as any).c).toBe(1);
+    });
+
+    // Finding 2
+    it('keeps undated and still-recent suppression records through retention cleanup', async () => {
+      const { cleanExpiredDeletedTenderRecords } = await import('../../src/server/db.js');
+      const iso = (offsetDays: number) => new Date(Date.now() + offsetDays * DAY).toISOString();
+      const ins = db.prepare(`INSERT INTO deleted_tenders (id, canonical_id, closing_date, deleted_at) VALUES (?, ?, ?, datetime('now', ?))`);
+      ins.run('undated-old', 'undated-old', null, '-30 days');          // previously purged after 7 days
+      ins.run('recently-deleted', 'recently-deleted', iso(-20), '-10 days'); // inside 90-day window
+      ins.run('long-gone', 'long-gone', iso(-200), '-100 days');         // both windows passed
+
+      const removed = cleanExpiredDeletedTenderRecords();
+      expect(removed).toBe(1);
+      const ids = (db.prepare('SELECT id FROM deleted_tenders ORDER BY id').all() as any[]).map(r => r.id);
+      expect(ids).toEqual(['recently-deleted', 'undated-old']);
+    });
+
+    it('does not resurrect a user-deleted undated tender after the retention cycle runs', async () => {
+      const { deleteTenders: repoDelete, cleanExpiredDeletedTenderRecords } = await import('../../src/server/db.js');
+      const item: RawScrapedItem = {
+        title: 'Cloud Servers Procurement Notice',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/tenders/cloud-servers-procurement'
+      };
+      await processAndSaveTender({ ...item }, psebPortal(), itTracks);
+      const id = getAllTenders()[0].id;
+      repoDelete([id], 'user');
+      db.prepare(`UPDATE deleted_tenders SET deleted_at = datetime('now', '-30 days')`).run();
+
+      cleanExpiredDeletedTenderRecords();
+      const again = await processAndSaveTender({ ...item }, psebPortal(), itTracks);
+      expect(again.isNew).toBe(false);
+      expect(getAllTenders().length).toBe(0);
+      // The re-sighting refreshed the suppression record
+      const rec = db.prepare(`SELECT julianday('now') - julianday(deleted_at) AS age FROM deleted_tenders WHERE id = ?`).get(id) as any;
+      expect(rec.age).toBeLessThan(1);
+    });
+
+    // Finding 3
+    it('suppresses tenders deleted from a later pipeline stage so they are not re-imported', async () => {
+      const { deleteTenders: repoDelete } = await import('../../src/server/db.js');
+      const item: RawScrapedItem = {
+        title: 'Cloud Servers Under Review',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/tenders/cloud-servers-review',
+        closingDate: new Date(Date.now() + 20 * DAY).toISOString()
+      };
+      await processAndSaveTender({ ...item }, psebPortal(), itTracks);
+      const id = getAllTenders()[0].id;
+      db.prepare(`UPDATE tenders SET pipeline_status = 'Under Review' WHERE id = ?`).run(id);
+
+      repoDelete([id], 'user');
+      expect(db.prepare('SELECT 1 FROM deleted_tenders WHERE id = ?').get(id)).toBeDefined();
+
+      const again = await processAndSaveTender({ ...item }, psebPortal(), itTracks);
+      expect(again.isNew).toBe(false);
+      expect(getTenderById(id)).toBeNull();
+    });
+
+    // Finding 4
+    it('keeps the listing deadline when a direct document OCR shows an older, past deadline', async () => {
+      mockDownloadWritingPdf();
+      const listingDeadline = new Date(Date.now() + 15 * DAY).toISOString();
+      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
+        ocrResult(new Date(Date.now() - 10 * DAY).toISOString())
+      );
+
+      const res = await processAndSaveTender({
+        title: 'Cloud Servers Extended Notice',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/wp-content/uploads/2026/11/cloud-extended.pdf',
+        closingDate: listingDeadline
+      }, psebPortal(), itTracks);
+
+      expect(res.isNew).toBe(true);
+      expect(getAllTenders()[0].closing_date).toBe(listingDeadline);
+    });
+
+    it('background attachment OCR with a past date does not delete a tender with a later known deadline', async () => {
+      mockDownloadWritingPdf();
+      const listingDeadline = new Date(Date.now() + 15 * DAY).toISOString();
+      const ocrSpy = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
+        ocrResult(new Date(Date.now() - 10 * DAY).toISOString())
+      );
+
+      await processAndSaveTender({
+        title: 'Cloud Servers With Annexure',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/tenders/cloud-annexure',
+        closingDate: listingDeadline,
+        attachmentUrls: ['https://techdestination.com/wp-content/uploads/2026/11/annexure.pdf']
+      }, psebPortal(), itTracks);
+
+      // Tender has no reference_no, so the background path runs OCR on the attachment
+      await vi.waitFor(() => expect(ocrSpy).toHaveBeenCalled());
+      await new Promise(r => setTimeout(r, 20));
+
+      const saved = getAllTenders();
+      expect(saved.length).toBe(1);
+      expect(saved[0].closing_date).toBe(listingDeadline);
+    });
+
+    it('fetch-documents does not expire a tender with a future deadline because an attachment is older', async () => {
+      const future = new Date(Date.now() + 12 * DAY).toISOString();
+      insertTender('tender-audit-fetch-1', { closing_date: future });
+      crawlerDeps.fetchFileBuffer = vi.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake'));
+      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
+        ocrResult(new Date(Date.now() - 30 * DAY).toISOString())
+      );
+
+      const result = await fetchDocumentsForTender('tender-audit-fetch-1');
+      expect(result.tender.pipeline_status).toBe('New Opportunity');
+      expect(getTenderById('tender-audit-fetch-1')?.closing_date).toBe(future);
+    });
+
+    it('analyze does not auto-expire a bookmarked tender', async () => {
+      const id = 'tender-audit-analyze-bm';
+      insertTender(id, {
+        bookmarked: 1,
+        directUrl: 'https://fde.gov.pk/tenders/42',
+        dossiers: [{ label: 'Notice', localPath: `/api/dossiers/${id}/notice.pdf`, originalUrl: 'https://fde.gov.pk/notice.pdf', mimeType: 'application/pdf', sha256: 'bm1', sizeBytes: 8 }]
+      });
+      fs.mkdirSync(path.resolve(DOSSIERS_DIR, id), { recursive: true });
+      fs.writeFileSync(path.resolve(DOSSIERS_DIR, id, 'notice.pdf'), 'pdf');
+      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
+        ocrResult(new Date(Date.now() - 5 * DAY).toISOString())
+      );
+
+      const result = await analyzeTenderById(id);
+      expect(result).not.toBeNull();
+      expect(getTenderById(id)).not.toBeNull();
+    });
+
+    // Finding 5
+    it('B6b keeps an old-published tender that has a valid future deadline', async () => {
+      const res = await processAndSaveTender({
+        title: 'Cloud Servers Re-advertised',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/tenders/cloud-readvertised',
+        publishDate: new Date(Date.now() - 120 * DAY).toISOString(),
+        closingDate: new Date(Date.now() + 10 * DAY).toISOString()
+      }, psebPortal(), itTracks);
+      expect(res.isNew).toBe(true);
+    });
+
+    it('B6b rejects and suppresses an undated tender published over 90 days ago', async () => {
+      const res = await processAndSaveTender({
+        title: 'Cloud Servers Stale Notice',
+        organization: 'PSEB',
+        directUrl: 'https://techdestination.com/tenders/cloud-stale',
+        publishDate: new Date(Date.now() - 120 * DAY).toISOString()
+      }, psebPortal(), itTracks);
+      expect(res.isNew).toBe(false);
+      expect(getAllTenders().length).toBe(0);
+      expect((db.prepare('SELECT COUNT(*) c FROM deleted_tenders').get() as any).c).toBe(1);
+    });
+
+    it('B6c uses a rolling year window rather than a hard-coded 2010-2025 range', async () => {
+      const { referencesOnlyPriorYears } = await import('../../src/server/scrapers/crawlerEngine.js');
+      const jan2027 = new Date('2027-01-15T00:00:00Z');
+      const mar2026 = new Date('2026-03-15T00:00:00Z');
+      const nov2026 = new Date('2026-11-10T00:00:00Z');
+
+      expect(referencesOnlyPriorYears('Annual Tender 2026', jan2027)).toBe(true); // old regex missed this
+      expect(referencesOnlyPriorYears('Annual Tender 2026', nov2026)).toBe(false);
+      expect(referencesOnlyPriorYears('Tender 2025 /uploads/2025/12/x.pdf', nov2026)).toBe(true);
+      expect(referencesOnlyPriorYears('Replacing 2024 equipment, delivery 2026', nov2026)).toBe(false);
+      expect(referencesOnlyPriorYears('Supply for FY 2025-26', mar2026)).toBe(false);
+      expect(referencesOnlyPriorYears('Supply for FY 2025-26', nov2026)).toBe(true);
+      expect(referencesOnlyPriorYears('RFP_2025_final.pdf', nov2026)).toBe(true); // underscore-delimited years
+      expect(referencesOnlyPriorYears('Cloud servers, no year', nov2026)).toBe(false);
     });
   });
 });

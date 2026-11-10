@@ -1,12 +1,15 @@
 import { db, backupDatabase, getPortalHealthList, updatePortalHealth } from './db.js';
 import { startCrawlerScan, getActivePortalsList } from './scrapers/crawlerEngine.js';
+import { runRetentionCycle } from './retention.js';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
+let retentionInterval: NodeJS.Timeout | null = null;
 let lastDailyHealthCheck: number = 0;
 
 export const schedulerDeps = {
   startCrawlerScan: (portalId?: string, awaitCompletion?: boolean) => startCrawlerScan(portalId, awaitCompletion),
-  backupDatabase: () => backupDatabase()
+  backupDatabase: () => backupDatabase(),
+  runRetentionCycle: (opts?: any) => runRetentionCycle(opts)
 };
 
 export function initStartupScheduler() {
@@ -25,6 +28,21 @@ export function initStartupScheduler() {
 
   // 1. Run database backup on startup if needed
   schedulerDeps.backupDatabase().catch(err => console.error('Startup backup error:', err));
+
+  // 2. Initial retention cycle & 5-minute interval for Pass-slimming and cleanup
+  try {
+    schedulerDeps.runRetentionCycle();
+  } catch (err) {
+    console.warn('[Tender Tracker Scheduler] Initial retention cycle error:', err);
+  }
+  if (retentionInterval) clearInterval(retentionInterval);
+  retentionInterval = setInterval(() => {
+    try {
+      schedulerDeps.runRetentionCycle();
+    } catch (err) {
+      console.warn('[Tender Tracker Scheduler] Retention cycle error:', err);
+    }
+  }, 5 * 60 * 1000);
 
   // 2. Check if a catch-up scan is required
   checkAndTriggerCatchUpScan();
@@ -50,6 +68,10 @@ export function stopStartupScheduler() {
   if (schedulerInterval) {
     clearInterval(schedulerInterval);
     schedulerInterval = null;
+  }
+  if (retentionInterval) {
+    clearInterval(retentionInterval);
+    retentionInterval = null;
   }
 }
 

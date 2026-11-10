@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { db, BACKUPS_DIR, DOSSIERS_DIR } from '../connection.js';
+import { deleteTenders } from './tendersRepo.js';
 
 export function getAppSetting(key: string): string | null {
   try {
@@ -87,13 +88,13 @@ export async function backupDatabase(): Promise<{ success: boolean; path?: strin
   try {
     await db.backup(backupPath);
     console.log(`[Tender Tracker DB] Daily backup generated: ${backupPath}`);
-    // Prune backups older than 14 days
+    // Prune backups older than 15 days
     const files = fs.readdirSync(BACKUPS_DIR);
     const now = Date.now();
     for (const f of files) {
       const filePath = path.resolve(BACKUPS_DIR, f);
       const stat = fs.statSync(filePath);
-      if (now - stat.mtimeMs > 14 * 24 * 60 * 60 * 1000) {
+      if (now - stat.mtimeMs > 15 * 24 * 60 * 60 * 1000) {
         fs.unlinkSync(filePath);
       }
     }
@@ -179,32 +180,17 @@ export function pruneDossiersForPassed(): { freed_bytes: number; tenders: number
  * - unreviewedOnly = false: Complete factory wipe of all tenders.
  */
 export function clearAllTenders(unreviewedOnly: boolean = false) {
-  const wipeTx = db.transaction(() => {
-    if (unreviewedOnly) {
-      // Delete only New Opportunity and Passed tenders that are NOT bookmarked
-      db.prepare(`
-        DELETE FROM corrigendum_logs 
-        WHERE tender_id IN (
-          SELECT id FROM tenders WHERE pipeline_status IN ('New Opportunity', 'Passed') AND is_bookmarked = 0
-        )
-      `).run();
-      db.prepare(`
-        DELETE FROM pipeline_audit_logs 
-        WHERE tender_id IN (
-          SELECT id FROM tenders WHERE pipeline_status IN ('New Opportunity', 'Passed') AND is_bookmarked = 0
-        )
-      `).run();
-      db.prepare(`
-        DELETE FROM tenders 
-        WHERE pipeline_status IN ('New Opportunity', 'Passed') AND is_bookmarked = 0
-      `).run();
-    } else {
-      db.prepare('DELETE FROM corrigendum_logs').run();
-      db.prepare('DELETE FROM pipeline_audit_logs').run();
-      db.prepare('DELETE FROM tenders').run();
-    }
-  });
+  let ids: string[];
+  if (unreviewedOnly) {
+    const rows = db.prepare(`
+      SELECT id FROM tenders WHERE pipeline_status IN ('New Opportunity', 'Passed') AND is_bookmarked = 0
+    `).all() as { id: string }[];
+    ids = rows.map(r => r.id);
+  } else {
+    const rows = db.prepare('SELECT id FROM tenders').all() as { id: string }[];
+    ids = rows.map(r => r.id);
+  }
 
-  wipeTx();
+  deleteTenders(ids, 'user');
   return true;
 }

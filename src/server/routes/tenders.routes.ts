@@ -9,10 +9,12 @@ import {
   markTenderViewed,
   updateTenderFields,
   createManualTender,
-  getAllDomainTracks
+  getAllDomainTracks,
+  deleteTenders,
+  getPortalTenderSummary
 } from '../db.js';
 import { TENDER_STATUSES } from '../../types.js';
-import { analyzeTenderById, matchTracks, parseDateString, formatClosingDate } from '../scrapers/crawlerEngine.js';
+import { analyzeTenderById, fetchDocumentsForTender, matchTracks, parseDateString, formatClosingDate } from '../scrapers/crawlerEngine.js';
 import { saveManualDossier } from '../dossierManager.js';
 import { extractTenderFromImage } from '../ocrService.js';
 import { getGeminiApiKey } from '../db.js';
@@ -22,16 +24,27 @@ export const tendersRouter = Router();
 // 1. Tenders Listing & Filtering
 tendersRouter.get('/', (req, res) => {
   try {
-    const { track, status, search, bookmarkedOnly, corrigendumOnly, unreadOnly } = req.query;
+    const { track, portal, portalId, status, search, bookmarkedOnly, corrigendumOnly, unreadOnly, excludeExpired } = req.query;
     const tenders = getAllTenders({
       track: track as string,
+      portalId: (portal || portalId) as string,
       status: status as string,
       search: search as string,
       bookmarkedOnly: bookmarkedOnly === 'true',
       corrigendumOnly: corrigendumOnly === 'true',
-      unreadOnly: unreadOnly === 'true'
+      unreadOnly: unreadOnly === 'true',
+      excludeExpired: excludeExpired === 'true'
     });
     res.json(tenders);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+tendersRouter.get('/portal-summary', (req, res) => {
+  try {
+    const summary = getPortalTenderSummary();
+    res.json(summary);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -41,6 +54,13 @@ tendersRouter.get('/:id', (req, res) => {
   const tender = getTenderById(req.params.id);
   if (!tender) return res.status(404).json({ error: 'Tender not found' });
   res.json(tender);
+});
+
+tendersRouter.delete('/:id', (req, res) => {
+  const tender = getTenderById(req.params.id);
+  if (!tender) return res.status(404).json({ error: 'Tender not found' });
+  const result = deleteTenders([req.params.id], 'user');
+  res.json({ success: true, deleted: result.deletedCount, id: req.params.id });
 });
 
 // 2. Status & Pipeline Updates
@@ -117,6 +137,25 @@ tendersRouter.post('/:id/refresh', async (req, res) => {
       ? 'Tender information refreshed from portal and summarized with AI.'
       : 'Tender information refreshed from portal.'
   });
+});
+
+tendersRouter.post('/:id/fetch-documents', async (req, res) => {
+  try {
+    const existing = getTenderById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Tender not found' });
+    const result = await fetchDocumentsForTender(req.params.id, { forceRefresh: true });
+    res.json({
+      success: true,
+      tender: result.tender,
+      dossiers: result.dossiers,
+      newlyFetched: result.newlyFetched,
+      message: result.newlyFetched > 0
+        ? `Successfully fetched ${result.newlyFetched} document(s) from portal.`
+        : 'Checked portal; no new documents found.'
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 tendersRouter.post('/:id/attachments', async (req, res) => {

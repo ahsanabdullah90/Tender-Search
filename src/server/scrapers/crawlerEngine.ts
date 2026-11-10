@@ -1,9 +1,10 @@
-import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields, getGeminiApiKey } from '../db.js';
+import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields, getGeminiApiKey, deleteTenders, safeJsonParse, isTenderSuppressed, recordTenderSuppression } from '../db.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../deduplicator.js';
 import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
-import { ScanStatus, Tender } from '../../types.js';
-import { downloadAndCacheDossier, deriveDossierLabel } from '../dossierManager.js';
+import { ScanStatus, Tender, CachedDossier } from '../../types.js';
+import { downloadAndCacheDossier, deriveDossierLabel, fetchFileBuffer } from '../dossierManager.js';
+import { purgeTenderFiles, saveTenderDocument, getPortalFileCode } from '../dossierStore.js';
 import { extractTenderFromImage, summarizeTenderTextWithAI, extractTenderListFromHtmlWithAI, discoverTenderLinkWithAI } from '../ocrService.js';
 import {
   buildTrackEmbeddingText,
@@ -227,7 +228,9 @@ export interface ScrapeResult {
 
 export const crawlerDeps = {
   fetchHtml: fetchHtmlWithTolerantAgent,
-  sleep: (ms: number) => sleep(ms)
+  sleep: (ms: number) => sleep(ms),
+  downloadAndCacheDossier: (tenderId: string, url: string, label?: string) => downloadAndCacheDossier(tenderId, url, label),
+  fetchFileBuffer: (url: string, cookie?: string) => fetchFileBuffer(url, cookie)
 };
 
 export {
@@ -241,6 +244,8 @@ export {
 import {
   parseDateString,
   formatClosingDate,
+  normalizeExtractedDate,
+  reconcileDeadline,
   DATE_CANDIDATE_PATTERN,
   extractDatesFromText
 } from './dateParser.js';
@@ -1043,6 +1048,31 @@ async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string
     }
   }
 
+  // Enrich dates for undated items from detail pages (e.g. WPDM / FDE cards where dates exist on detail page)
+  const undatedItems = result.items.filter(it => !it.closingDate && !it.publishDate && it.directUrl && !isGenericListingUrl(it.directUrl, portal));
+  if (undatedItems.length > 0 && undatedItems.length <= 20) {
+    await Promise.allSettled(undatedItems.map(async (it) => {
+      try {
+        const detailHtml = await fetchHtmlWithTolerantAgent(it.directUrl);
+        const detail$ = cheerio.load(detailHtml);
+        const dateBlockText = detail$('.date-box, [class*="date"], [class*="meta"], *:contains("Create Date"), *:contains("Creation Date")').text().replace(/\s+/g, ' ');
+        const extracted = extractDatesFromText(dateBlockText);
+        if (extracted.publishDate && !it.publishDate) it.publishDate = extracted.publishDate;
+        if (extracted.closingDate && !it.closingDate) it.closingDate = extracted.closingDate;
+
+        // Collect download links from detail page if attachments not yet populated (e.g. FDE WPDM packages)
+        detail$('a[href*="wpdmdl="], a.wpdm-download-link, a[href$=".pdf"]').each((_, aEl) => {
+          const href = detail$(aEl).attr('href');
+          if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+            const absUrl = resolvePortalUrl(href, portal);
+            if (!it.attachmentUrls) it.attachmentUrls = [];
+            if (!it.attachmentUrls.includes(absUrl)) it.attachmentUrls.push(absUrl);
+          }
+        });
+      } catch {}
+    }));
+  }
+
   return result;
 }
 
@@ -1209,6 +1239,26 @@ export function matchTracks(
 /**
  * Matches scraped tender against active domain tracks and handles deduplication
  */
+/**
+ * Rule B6c helper: true when the text mentions at least one year from 2010 up to last calendar
+ * year and no current or future year. The window moves with the clock (it used to be hard-coded
+ * to 2010-2025, so prior-year 2026 notices would have slipped through from January 2027).
+ */
+export function referencesOnlyPriorYears(text: string, now: Date = new Date()): boolean {
+  const currentYear = now.getFullYear();
+  const years = Array.from(text.matchAll(/(?<!\d)(20\d{2})(?!\d)/g), m => parseInt(m[1], 10));
+  // Fiscal-year spans such as "FY 2025-26" run July-June, so they count as current until 30 June
+  // of their end year (2026), and as a prior year from July onwards.
+  for (const m of text.matchAll(/(?<!\d)20\d{2}\s*[-/–]\s*(\d{2})(?!\d)/g)) {
+    const fyEndYear = 2000 + parseInt(m[1], 10);
+    const fyStillOpen = fyEndYear > currentYear || (fyEndYear === currentYear && now.getMonth() < 6);
+    years.push(fyStillOpen ? currentYear : currentYear - 1);
+  }
+  const inRange = years.filter(y => y >= 2010 && y <= currentYear + 5);
+  if (inRange.length === 0) return false;
+  return inRange.some(y => y < currentYear) && !inRange.some(y => y >= currentYear);
+}
+
 export async function processAndSaveTender(
   item: RawScrapedItem,
   portal: PortalDefinition,
@@ -1234,7 +1284,7 @@ export async function processAndSaveTender(
     embedding: tenderEmbeddingBuf
   });
 
-  const formattedDate = formatClosingDate(item.closingDate || null);
+  let formattedDate = formatClosingDate(item.closingDate || null);
 
   if (dedupMatch.isDuplicate && dedupMatch.matchedTenderId) {
     // Append secondary source to existing tender
@@ -1251,9 +1301,13 @@ export async function processAndSaveTender(
         db.prepare('UPDATE tenders SET secondary_sources = ? WHERE id = ?').run(JSON.stringify(sources), dedupMatch.matchedTenderId);
       }
 
-      // Check for Corrigendum (Date extension)
+      // Check for Corrigendum (Date extension). Compare instants, not strings, so the same deadline
+      // in a different ISO spelling is not logged as a change, and only a LATER deadline counts:
+      // an earlier/past date from a re-scan must not drag an open tender's deadline backwards.
       let corrigendumDetected = false;
-      if (item.closingDate && existing.closing_date && item.closingDate !== existing.closing_date) {
+      const scannedMs = item.closingDate ? new Date(item.closingDate).getTime() : NaN;
+      const existingMs = existing.closing_date ? new Date(existing.closing_date).getTime() : NaN;
+      if (!isNaN(scannedMs) && !isNaN(existingMs) && scannedMs > existingMs) {
         corrigendumDetected = true;
         const updateTx = db.transaction(() => {
           db.prepare(`
@@ -1278,19 +1332,123 @@ export async function processAndSaveTender(
     }
   }
 
-  // B6: Skip saving new opportunities if closing date is already in the past
-  if (item.closingDate) {
-    const closingTime = new Date(item.closingDate).getTime();
-    if (!isNaN(closingTime) && closingTime < Date.now()) {
-      return { isNew: false, hasCorrigendum: false, matched: true };
-    }
-  }
-
   // Deterministic, collision-free tender primary key based on SHA-256 hash
   const idMaterial = `${portal.id}:${item.referenceNo || ''}:${normalizeText(item.title)}:${item.directUrl}`;
   const tenderHash = crypto.createHash('sha256').update(idMaterial).digest('hex').slice(0, 16);
   const tenderId = `tender-${portal.id}-${tenderHash}`;
   const canonicalId = dedupMatch.canonicalId || tenderId;
+
+  // Check if tender was manually deleted or auto-expired (suppression list stops re-adding)
+  try {
+    if (isTenderSuppressed(tenderId, canonicalId)) {
+      return { isNew: false, hasCorrigendum: false, matched: true };
+    }
+  } catch {}
+
+  // Never carry an unparseable closing date forward: B6 would skip it (NaN) and SQLite's
+  // julianday() would return NULL, exempting the tender from every expiry/retention query.
+  if (item.closingDate && isNaN(new Date(item.closingDate).getTime())) {
+    item.closingDate = normalizeExtractedDate(item.closingDate);
+    formattedDate = formatClosingDate(item.closingDate || null);
+  }
+
+  // Collect all downloadable attachment candidates (including direct document URLs)
+  const isDirectDoc = Boolean(
+    item.directUrl &&
+    (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(item.directUrl) || /[?&]wpdmdl=\d+/i.test(item.directUrl))
+  );
+  const attachmentCandidates: string[] = [...(item.attachmentUrls || [])];
+  if (isDirectDoc && !attachmentCandidates.includes(item.directUrl)) {
+    attachmentCandidates.unshift(item.directUrl);
+  }
+
+  // Pre-save document fetch & metadata extraction:
+  // When tender lacks closing date, reference, or description and has documents,
+  // fetch primary document upfront so real deadlines and scopes are known before committing to DB.
+  let preCachedDossier: CachedDossier | null = null;
+  if ((!item.closingDate || isDirectDoc) && attachmentCandidates.length > 0) {
+    const primaryUrl = attachmentCandidates[0];
+    const isImage = /\.(jpe?g|png|webp)(\?|$)/i.test(primaryUrl);
+    const label = isImage ? 'Tender Notice Image' : deriveDossierLabel(primaryUrl, `${item.title.slice(0, 30)}_Doc`);
+    try {
+      const doc = await crawlerDeps.downloadAndCacheDossier(tenderId, primaryUrl, label);
+      if (doc) {
+        preCachedDossier = doc;
+        if (doc.mimeType.startsWith('image/') || doc.mimeType === 'application/pdf') {
+          try {
+            const fs = await import('fs');
+            const path = await import('path');
+            const filename = decodeURIComponent(path.basename(doc.localPath));
+            const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
+            if (fs.existsSync(diskPath)) {
+              const imgBuffer = fs.readFileSync(diskPath);
+              const ocrResult = await extractTenderFromImage(imgBuffer, doc.mimeType);
+              if (ocrResult) {
+                // Normalize the model's date and keep the later of listing vs document deadline,
+                // so a stale attachment cannot override an extended listing deadline.
+                const resolved = reconcileDeadline(item.closingDate, ocrResult.closingDateISO);
+                if (resolved.closingDate && resolved.closingDate !== item.closingDate) {
+                  item.closingDate = resolved.closingDate;
+                  formattedDate = ocrResult.closingDateFormatted || formatClosingDate(resolved.closingDate);
+                }
+                if (ocrResult.referenceNo && !item.referenceNo) {
+                  item.referenceNo = ocrResult.referenceNo;
+                }
+                if (ocrResult.summaryScope && (!item.description || item.description === item.title)) {
+                  item.description = ocrResult.summaryScope;
+                }
+                if (ocrResult.estimatedValue && !item.estimatedValue) {
+                  item.estimatedValue = ocrResult.estimatedValue;
+                }
+              }
+            }
+          } catch (ocrErr: any) {
+            console.warn(`[OCR] Ingest extraction error for ${tenderId}:`, ocrErr.message);
+          }
+        }
+      }
+    } catch (fetchErr: any) {
+      console.warn(`[CrawlIngest] Document pre-fetch warning for ${tenderId}:`, fetchErr.message);
+    }
+  }
+
+  // B6: Skip saving new opportunities if closing date is already in the past
+  if (item.closingDate) {
+    const closingTime = new Date(item.closingDate).getTime();
+    if (!isNaN(closingTime) && closingTime < Date.now()) {
+      if (preCachedDossier) {
+        purgeTenderFiles([tenderId]);
+      }
+      try {
+        recordTenderSuppression(tenderId, canonicalId, item.closingDate);
+      } catch {}
+      return { isNew: false, hasCorrigendum: false, matched: true };
+    }
+  }
+
+  // B6b: Skip historical tenders published >90 days ago that have no known closing date.
+  // A tender with a valid future deadline (e.g. one extended by corrigendum) is always kept.
+  // Past deadlines were already rejected by B6 above.
+  if (!item.closingDate && item.publishDate) {
+    const pubTime = new Date(item.publishDate).getTime();
+    if (!isNaN(pubTime) && (Date.now() - pubTime > 90 * 86400000)) {
+      if (preCachedDossier) {
+        purgeTenderFiles([tenderId]);
+      }
+      // Suppress so the next scan does not re-download and re-OCR the same stale notice.
+      try { recordTenderSuppression(tenderId, canonicalId, null); } catch {}
+      return { isNew: false, hasCorrigendum: false, matched: true };
+    }
+  }
+
+  // B6c: Skip undated tenders that only reference previous calendar years (e.g. "Tender 2025")
+  if (!item.closingDate && referencesOnlyPriorYears(`${item.title} ${item.directUrl}`)) {
+    if (preCachedDossier) {
+      purgeTenderFiles([tenderId]);
+    }
+    try { recordTenderSuppression(tenderId, canonicalId, null); } catch {}
+    return { isNew: false, hasCorrigendum: false, matched: true };
+  }
 
   // Insert as new Tender wrapped in a transaction
   const insertTx = db.transaction(() => {
@@ -1298,14 +1456,18 @@ export async function processAndSaveTender(
       INSERT INTO tenders (
         id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
         domain_tracks, matched_keywords, match_score, semantic_score, embedding, publish_date, closing_date, closing_date_formatted,
-        estimated_value, location, description, has_corrigendum, pipeline_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity')
+        estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity')
       ON CONFLICT(id) DO UPDATE SET
         match_score = excluded.match_score,
         semantic_score = excluded.semantic_score,
         embedding = COALESCE(excluded.embedding, tenders.embedding),
         domain_tracks = excluded.domain_tracks,
         matched_keywords = excluded.matched_keywords,
+        cached_dossiers = CASE 
+          WHEN excluded.cached_dossiers != '[]' THEN excluded.cached_dossiers 
+          ELSE tenders.cached_dossiers 
+        END,
         updated_at = CURRENT_TIMESTAMP
     `);
 
@@ -1329,22 +1491,39 @@ export async function processAndSaveTender(
       item.estimatedValue || null,
       item.location || 'Pakistan',
       item.description ?? '',
+      preCachedDossier ? JSON.stringify([preCachedDossier]) : '[]',
       item.isCorrigendum ? 1 : 0
     );
   });
 
   insertTx();
 
-  // If tender notice has downloadable attachments, cache first attachment in background
-  if (item.attachmentUrls && item.attachmentUrls.length > 0) {
-    const firstUrl = item.attachmentUrls[0];
+  // If there are secondary or remaining attachments, download in background
+  const remainingUrls = preCachedDossier
+    ? attachmentCandidates.filter(u => u !== attachmentCandidates[0])
+    : attachmentCandidates;
+
+  if (remainingUrls.length > 0) {
+    const firstUrl = remainingUrls[0];
     const isImage = /\.(jpe?g|png|webp)(\?|$)/i.test(firstUrl);
     const label = isImage ? 'Tender Notice Image' : deriveDossierLabel(firstUrl, `${item.title.slice(0, 30)}_Doc`);
-    downloadAndCacheDossier(tenderId, firstUrl, label).then(async (doc) => {
+    crawlerDeps.downloadAndCacheDossier(tenderId, firstUrl, label).then(async (doc) => {
       if (doc) {
-        db.prepare('UPDATE tenders SET cached_dossiers = ? WHERE id = ?').run(JSON.stringify([doc]), tenderId);
+        // Late-download guard (Finding F5): check if tender was deleted or passed while download was in-flight
+        const currentTender = db.prepare('SELECT id, pipeline_status, is_bookmarked, cached_dossiers, closing_date, reference_no, description, estimated_value FROM tenders WHERE id = ?').get(tenderId) as any;
+        if (!currentTender || currentTender.pipeline_status === 'Passed') {
+          purgeTenderFiles([tenderId]);
+          return;
+        }
+
+        const existingDossiers: CachedDossier[] = safeJsonParse(currentTender.cached_dossiers, []);
+        if (!existingDossiers.some(d => d.sha256 === doc.sha256 || d.localPath === doc.localPath)) {
+          existingDossiers.push(doc);
+          db.prepare('UPDATE tenders SET cached_dossiers = ? WHERE id = ?').run(JSON.stringify(existingDossiers), tenderId);
+        }
+
         // If document is an image or PDF and tender lacks date, reference, or summary, attempt Gemini extraction
-        if ((doc.mimeType.startsWith('image/') || doc.mimeType === 'application/pdf') && (!item.closingDate || !item.referenceNo || !item.description)) {
+        if ((doc.mimeType.startsWith('image/') || doc.mimeType === 'application/pdf') && (!currentTender.closing_date || !currentTender.reference_no || !currentTender.description)) {
           try {
             const fs = await import('fs');
             const path = await import('path');
@@ -1354,20 +1533,30 @@ export async function processAndSaveTender(
               const imgBuffer = fs.readFileSync(diskPath);
               const ocrResult = await extractTenderFromImage(imgBuffer, doc.mimeType);
               if (ocrResult) {
-                if (ocrResult.referenceNo && !item.referenceNo) {
+                if (ocrResult.closingDateISO) {
+                  // A past date in one attachment only expires the tender if no later deadline is
+                  // known, and never touches bookmarked or already-triaged tenders.
+                  const resolved = reconcileDeadline(currentTender.closing_date, ocrResult.closingDateISO);
+                  if (resolved.isExpired && currentTender.pipeline_status === 'New Opportunity' && !currentTender.is_bookmarked) {
+                    console.log(`[OCR] Tender ${tenderId} deadline is in the past (${resolved.closingDate}). Auto-expiring.`);
+                    deleteTenders([tenderId], 'auto-expired');
+                    return;
+                  }
+                  if (!currentTender.closing_date && resolved.closingDate) {
+                    db.prepare('UPDATE tenders SET closing_date = ?, closing_date_formatted = ? WHERE id = ?').run(
+                      resolved.closingDate,
+                      ocrResult.closingDateFormatted || formatClosingDate(resolved.closingDate),
+                      tenderId
+                    );
+                  }
+                }
+                if (ocrResult.referenceNo && !currentTender.reference_no) {
                   db.prepare('UPDATE tenders SET reference_no = ? WHERE id = ?').run(ocrResult.referenceNo, tenderId);
                 }
-                if (ocrResult.closingDateISO && !item.closingDate) {
-                  db.prepare('UPDATE tenders SET closing_date = ?, closing_date_formatted = ? WHERE id = ?').run(
-                    ocrResult.closingDateISO,
-                    ocrResult.closingDateFormatted || formatClosingDate(ocrResult.closingDateISO),
-                    tenderId
-                  );
-                }
-                if (ocrResult.summaryScope && !item.description) {
+                if (ocrResult.summaryScope && (!currentTender.description || currentTender.description === item.title)) {
                   db.prepare('UPDATE tenders SET description = ? WHERE id = ?').run(ocrResult.summaryScope, tenderId);
                 }
-                if (ocrResult.estimatedValue && !item.estimatedValue) {
+                if (ocrResult.estimatedValue && !currentTender.estimated_value) {
                   db.prepare('UPDATE tenders SET estimated_value = ? WHERE id = ?').run(ocrResult.estimatedValue, tenderId);
                 }
               }
@@ -1405,6 +1594,164 @@ export function isGenericListingUrl(url: string, portalDef?: PortalDefinition): 
   } catch {
     return false;
   }
+}
+
+/**
+ * On-demand document scraper that inspects a tender's direct_url and downloads/caches attachments
+ */
+export async function fetchDocumentsForTender(
+  tenderId: string,
+  options: { forceRefresh?: boolean } = {}
+): Promise<{ tender: Tender; dossiers: CachedDossier[]; newlyFetched: number }> {
+  const tender = getTenderById(tenderId);
+  if (!tender) {
+    throw new Error(`Tender not found: ${tenderId}`);
+  }
+  if (tender.pipeline_status === 'Passed') {
+    throw new Error(`Cannot fetch documents for passed tender: ${tenderId}`);
+  }
+
+  const dossiers: CachedDossier[] = Array.isArray(tender.cached_dossiers) ? [...tender.cached_dossiers] : [];
+  const portalCode = getPortalFileCode(tender.portal_id);
+  let newlyFetched = 0;
+
+  if (tender.direct_url && tender.direct_url.startsWith('http')) {
+    const isDirectFile = /\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url) || /[?&]wpdmdl=\d+/i.test(tender.direct_url);
+
+    if (isDirectFile) {
+      try {
+        const buf = await crawlerDeps.fetchFileBuffer(tender.direct_url);
+        const doc = saveTenderDocument(tender.id, buf, {
+          portalCode,
+          referenceNo: tender.reference_no,
+          title: tender.title,
+          label: deriveDossierLabel(tender.direct_url, 'Tender Document'),
+          originalUrl: tender.direct_url,
+          source: 'portal_scrape'
+        });
+        if (!dossiers.some(d => d.sha256 === doc.sha256 || d.localPath === doc.localPath)) {
+          dossiers.unshift(doc);
+          newlyFetched++;
+        }
+      } catch (err: any) {
+        console.warn(`[FetchDocs] Failed to download direct file for ${tender.id}:`, err.message);
+      }
+    } else {
+      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) || {
+        id: tender.portal_id,
+        name: tender.portal_name,
+        baseUrl: new URL(tender.direct_url).origin,
+        tendersUrl: tender.direct_url
+      } as PortalDefinition;
+
+      const isListing = isGenericListingUrl(tender.direct_url, portalDef);
+
+      try {
+        const html = await crawlerDeps.fetchHtml(tender.direct_url);
+        const $ = cheerio.load(html);
+        $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
+
+        let targetEl: any = $('body').get(0);
+
+        if (isListing) {
+          let matchingContainer: cheerio.Cheerio<any> | null = null;
+          $('tr, .job-post-item, .tender-card, .card, article').each((_, el) => {
+            const text = $(el).text();
+            if (
+              (tender.reference_no && text.includes(tender.reference_no)) ||
+              (tender.title && text.toLowerCase().includes(tender.title.toLowerCase().slice(0, 30)))
+            ) {
+              matchingContainer = $(el);
+              return false;
+            }
+          });
+          if (matchingContainer) {
+            targetEl = (matchingContainer as any).get(0);
+          }
+        }
+
+        const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
+        for (let idx = 0; idx < discoveredUrls.slice(0, 5).length; idx++) {
+          const u = discoveredUrls[idx];
+          try {
+            const buf = await fetchFileBuffer(u);
+            const doc = saveTenderDocument(tender.id, buf, {
+              portalCode,
+              referenceNo: tender.reference_no,
+              title: tender.title,
+              label: deriveDossierLabel(u, 'Bidding Document', idx + 1),
+              originalUrl: u,
+              index: idx + 1,
+              source: 'portal_scrape'
+            });
+            if (!dossiers.some(d => d.sha256 === doc.sha256 || d.originalUrl === doc.originalUrl || d.localPath === doc.localPath)) {
+              dossiers.push(doc);
+              newlyFetched++;
+            }
+          } catch (dlErr: any) {
+            console.warn(`[FetchDocs] Failed to download discovered attachment ${u} for ${tender.id}:`, dlErr.message);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[FetchDocs] Could not fetch detail page for ${tender.id}:`, err.message);
+      }
+    }
+  }
+
+  const updates: Parameters<typeof updateTenderFields>[1] = { cached_dossiers: dossiers };
+
+  // If newly fetched documents exist and tender is missing closing date, reference, or rich scope, extract from primary document
+  if (dossiers.length > 0 && (!tender.closing_date || !tender.reference_no || !tender.description || tender.description === tender.title)) {
+    const fs = await import('fs');
+    const path = await import('path');
+    for (const doc of dossiers) {
+      if (doc.mimeType?.startsWith('image/') || doc.mimeType === 'application/pdf') {
+        const filename = decodeURIComponent(path.basename(doc.localPath));
+        const diskPath = path.resolve(DOSSIERS_DIR, tender.id, filename);
+        if (fs.existsSync(diskPath)) {
+          try {
+            const buf = fs.readFileSync(diskPath);
+            const aiResult = await extractTenderFromImage(buf, doc.mimeType);
+            if (aiResult) {
+              if (aiResult.summaryScope && (!tender.description || tender.description === tender.title)) {
+                updates.description = aiResult.summaryScope;
+              }
+              if (aiResult.referenceNo && !tender.reference_no) updates.reference_no = aiResult.referenceNo;
+              if (aiResult.estimatedValue && !tender.estimated_value) updates.estimated_value = aiResult.estimatedValue;
+              if (aiResult.closingDateISO) {
+                const resolved = reconcileDeadline(tender.closing_date, aiResult.closingDateISO);
+                if (resolved.isExpired && tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked) {
+                  console.log(`[FetchDocs] Tender ${tender.id} extracted deadline is in the past (${resolved.closingDate}). Auto-expiring.`);
+                  deleteTenders([tender.id], 'auto-expired');
+                  return {
+                    tender: { ...tender, pipeline_status: 'Deleted' as any },
+                    dossiers,
+                    newlyFetched
+                  };
+                }
+                if (resolved.closingDate && resolved.closingDate !== tender.closing_date) {
+                  updates.closing_date = resolved.closingDate;
+                  updates.closing_date_formatted = aiResult.closingDateFormatted || formatClosingDate(resolved.closingDate);
+                }
+              }
+              break;
+            }
+          } catch (e: any) {
+            console.warn(`[FetchDocs] Extraction failed for document ${filename}:`, e.message);
+          }
+        }
+      }
+    }
+  }
+
+  updateTenderFields(tender.id, updates);
+  const updatedTender = getTenderById(tender.id)!;
+
+  return {
+    tender: updatedTender,
+    dossiers,
+    newlyFetched
+  };
 }
 
 export async function analyzeTenderById(tenderId: string, options: { forceRefresh?: boolean } = {}): Promise<Tender | null> {
@@ -1490,30 +1837,34 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
     }
   }
 
-  // 2. Run Gemini AI on the first cached image/PDF if available and Gemini API key exists
+  // 2. Run Gemini AI on the first cached image/PDF if available
   let aiResult = null;
-  if (getGeminiApiKey()) {
-    for (const doc of dossiers) {
-      if (doc.mimeType?.startsWith('image/') || doc.mimeType === 'application/pdf') {
-        const filename = decodeURIComponent(path.basename(doc.localPath));
-        const diskPath = path.resolve(DOSSIERS_DIR, tender.id, filename);
-        if (fs.existsSync(diskPath)) {
-          const buf = fs.readFileSync(diskPath);
-          aiResult = await extractTenderFromImage(buf, doc.mimeType);
-          if (aiResult) break;
+  // Only a deadline read from the tender's own document may auto-expire it; a date inferred by the
+  // text summarizer from a title or snippet is too weak to delete an opportunity on.
+  let aiResultFromDocument = false;
+  for (const doc of dossiers) {
+    if (doc.mimeType?.startsWith('image/') || doc.mimeType === 'application/pdf') {
+      const filename = decodeURIComponent(path.basename(doc.localPath));
+      const diskPath = path.resolve(DOSSIERS_DIR, tender.id, filename);
+      if (fs.existsSync(diskPath)) {
+        const buf = fs.readFileSync(diskPath);
+        aiResult = await extractTenderFromImage(buf, doc.mimeType);
+        if (aiResult) {
+          aiResultFromDocument = true;
+          break;
         }
       }
     }
+  }
 
-    // 3. Fallback: summarize detail page text (or existing title/description) with Gemini AI
-    if (!aiResult) {
-      const textToAnalyze = detailText || tender.description || tender.title;
-      aiResult = await summarizeTenderTextWithAI({
-        title: tender.title,
-        organization: tender.organization,
-        rawText: textToAnalyze
-      });
-    }
+  // 3. Fallback: summarize detail page text (or existing title/description) with Gemini AI
+  if (!aiResult && getGeminiApiKey()) {
+    const textToAnalyze = detailText || tender.description || tender.title;
+    aiResult = await summarizeTenderTextWithAI({
+      title: tender.title,
+      organization: tender.organization,
+      rawText: textToAnalyze
+    });
   }
 
   // 4. Persist newly discovered dossiers and extracted fields
@@ -1525,28 +1876,35 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
     if (aiResult.summaryScope) updates.description = aiResult.summaryScope;
     if (aiResult.referenceNo) updates.reference_no = aiResult.referenceNo;
     if (aiResult.estimatedValue) updates.estimated_value = aiResult.estimatedValue;
-    if (aiResult.closingDateISO) {
-      const parsedIso = parseDateString(aiResult.closingDateISO) || aiResult.closingDateISO;
-      const formatted = aiResult.closingDateFormatted || formatClosingDate(parsedIso);
-      
+    const resolved = aiResult.closingDateISO ? reconcileDeadline(tender.closing_date, aiResult.closingDateISO) : null;
+    // A text-derived date may fill in or extend a deadline, but never set an already-past one.
+    const acceptDate = resolved && resolved.closingDate && (aiResultFromDocument || !resolved.isExpired);
+    if (resolved && acceptDate) {
+      const formatted = resolved.closingDate === tender.closing_date
+        ? (tender.closing_date_formatted || formatClosingDate(resolved.closingDate))
+        : (aiResult.closingDateFormatted || formatClosingDate(resolved.closingDate));
+
+      // If the reconciled deadline is in the past and the opportunity is unreviewed & unbookmarked, auto-expire
+      if (resolved.isExpired && aiResultFromDocument && tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked) {
+        console.log(`[Analyze] Tender ${tender.id} extracted closing date is expired (${resolved.closingDate}). Auto-expiring.`);
+        deleteTenders([tender.id], 'auto-expired');
+        return null;
+      }
+
       // Check if closing date was extended
-      if (tender.closing_date && parsedIso !== tender.closing_date) {
-        const oldTime = new Date(tender.closing_date).getTime();
-        const newTime = new Date(parsedIso).getTime();
-        if (!isNaN(oldTime) && !isNaN(newTime) && newTime > oldTime) {
-          const logId = `corr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-          try {
-            db.prepare(`
-              INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
-              VALUES (?, ?, 'deadline_extension', ?, ?, 0)
-            `).run(logId, tender.id, tender.closing_date_formatted || tender.closing_date, formatted);
-            updates.has_corrigendum = 1;
-          } catch (e) {
-            console.warn('[Refresh] Could not insert corrigendum log:', e);
-          }
+      if (tender.closing_date && resolved.isExtension) {
+        const logId = `corr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        try {
+          db.prepare(`
+            INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
+            VALUES (?, ?, 'deadline_extension', ?, ?, 0)
+          `).run(logId, tender.id, tender.closing_date_formatted || tender.closing_date, formatted);
+          updates.has_corrigendum = 1;
+        } catch (e) {
+          console.warn('[Refresh] Could not insert corrigendum log:', e);
         }
       }
-      updates.closing_date = parsedIso;
+      updates.closing_date = resolved.closingDate;
       updates.closing_date_formatted = formatted;
     }
   } else if (detailText && !tender.description) {

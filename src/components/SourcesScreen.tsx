@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Download, ExternalLink, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react';
-import { DomainTrack, PortalHealth } from '../types';
+import { Download, ExternalLink, FileText, KeyRound, Pencil, Plus, RotateCw, Trash2 } from 'lucide-react';
+import { DomainTrack, PortalHealth, SessionLogMeta } from '../types';
 import { Button, Chip, Dialog, EmptyState, Panel, Tabs } from '../ui';
 import { PortalCredentialsModal } from './PortalCredentialsModal';
 
@@ -596,6 +596,19 @@ interface Storage {
   tenders_with_documents: number;
   ai_configured?: boolean;
   ai_masked_key?: string | null;
+  session_logs?: SessionLogMeta[];
+  retention?: {
+    settings: {
+      retention_auto_clean: boolean;
+      retention_grace_days: number;
+      retention_passed_days: number;
+    };
+    status: {
+      pendingSlimCount: number;
+      expiredUnreviewedCount: number;
+      agedOutPassedCount: number;
+    };
+  };
 }
 
 function bytes(n: number) {
@@ -618,6 +631,9 @@ function DataSection({ title, description, children }: { title: string; descript
 function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClearInbox' | 'onEraseAll'>) {
   const [scope, setScope] = useState('all');
   const [backups, setBackups] = useState<Backup[]>([]);
+  const [sessionLogs, setSessionLogs] = useState<SessionLogMeta[]>([]);
+  const [selectedLog, setSelectedLog] = useState<{ filename: string; content: string } | null>(null);
+  const [loadingLog, setLoadingLog] = useState(false);
   const [storage, setStorage] = useState<Storage | null>(null);
   const [busy, setBusy] = useState(false);
   const [aiKeyInput, setAiKeyInput] = useState('');
@@ -630,13 +646,36 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
     try {
       const [b, s] = await Promise.all([fetch('/api/backups'), fetch('/api/storage')]);
       if (b.ok) setBackups(await b.json());
-      if (s.ok) setStorage(await s.json());
+      if (s.ok) {
+        const sData = await s.json();
+        setStorage(sData);
+        if (Array.isArray(sData.session_logs)) {
+          setSessionLogs(sData.session_logs);
+        }
+      }
     } catch (err) {
       console.error('Failed to load data settings:', err);
     }
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  const viewLog = async (filename: string) => {
+    setLoadingLog(true);
+    try {
+      const res = await fetch(`/api/system/logs/${filename}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSelectedLog(data);
+      } else {
+        setMessage('Could not load session log content.');
+      }
+    } catch {
+      setMessage('Failed to fetch session log.');
+    } finally {
+      setLoadingLog(false);
+    }
+  };
 
   const closeConfirm = () => { setConfirm(null); setTyped(''); };
 
@@ -684,6 +723,67 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
       setMessage('Could not delete the files.');
     }
     void load();
+  };
+
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionRunning, setRetentionRunning] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
+
+  const saveRetentionSettings = async (newSettings: { autoClean?: boolean; graceDays?: number; passedRetentionDays?: number }) => {
+    setRetentionSaving(true);
+    try {
+      const res = await fetch('/api/system/retention/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newSettings)
+      });
+      if (res.ok) {
+        setMessage('Retention settings saved.');
+        void load();
+      } else {
+        setMessage('Failed to save retention settings.');
+      }
+    } catch {
+      setMessage('Error updating retention settings.');
+    } finally {
+      setRetentionSaving(false);
+    }
+  };
+
+  const runRetentionCleanup = async () => {
+    setRetentionRunning(true);
+    try {
+      const res = await fetch('/api/system/retention/run', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setMessage(`Retention cycle complete: slimmed ${data.summary.slimmed} passed tenders, deleted ${data.summary.expiredUnreviewed} expired unreviewed tenders, and purged ${data.summary.agedOutPassed} aged-out records.`);
+        void load();
+      } else {
+        setMessage('Failed to execute retention cycle.');
+      }
+    } catch {
+      setMessage('Error executing retention cycle.');
+    } finally {
+      setRetentionRunning(false);
+    }
+  };
+
+  const runReconcileFiles = async () => {
+    setReconciling(true);
+    try {
+      const res = await fetch('/api/system/dossiers/reconcile', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setMessage(`File reconciliation complete: removed ${data.reconciliation.orphanFoldersDeleted} orphan folders, pruned ${data.reconciliation.missingMetadataPruned} missing DB records, cleaned ${data.reconciliation.trashPurged} trash items.`);
+        void load();
+      } else {
+        setMessage('Failed to reconcile dossier files.');
+      }
+    } catch {
+      setMessage('Error reconciling dossier files.');
+    } finally {
+      setReconciling(false);
+    }
   };
 
   return (
@@ -751,7 +851,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
         </div>
       </DataSection>
 
-      <DataSection title="Backups" description="A backup is made automatically every day. Backups older than 14 days are removed.">
+      <DataSection title="Backups" description="A backup is made automatically every day. Backups older than 15 days are removed.">
         <Button onClick={backUp} disabled={busy}>{busy ? 'Backing up…' : 'Back up now'}</Button>
         <div className="mt-4 divide-y divide-line rounded-lg border border-line">
           {backups.length === 0 ? (
@@ -768,12 +868,121 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
       </DataSection>
 
       <DataSection
+        title="Session Execution Logs (Last 3 Runs)"
+        description="Preserves full terminal console outputs, API requests, and crawler errors for the last 3 sessions to enable easy troubleshooting."
+      >
+        <div className="divide-y divide-line rounded-lg border border-line">
+          {sessionLogs.length === 0 ? (
+            <div className="px-4 py-3 text-ink-muted">No session logs recorded yet.</div>
+          ) : (
+            sessionLogs.map(log => (
+              <div key={log.filename} className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
+                <div className="flex items-center gap-2">
+                  <FileText className="h-4 w-4 text-ink-muted shrink-0" />
+                  <div>
+                    <div className="flex items-center gap-2 font-mono text-[13px] font-medium">
+                      <span>{log.filename}</span>
+                      {log.isCurrent ? (
+                        <Chip tone="ok">Active Session</Chip>
+                      ) : (
+                        <Chip>Past Session</Chip>
+                      )}
+                      {Boolean(log.errorCount && log.errorCount > 0) && (
+                        <Chip tone="warn">{log.errorCount} Errors</Chip>
+                      )}
+                    </div>
+                    <div className="text-xs text-ink-muted">
+                      {new Date(log.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })} · {bytes(log.sizeBytes)}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" onClick={() => void viewLog(log.filename)} disabled={loadingLog}>
+                    View
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      window.location.href = `/api/system/logs/${log.filename}?download=true`;
+                    }}
+                  >
+                    <Download className="h-3.5 w-3.5" /> Download
+                  </Button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </DataSection>
+
+      <DataSection
         title="Saved documents"
         description={storage ? `${bytes(storage.total_bytes)} used across ${storage.tenders_with_documents} tenders.` : 'Checking…'}
       >
-        <Button onClick={() => setConfirm('prune')} disabled={!storage || storage.passed_bytes === 0}>
-          Delete files for passed tenders{storage && storage.passed_bytes > 0 ? ` (${bytes(storage.passed_bytes)})` : ''}
-        </Button>
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => setConfirm('prune')} disabled={!storage || storage.passed_bytes === 0}>
+              Delete files for passed tenders{storage && storage.passed_bytes > 0 ? ` (${bytes(storage.passed_bytes)})` : ''}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => void runReconcileFiles()}
+              disabled={reconciling}
+              title="Audit disk files against cached_dossiers, prune orphan folders, and clean old trash"
+            >
+              <FileText className="h-4 w-4" />
+              {reconciling ? 'Reconciling…' : 'Reconcile files on disk'}
+            </Button>
+          </div>
+
+          {storage?.retention && (
+            <div className="rounded-lg border border-line p-4 space-y-3">
+              <div className="font-semibold text-sm">Automated Retention & Cleanup Policy</div>
+              <p className="text-xs text-ink-muted">
+                Passed tenders are slimmed 2 minutes after passing (purging dossier files while keeping pipeline records for 10 days post-closing).
+                Unreviewed closed opportunities are automatically cleaned after the deadline grace period. Backups are retained for 15 days.
+              </p>
+
+              <div className="grid gap-3 sm:grid-cols-3 pt-2">
+                <div className="rounded-lg bg-surface-2 p-2.5">
+                  <div className="text-xs text-ink-muted">Pending Passed Slim</div>
+                  <div className="mt-0.5 font-mono text-sm font-bold">{storage.retention.status.pendingSlimCount}</div>
+                </div>
+                <div className="rounded-lg bg-surface-2 p-2.5">
+                  <div className="text-xs text-ink-muted">Expired Unreviewed</div>
+                  <div className="mt-0.5 font-mono text-sm font-bold">{storage.retention.status.expiredUnreviewedCount}</div>
+                </div>
+                <div className="rounded-lg bg-surface-2 p-2.5">
+                  <div className="text-xs text-ink-muted">Aged-out Passed</div>
+                  <div className="mt-0.5 font-mono text-sm font-bold">{storage.retention.status.agedOutPassedCount}</div>
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={storage.retention.settings.retention_auto_clean}
+                    onChange={e => void saveRetentionSettings({ autoClean: e.target.checked })}
+                    disabled={retentionSaving}
+                    className="h-4 w-4 accent-[var(--accent)]"
+                  />
+                  <span>Enable background automatic cleanup (runs every 5 minutes)</span>
+                </label>
+              </div>
+
+              <div className="pt-2">
+                <Button
+                  onClick={() => void runRetentionCleanup()}
+                  disabled={retentionRunning}
+                >
+                  <RotateCw className={`h-4 w-4 ${retentionRunning ? 'animate-spin' : ''}`} />
+                  {retentionRunning ? 'Running cleanup…' : 'Run retention cleanup now'}
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       </DataSection>
 
       <section className="rounded-xl border border-danger p-5">
@@ -829,6 +1038,33 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
       >
         <p className="mb-3">Every tender and note will be removed. Type <span className="font-mono font-bold">CLEAR</span> to confirm.</p>
         <input value={typed} onChange={e => setTyped(e.target.value)} aria-label="Type CLEAR to confirm" className={`${inputClass} font-mono`} />
+      </Dialog>
+
+      <Dialog
+        open={Boolean(selectedLog)}
+        onClose={() => setSelectedLog(null)}
+        title={selectedLog ? `Session Log: ${selectedLog.filename}` : 'Session Log'}
+        footer={
+          <div className="flex w-full items-center justify-between">
+            {selectedLog && (
+              <Button
+                size="sm"
+                onClick={() => {
+                  window.location.href = `/api/system/logs/${selectedLog.filename}?download=true`;
+                }}
+              >
+                <Download className="h-4 w-4" /> Download File
+              </Button>
+            )}
+            <Button onClick={() => setSelectedLog(null)}>Close</Button>
+          </div>
+        }
+      >
+        {selectedLog && (
+          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-surface p-3 font-mono text-xs select-text text-ink">
+            {selectedLog.content}
+          </pre>
+        )}
       </Dialog>
     </div>
   );

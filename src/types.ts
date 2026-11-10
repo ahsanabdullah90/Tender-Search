@@ -16,6 +16,11 @@ export interface CachedDossier {
   mimeType: string;
   sha256: string;
   sizeBytes?: number;
+  docType?: 'notice' | 'bidding-document' | 'rfp' | 'boq' | 'tor' | 'drawings' | 'corrigendum' | 'clarification' | 'other';
+  originalName?: string;
+  addedAt?: string;
+  source?: 'portal_scrape' | 'manual_upload' | 'pasted_image';
+  superseded?: boolean;
 }
 
 export interface SecondarySource {
@@ -49,6 +54,8 @@ export interface Tender {
   pipeline_status: OpportunityStatus;
   status_notes: string;
   result_expected_date?: string | null; // optional: when the award result is expected
+  passed_at?: string | null;
+  slimmed_at?: string | null;
   is_bookmarked: number;
   viewed: number;
   created_at: string;
@@ -112,4 +119,15 @@ export interface ScanStatus {
   newTendersFound: number;
   corrigendaFound: number;
   lastScanTimestamp: string | null;
+}
+
+
+export interface SessionLogMeta {
+  filename: string;
+  createdAt: string;
+  sizeBytes: number;
+  isCurrent: boolean;
+  lineCount?: number;
+  errorCount?: number;
+  warnCount?: number;
 }

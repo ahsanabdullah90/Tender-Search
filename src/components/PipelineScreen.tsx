@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
-import { Archive, TriangleAlert } from 'lucide-react';
+import { Archive, ExternalLink, TriangleAlert } from 'lucide-react';
 import { Tender, CorrigendumLog, OpportunityStatus } from '../types';
 import { Button, Chip, DeadlineChip, EmptyState, Panel, SlideOver, Tabs } from '../ui';
 import { Detail, useTick } from './InboxScreen';
+import { PassConfirmModal } from './pipeline/PassConfirmModal';
 
 type View = 'board' | 'gantt';
 
@@ -184,6 +185,7 @@ export function PipelineScreen(props: PipelineScreenProps) {
   const [view, setView] = useState<View>('board');
   const [openId, setOpenId] = useState<string | null>(props.focusId ?? null);
   const [showArchive, setShowArchive] = useState(false);
+  const [passTarget, setPassTarget] = useState<Tender | null>(null);
   useTick(60_000);
 
   const working = tenders.filter(t => stageOf(t.pipeline_status));
@@ -203,7 +205,7 @@ export function PipelineScreen(props: PipelineScreenProps) {
           {s.label}
         </Button>
       ))}
-      <Button size="sm" variant="danger" onClick={() => { setOpenId(null); void props.onStatusChange(open.id, 'Passed'); }}>
+      <Button size="sm" variant="danger" onClick={() => setPassTarget(open)}>
         Pass
       </Button>
     </>
@@ -246,9 +248,33 @@ export function PipelineScreen(props: PipelineScreenProps) {
               <div key={t.id} className="flex items-center justify-between gap-3 border-b border-line px-4 py-3 last:border-b-0">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold">{t.title}</div>
-                  <div className="truncate text-[13px] text-ink-muted">{t.organization}</div>
+                  <div className="flex items-center gap-2 truncate text-[13px] text-ink-muted">
+                    <span>{t.organization}</span>
+                    <span>•</span>
+                    <span>{t.portal_name}</span>
+                    {t.reference_no && (
+                      <>
+                        <span>•</span>
+                        <span className="font-mono">{t.reference_no}</span>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <Button size="sm" onClick={() => void props.onStatusChange(t.id, 'Under Review')}>Reopen</Button>
+                <div className="flex items-center gap-2 shrink-0">
+                  {t.direct_url && t.direct_url !== '#' && (
+                    <a
+                      href={t.direct_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent-soft"
+                    >
+                      Open <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                  <Button size="sm" onClick={() => void props.onStatusChange(t.id, 'New Opportunity')}>
+                    Reopen
+                  </Button>
+                </div>
               </div>
             ))
           )}
@@ -270,6 +296,19 @@ export function PipelineScreen(props: PipelineScreenProps) {
           </div>
         )}
       </SlideOver>
+
+      {passTarget && (
+        <PassConfirmModal
+          tender={passTarget}
+          isOpen={Boolean(passTarget)}
+          onClose={() => setPassTarget(null)}
+          onConfirmPass={async (tenderId) => {
+            await props.onStatusChange(tenderId, 'Passed');
+            setOpenId(null);
+            setPassTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 }

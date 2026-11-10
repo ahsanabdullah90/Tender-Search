@@ -1,11 +1,44 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, Bookmark, Check, Copy, Download, ExternalLink, FileText, Inbox, Paperclip, Pencil, Plus, RotateCw, Search, SlidersHorizontal, Sparkles, TriangleAlert, Undo2, Upload, X } from 'lucide-react';
-import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus } from '../types';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import {
+  Archive,
+  Bookmark,
+  Calendar,
+  Check,
+  ChevronDown,
+  Clock,
+  Coins,
+  Copy,
+  Download,
+  ExternalLink,
+  Eye,
+  FileText,
+  Globe,
+  Inbox,
+  Paperclip,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCw,
+  Search,
+  SlidersHorizontal,
+  Sparkles,
+  Target,
+  Trash2,
+  TriangleAlert,
+  Undo2,
+  Upload,
+  X
+} from 'lucide-react';
+import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus, CachedDossier } from '../types';
 import { Button, Chip, DeadlineChip, Dialog, EmptyState, Panel, Popover } from '../ui';
+import { DeadlineRunway } from './inbox/DeadlineRunway';
+import { PortalPills, PortalSummaryItem } from './inbox/PortalPills';
+import { HighlightedDescription } from './inbox/HighlightedDescription';
+import { DeleteTenderModal } from './inbox/DeleteTenderModal';
 
 type SortBy = 'urgency' | 'score' | 'newest';
 
-interface InboxScreenProps {
+export interface InboxScreenProps {
   tenders: Tender[];
   tracks: DomainTrack[];
   corrigenda: CorrigendumLog[];
@@ -22,10 +55,11 @@ interface InboxScreenProps {
   onSaveNotes: (tenderId: string, notes: string) => Promise<void>;
   onToggleBookmark: (tenderId: string) => void;
   onMarkViewed?: (tenderId: string) => void;
-  /** Tender to select when the screen opens, for example from an alert banner. */
   focusId?: string | null;
   onTenderUpdated?: (tender: Tender) => void;
   onTenderCreated?: (tender: Tender) => void;
+  onTenderDeleted?: (tenderId: string) => void;
+  portalSummary?: PortalSummaryItem[];
 }
 
 /** Older rows may hold these fields as JSON text. */
@@ -86,6 +120,21 @@ function LiveCountdown({ closingDate }: { closingDate: string | null }) {
     </div>
   );
 }
+
+function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="rounded-lg bg-surface-2 px-3 py-2.5">
+      <div className="text-xs text-ink-muted">{label}</div>
+      <div className={`mt-0.5 text-sm font-semibold ${mono ? 'font-mono' : ''}`}>{value}</div>
+    </div>
+  );
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-ink-muted">{children}</h3>;
+}
+
+const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
 
 function TenderRow({
   tender,
@@ -166,22 +215,7 @@ function TenderRow({
   );
 }
 
-function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="rounded-lg bg-surface-2 px-3 py-2.5">
-      <div className="text-xs text-ink-muted">{label}</div>
-      <div className={`mt-0.5 text-sm font-semibold ${mono ? 'font-mono' : ''}`}>{value}</div>
-    </div>
-  );
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-ink-muted">{children}</h3>;
-}
-
-const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
-
-/** Shared by the Inbox and the Pipeline slide-over. `stageActions` replaces the Track / Pass buttons. */
+/** Detail Pane exported for both Inbox and Pipeline */
 export function Detail({
   tender,
   corrigenda,
@@ -193,6 +227,7 @@ export function Detail({
   onSaveNotes,
   onToggleBookmark,
   onTenderUpdated,
+  onTenderDeleted,
 }: {
   tender: Tender;
   corrigenda: CorrigendumLog[];
@@ -204,6 +239,7 @@ export function Detail({
   onSaveNotes: (tenderId: string, notes: string) => Promise<void>;
   onToggleBookmark: () => void;
   onTenderUpdated?: (tender: Tender) => void;
+  onTenderDeleted?: (tenderId: string) => void;
 }) {
   const [currentTender, setCurrentTender] = useState<Tender>(tender);
   const [notes, setNotes] = useState(tender.status_notes || '');
@@ -211,12 +247,14 @@ export function Detail({
   const lastSavedNotesRef = useRef(tender.status_notes || '');
   const [analyzing, setAnalyzing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [fetchingDocs, setFetchingDocs] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [aiStatusMessage, setAiStatusMessage] = useState<{ text: string; isError?: boolean } | null>(null);
   const [editingDetails, setEditingDetails] = useState(false);
   const [savingDetails, setSavingDetails] = useState(false);
   const [previewPdfIndex, setPreviewPdfIndex] = useState<number | null>(null);
   const [copiedSummary, setCopiedSummary] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [editForm, setEditForm] = useState({
@@ -250,15 +288,9 @@ export function Detail({
   }, [tender]);
 
   const keywords = asList<string>(currentTender.matched_keywords);
-  const files = asList<{ label?: string; localPath: string; mimeType?: string }>(currentTender.cached_dossiers);
+  const files = asList<{ label?: string; localPath: string; mimeType?: string; docType?: string; sizeBytes?: number }>(currentTender.cached_dossiers);
   const otherSources = asList<{ portalName: string; directUrl: string }>(currentTender.secondary_sources);
   const amendments = corrigenda.filter(c => c.tender_id === currentTender.id);
-
-  const hasCleanDescription = Boolean(
-    currentTender.description &&
-      currentTender.description.trim() !== '' &&
-      currentTender.description.trim().toLowerCase() !== currentTender.title.trim().toLowerCase()
-  );
 
   const saveNotes = async (notesToSave: string = notes) => {
     if (notesToSave === lastSavedNotesRef.current) return;
@@ -303,16 +335,32 @@ export function Detail({
       currentTender.estimated_value ? `💰 Estimated Value: ${currentTender.estimated_value}` : null,
       `🌐 Portal: ${currentTender.portal_name}`,
       currentTender.direct_url && currentTender.direct_url !== '#' ? `🔗 Link: ${currentTender.direct_url}` : null,
-    ]
-      .filter(Boolean)
-      .join('\n');
+    ].filter(Boolean).join('\n');
 
     try {
       await navigator.clipboard?.writeText(summaryLines);
       setCopiedSummary(true);
       setTimeout(() => setCopiedSummary(false), 2000);
+    } catch {}
+  };
+
+  const handleFetchDocuments = async () => {
+    setFetchingDocs(true);
+    setAiStatusMessage(null);
+    try {
+      const res = await fetch(`/api/tenders/${currentTender.id}/fetch-documents`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        setCurrentTender(data.tender);
+        onTenderUpdated?.(data.tender);
+        setAiStatusMessage({ text: data.message || `Fetched ${data.newlyFetched} document(s) from portal.` });
+      } else {
+        setAiStatusMessage({ text: data.error || 'Failed to fetch documents from portal.', isError: true });
+      }
     } catch {
-      // Clipboard API may be unavailable in restricted contexts
+      setAiStatusMessage({ text: 'Error connecting to document fetch service.', isError: true });
+    } finally {
+      setFetchingDocs(false);
     }
   };
 
@@ -424,6 +472,15 @@ export function Detail({
     }
   };
 
+  const confirmDeleteTender = async (tenderId: string) => {
+    const res = await fetch(`/api/tenders/${tenderId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to delete tender');
+    }
+    onTenderDeleted?.(tenderId);
+  };
+
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-line p-6">
@@ -469,6 +526,19 @@ export function Detail({
           >
             <Bookmark className={`h-4 w-4 ${currentTender.is_bookmarked ? 'fill-current text-accent' : ''}`} />
           </Button>
+
+          {/* Fetch Documents action */}
+          <Button
+            variant="secondary"
+            onClick={handleFetchDocuments}
+            disabled={fetchingDocs}
+            className="gap-1.5"
+            title="Download documents directly from this portal page"
+          >
+            <Download className={`h-4 w-4 ${fetchingDocs ? 'animate-bounce text-accent' : ''}`} />
+            {fetchingDocs ? 'Fetching docs…' : 'Fetch Documents'}
+          </Button>
+
           <Button
             variant="ghost"
             onClick={() => void handleRefreshTender()}
@@ -479,6 +549,7 @@ export function Detail({
             <RotateCw className={`h-4 w-4 ${refreshing ? 'animate-spin text-accent' : ''}`} />
             {refreshing ? 'Refreshing…' : 'Refresh info'}
           </Button>
+
           <Button
             variant="ghost"
             onClick={() => void handleCopySummary()}
@@ -488,6 +559,17 @@ export function Detail({
             {copiedSummary ? <Check className="h-4 w-4 text-ok" /> : <Copy className="h-4 w-4" />}
             {copiedSummary ? 'Copied!' : 'Copy summary'}
           </Button>
+
+          {/* Delete Tender button */}
+          <Button
+            variant="ghost"
+            onClick={() => setDeleteModalOpen(true)}
+            className="text-ink-muted hover:text-danger hover:bg-danger-soft px-2.5"
+            title="Permanently delete this tender and its dossier files"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+
           <a
             href={currentTender.direct_url}
             target="_blank"
@@ -538,6 +620,7 @@ export function Detail({
           </div>
         )}
 
+        {/* 4-Card Fact Strip */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           <Fact label="Estimated value" value={currentTender.estimated_value || 'Not disclosed'} mono />
           <Fact label="Published" value={currentTender.publish_date ? new Date(currentTender.publish_date).toLocaleDateString('en-GB') : 'Not stated'} mono />
@@ -552,6 +635,7 @@ export function Detail({
           </div>
         </div>
 
+        {/* Scope / Summary Section with Keyword Highlighting */}
         <div>
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted">Summary</h3>
@@ -645,8 +729,8 @@ export function Detail({
                 </Button>
               </div>
             </div>
-          ) : hasCleanDescription ? (
-            <p className="whitespace-pre-wrap leading-relaxed">{currentTender.description}</p>
+          ) : currentTender.description && currentTender.description.trim() ? (
+            <HighlightedDescription text={currentTender.description} keywords={keywords} />
           ) : (
             <div className="rounded-lg border border-dashed border-line bg-surface-2 px-4 py-3 text-sm text-ink-muted">
               No detailed scope was provided on the portal listing page. Click <span className="font-semibold text-ink">Extract with AI</span> to analyze the portal page, or upload a tender notice image/PDF below.
@@ -654,6 +738,7 @@ export function Detail({
           )}
         </div>
 
+        {/* Documents / Dossiers Section */}
         <div
           onPaste={e => {
             const items = e.clipboardData?.items;
@@ -714,16 +799,31 @@ export function Detail({
                       >
                         <FileText className="h-4 w-4 shrink-0 text-ink-muted" />
                         <span className="truncate font-semibold">{file.label || `Document ${i + 1}`}</span>
+                        {file.docType && (
+                          <span className="rounded bg-chip px-1.5 py-0.2 text-[10px] font-bold uppercase text-ink-muted">
+                            {file.docType}
+                          </span>
+                        )}
                       </a>
-                      {isPdf && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setPreviewPdfIndex(previewPdfIndex === i ? null : i)}
+                      <div className="flex items-center gap-2">
+                        {isPdf && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setPreviewPdfIndex(previewPdfIndex === i ? null : i)}
+                          >
+                            {previewPdfIndex === i ? 'Hide preview' : 'Preview PDF'}
+                          </Button>
+                        )}
+                        <a
+                          href={`${fileUrl}${fileUrl.includes('?') ? '&' : '?'}download=1`}
+                          download
+                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-line bg-surface px-2.5 text-xs font-semibold text-ink hover:bg-surface-2"
                         >
-                          {previewPdfIndex === i ? 'Hide preview' : 'Preview PDF'}
-                        </Button>
-                      )}
+                          <Download className="h-3 w-3" />
+                          Download
+                        </a>
+                      </div>
                     </div>
                     {isImage && (
                       <a href={fileUrl} target="_blank" rel="noopener noreferrer" className="mt-3 block">
@@ -780,19 +880,47 @@ export function Detail({
           />
         </div>
       </div>
+
+      <DeleteTenderModal
+        tender={currentTender}
+        isOpen={deleteModalOpen}
+        onClose={() => setDeleteModalOpen(false)}
+        onConfirmDelete={confirmDeleteTender}
+      />
     </div>
   );
 }
 
 export function InboxScreen(props: InboxScreenProps) {
-  const { tenders, tracks, corrigenda, selectedTrack, searchQuery, bookmarkedOnly, corrigendumOnly } = props;
+  const {
+    tenders,
+    tracks,
+    corrigenda,
+    selectedTrack,
+    searchQuery,
+    bookmarkedOnly,
+    corrigendumOnly
+  } = props;
+
   const [sortBy, setSortBy] = useState<SortBy>('urgency');
   const [selectedId, setSelectedId] = useState<string | null>(props.focusId ?? null);
+  const [selectedPortalId, setSelectedPortalId] = useState<string>('All');
+  const [selectedRunwayDate, setSelectedRunwayDate] = useState<string | null>(null);
+  const [showClosedTenders, setShowClosedTenders] = useState(false);
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [viewedIds, setViewedIds] = useState<Set<string>>(() => new Set());
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(() => new Set());
+  const [deletingClosed, setDeletingClosed] = useState(false);
+
+  // Undo Toast state
   const [undoItem, setUndoItem] = useState<{ tender: Tender; status: OpportunityStatus } | null>(null);
+  const [undoCountdown, setUndoCountdown] = useState(6);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Manual Tender Modal state
   const [addingManual, setAddingManual] = useState(false);
   const [creatingManual, setCreatingManual] = useState(false);
   const [extractingManualAi, setExtractingManualAi] = useState(false);
@@ -808,11 +936,14 @@ export function InboxScreen(props: InboxScreenProps) {
     direct_url: '',
     description: '',
   });
-  useTick(60_000);
+
+  useTick(30_000);
+
 
   useEffect(() => {
     return () => {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     };
   }, []);
 
@@ -828,50 +959,186 @@ export function InboxScreen(props: InboxScreenProps) {
     props.onMarkViewed?.(id);
   };
 
+  // Base list of live tenders excluding manually deleted items
+  const activeTenders = useMemo(() => {
+    return tenders.filter(t => !deletedIds.has(t.id));
+  }, [tenders, deletedIds]);
+
+  // Filter and sort tenders
+  const now = Date.now();
+  const isClosedUntracked = (t: Tender) => {
+    if (t.is_bookmarked) return false;
+    if (t.closing_date && new Date(t.closing_date).getTime() < now) return true;
+    if (!t.closing_date && t.publish_date && now - new Date(t.publish_date).getTime() > 60 * 86400000) return true;
+    return false;
+  };
+
+  // Check if there are any genuinely open tenders in the active dataset
+  const hasOpenTenders = useMemo(() => {
+    return activeTenders.some(t => {
+      if (!t.closing_date) {
+        if (t.publish_date && now - new Date(t.publish_date).getTime() > 60 * 86400000) return false;
+        return true;
+      }
+      return new Date(t.closing_date).getTime() > now;
+    });
+  }, [activeTenders, now]);
+
+  // Dynamic portal summary computed directly from active tenders
+  const computedPortalSummary: PortalSummaryItem[] = useMemo(() => {
+    const map = new Map<string, PortalSummaryItem>();
+    for (const t of activeTenders) {
+      if (hasOpenTenders && !showClosedTenders && isClosedUntracked(t)) {
+        continue;
+      }
+      const pid = t.portal_id || 'other';
+      const existing = map.get(pid);
+      const isUnread = !Boolean(t.viewed) && !viewedIds.has(t.id);
+      if (existing) {
+        existing.total_count += 1;
+        if (isUnread) existing.unread_count += 1;
+      } else {
+        map.set(pid, {
+          portal_id: pid,
+          portal_name: t.portal_name || pid,
+          total_count: 1,
+          unread_count: isUnread ? 1 : 0
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => b.unread_count - a.unread_count || b.total_count - a.total_count);
+  }, [activeTenders, hasOpenTenders, showClosedTenders, viewedIds]);
+
+  const portalSummary = props.portalSummary ?? computedPortalSummary;
+
+  // Tenders matching active category filters
+  const filteredTenders = useMemo(() => {
+    return activeTenders.filter(t => {
+      // 1. Unread filter
+      if (unreadOnly && isTenderViewed(t)) return false;
+
+      // 2. Portal filter
+      if (selectedPortalId !== 'All' && t.portal_id !== selectedPortalId) {
+        return false;
+      }
+
+      // 3. Runway date filter
+      if (selectedRunwayDate !== null && t.closing_date?.slice(0, 10) !== selectedRunwayDate) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [activeTenders, unreadOnly, viewedIds, selectedPortalId, selectedRunwayDate]);
+
+  // Count hidden closed tenders in current filter
+  const hiddenClosedTenders = useMemo(() => {
+    return filteredTenders.filter(isClosedUntracked);
+  }, [filteredTenders]);
+
+  // Final list displayed in triage column:
+  // If hasOpenTenders is true and showClosedTenders is false, untracked closed tenders are excluded.
+  const displayTenders = useMemo(() => {
+    if (hasOpenTenders && !showClosedTenders) {
+      return filteredTenders.filter(t => !isClosedUntracked(t));
+    }
+    return filteredTenders;
+  }, [filteredTenders, hasOpenTenders, showClosedTenders]);
+
+  // Sort display tenders
   const sorted = useMemo(() => {
-    const list = tenders.filter(t => !unreadOnly || !Boolean(t.viewed) && !viewedIds.has(t.id));
-    if (sortBy === 'score') return list.sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
+    const list = [...displayTenders];
+    if (sortBy === 'score') {
+      return list.sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
+    }
     if (sortBy === 'newest') {
       const time = (t: Tender) => (t.publish_date ? new Date(t.publish_date).getTime() : 0);
       return list.sort((a, b) => time(b) - time(a));
     }
-    // Urgency: soonest open deadline first, closed ones after, no deadline last.
-    const now = Date.now();
+
+    // Urgency sort: soonest open deadline first, closed ones after, no deadline last.
     const rank = (t: Tender) => {
       if (!t.closing_date) return Infinity;
       const at = new Date(t.closing_date).getTime();
       return at < now ? Number.MAX_SAFE_INTEGER - (now - at) : at;
     };
     return list.sort((a, b) => rank(a) - rank(b));
-  }, [tenders, sortBy, unreadOnly, viewedIds]);
+  }, [displayTenders, sortBy, now]);
 
   const withDeadline = sorted.filter(t => t.closing_date);
   const noDeadline = sorted.filter(t => !t.closing_date);
   const ordered = sortBy === 'urgency' ? [...withDeadline, ...noDeadline] : sorted;
 
   const expiredTenders = useMemo(() => {
-    const now = Date.now();
     return ordered.filter(t => t.closing_date && new Date(t.closing_date).getTime() <= now);
-  }, [ordered]);
+  }, [ordered, now]);
 
-  // Keep a selection. When the selected tender leaves the list, move to its neighbour.
+  const firstNoDeadlineId = sortBy === 'urgency' ? noDeadline[0]?.id : undefined;
+
+  // Maintain active selection
   const selected = ordered.find(t => t.id === selectedId) ?? null;
   useEffect(() => {
     if (selected || ordered.length === 0) return;
     setSelectedId(ordered[0].id);
   }, [selected, ordered]);
 
+  // Quick Action Handler (Track / Pass)
   const act = (tender: Tender, status: OpportunityStatus) => {
     const index = ordered.findIndex(t => t.id === tender.id);
     const next = ordered[index + 1] ?? ordered[index - 1] ?? null;
     setSelectedId(next ? next.id : null);
     markViewed(tender.id);
+
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+
     setUndoItem({ tender, status });
+    setUndoCountdown(6);
+
+    countdownIntervalRef.current = setInterval(() => {
+      setUndoCountdown(c => {
+        if (c <= 1) {
+          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+          setUndoItem(null);
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1000);
+
     undoTimerRef.current = setTimeout(() => {
       setUndoItem(null);
     }, 6000);
-    void props.onStatusChange(tender.id, status);
+
+    const res = props.onStatusChange(tender.id, status);
+    if (res && typeof (res as any).then === 'function') {
+      void res;
+    }
+  };
+
+  const handleUndo = async () => {
+    if (!undoItem) return;
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+
+    const revertedTender = undoItem.tender;
+    setUndoItem(null);
+
+    await props.onStatusChange(revertedTender.id, 'New Opportunity');
+    setSelectedId(revertedTender.id);
+  };
+
+  const handleDeleteHiddenClosed = async () => {
+    if (hiddenClosedTenders.length === 0) return;
+    setDeletingClosed(true);
+    try {
+      for (const t of hiddenClosedTenders) {
+        await fetch(`/api/tenders/${t.id}`, { method: 'DELETE' });
+        setDeletedIds(prev => new Set(prev).add(t.id));
+      }
+    } finally {
+      setDeletingClosed(false);
+    }
   };
 
   const handleArchiveExpired = async () => {
@@ -880,6 +1147,7 @@ export function InboxScreen(props: InboxScreenProps) {
     }
   };
 
+  // Keyboard Navigation
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (addingManual || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -923,12 +1191,15 @@ export function InboxScreen(props: InboxScreenProps) {
         window.open(selected.direct_url, '_blank', 'noopener,noreferrer');
       }
     };
+
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [ordered, selectedId, selected, addingManual]);
 
   const activeFilters =
     (selectedTrack !== 'All' ? 1 : 0) +
+    (selectedPortalId !== 'All' ? 1 : 0) +
+    (selectedRunwayDate !== null ? 1 : 0) +
     (bookmarkedOnly ? 1 : 0) +
     (corrigendumOnly ? 1 : 0) +
     (unreadOnly ? 1 : 0);
@@ -937,13 +1208,12 @@ export function InboxScreen(props: InboxScreenProps) {
   const exportCsvUrl = useMemo(() => {
     const params = new URLSearchParams({ scope: 'inbox' });
     if (selectedTrack !== 'All') params.set('track', selectedTrack);
+    if (selectedPortalId !== 'All') params.set('portal', selectedPortalId);
     if (searchQuery.trim()) params.set('search', searchQuery.trim());
     if (bookmarkedOnly) params.set('bookmarkedOnly', 'true');
     if (corrigendumOnly) params.set('corrigendumOnly', 'true');
     return `/api/export/csv?${params.toString()}`;
-  }, [selectedTrack, searchQuery, bookmarkedOnly, corrigendumOnly]);
-
-  const firstNoDeadlineId = sortBy === 'urgency' ? noDeadline[0]?.id : undefined;
+  }, [selectedTrack, selectedPortalId, searchQuery, bookmarkedOnly, corrigendumOnly]);
 
   const handleManualFilePicked = async (file: File) => {
     setManualError(null);
@@ -1029,8 +1299,11 @@ export function InboxScreen(props: InboxScreenProps) {
     }
   };
 
+  const totalUnreadAll = portalSummary.reduce((sum, p) => sum + (p.unread_count || 0), 0);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col p-6">
+      {/* 1. Top Toolbar */}
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-bold">Inbox</h1>
         <span className="font-mono text-sm text-ink-muted">{ordered.length}</span>
@@ -1127,6 +1400,10 @@ export function InboxScreen(props: InboxScreenProps) {
                 <input type="checkbox" checked={unreadOnly} onChange={() => setUnreadOnly(v => !v)} className="h-4 w-4 accent-[var(--accent)]" />
                 Unread only
               </label>
+              <label className="flex cursor-pointer items-center gap-2">
+                <input type="checkbox" checked={showClosedTenders} onChange={() => setShowClosedTenders(v => !v)} className="h-4 w-4 accent-[var(--accent)]" />
+                Show closed tenders ({hiddenClosedTenders.length})
+              </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-semibold text-ink-muted">Sort by</span>
                 <select value={sortBy} onChange={e => setSortBy(e.target.value as SortBy)} className="h-10 w-full rounded-lg border border-line bg-surface px-2">
@@ -1140,6 +1417,25 @@ export function InboxScreen(props: InboxScreenProps) {
         </Popover>
       </div>
 
+      {/* 2. Portal Pills Bar with Notification Badges */}
+      <PortalPills
+        summary={portalSummary}
+        selectedPortalId={selectedPortalId}
+        onSelectPortal={setSelectedPortalId}
+        totalActiveCount={activeTenders.length}
+        totalUnreadCount={totalUnreadAll}
+      />
+
+      {/* 3. 15-Day Closing Dates Runway Strip */}
+      <div className="my-2">
+        <DeadlineRunway
+          tenders={activeTenders}
+          selectedDate={selectedRunwayDate}
+          onSelectDate={setSelectedRunwayDate}
+        />
+      </div>
+
+      {/* 4. Domain Track Quick Filters */}
       {(tracks.length > 0 || filtering) && (
         <div className="mb-4 flex flex-wrap items-center gap-1.5" role="group" aria-label="Track quick filters">
           <button
@@ -1169,6 +1465,28 @@ export function InboxScreen(props: InboxScreenProps) {
               {track.name}
             </button>
           ))}
+
+          {selectedPortalId !== 'All' && (
+            <button
+              type="button"
+              onClick={() => setSelectedPortalId('All')}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-accent-soft px-2.5 py-1 text-xs font-semibold text-accent"
+            >
+              Portal: {portalSummary.find(p => p.portal_id === selectedPortalId)?.portal_name || selectedPortalId}
+              <X className="h-3 w-3" />
+            </button>
+          )}
+
+          {selectedRunwayDate !== null && (
+            <button
+              type="button"
+              onClick={() => setSelectedRunwayDate(null)}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-accent-soft px-2.5 py-1 text-xs font-semibold text-accent"
+            >
+              Runway: {selectedRunwayDate}
+              <X className="h-3 w-3" />
+            </button>
+          )}
 
           {bookmarkedOnly && (
             <button
@@ -1201,6 +1519,8 @@ export function InboxScreen(props: InboxScreenProps) {
             <button
               type="button"
               onClick={() => {
+                setSelectedPortalId('All');
+                setSelectedRunwayDate(null);
                 if (selectedTrack !== 'All') props.onSelectTrack('All');
                 if (bookmarkedOnly) props.onToggleBookmarked();
                 if (corrigendumOnly) props.onToggleCorrigendum();
@@ -1215,6 +1535,7 @@ export function InboxScreen(props: InboxScreenProps) {
         </div>
       )}
 
+      {/* 5. Main Triage Split Workspace */}
       {ordered.length === 0 ? (
         <Panel className="flex-1">
           <EmptyState
@@ -1226,6 +1547,33 @@ export function InboxScreen(props: InboxScreenProps) {
       ) : (
         <div className="grid items-start gap-4 lg:grid-cols-[minmax(340px,2fr)_3fr]">
           <Panel className="overflow-y-auto lg:sticky lg:top-4 lg:h-[calc(100vh-14.5rem)]">
+            {/* Auto-hidden Closed Tenders Banner */}
+            {hasOpenTenders && hiddenClosedTenders.length > 0 && !showClosedTenders && (
+              <div className="flex items-center justify-between border-b border-line bg-surface-2 px-4 py-2 text-xs">
+                <span className="text-ink-muted">
+                  📁 <strong className="text-ink font-semibold">{hiddenClosedTenders.length}</strong> closed tender(s) hidden
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDeleteHiddenClosed}
+                    disabled={deletingClosed}
+                    className="font-semibold text-danger hover:underline cursor-pointer"
+                  >
+                    {deletingClosed ? 'Deleting…' : 'Delete now'}
+                  </button>
+                  <span className="text-line">•</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowClosedTenders(true)}
+                    className="font-semibold text-accent hover:underline cursor-pointer"
+                  >
+                    Show closed
+                  </button>
+                </div>
+              </div>
+            )}
+
             {ordered.map(t => (
               <React.Fragment key={t.id}>
                 {t.id === firstNoDeadlineId && (
@@ -1245,6 +1593,7 @@ export function InboxScreen(props: InboxScreenProps) {
               </React.Fragment>
             ))}
           </Panel>
+
           <Panel className="overflow-hidden lg:sticky lg:top-4 lg:h-[calc(100vh-14.5rem)]">
             {selected && (
               <Detail
@@ -1252,102 +1601,108 @@ export function InboxScreen(props: InboxScreenProps) {
                 corrigenda={corrigenda}
                 onTrack={() => act(selected, 'Under Review')}
                 onPass={() => act(selected, 'Passed')}
+                onSetResultDate={date => {
+                  props.onSaveNotes(selected.id, selected.status_notes || '');
+                  fetch(`/api/tenders/${selected.id}/result-date`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ date })
+                  });
+                }}
                 onAcknowledgeCorrigendum={props.onAcknowledgeCorrigendum}
                 onSaveNotes={props.onSaveNotes}
                 onToggleBookmark={() => props.onToggleBookmark(selected.id)}
-                onTenderUpdated={props.onTenderUpdated}
+                onTenderUpdated={updated => {
+                  props.onTenderUpdated?.(updated);
+                }}
+                onTenderDeleted={id => {
+                  setDeletedIds(prev => new Set(prev).add(id));
+                  props.onTenderDeleted?.(id);
+                }}
               />
             )}
           </Panel>
         </div>
       )}
 
+      {/* Floating 6-Second Undo Toast */}
       {undoItem && (
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-5 right-5 z-40 flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm shadow-lg"
+          className="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full border border-line bg-surface px-4 py-2.5 shadow-2xl animate-in fade-in slide-in-from-bottom-4"
         >
-          <span>
-            Moved to <span className="font-semibold">{undoItem.status}</span>
+          <span className="text-xs font-semibold text-ink">
+            Moved to Passed: "{undoItem.tender.title.slice(0, 32)}..."
           </span>
-          <Button
-            size="sm"
-            variant="primary"
-            onClick={() => {
-              const restored = undoItem.tender;
-              if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-              setUndoItem(null);
-              setSelectedId(restored.id);
-              void props.onStatusChange(restored.id, 'New Opportunity');
-            }}
-          >
-            <Undo2 className="h-3.5 w-3.5" />
-            Undo
-          </Button>
           <button
             type="button"
-            onClick={() => {
-              if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-              setUndoItem(null);
-            }}
-            aria-label="Dismiss undo notification"
-            className="cursor-pointer text-xs text-ink-muted hover:text-ink"
+            onClick={handleUndo}
+            aria-label="Undo"
+            className="inline-flex cursor-pointer items-center gap-1 rounded-full bg-accent px-3 py-1 text-xs font-bold text-accent-ink hover:brightness-110 shadow-sm"
           >
-            <X className="h-3.5 w-3.5" />
+            <Undo2 className="h-3 w-3" />
+            Undo
           </button>
         </div>
       )}
 
+      {/* Manual Tender Dialog */}
       <Dialog
         open={addingManual}
         onClose={() => setAddingManual(false)}
-        title="Add tender manually"
-        footer={
-          <>
-            <Button onClick={() => setAddingManual(false)}>Cancel</Button>
-            <Button
-              variant="primary"
-              disabled={creatingManual || !manualForm.title.trim()}
-              onClick={() => void handleCreateManualTender()}
-            >
-              {creatingManual ? 'Saving…' : 'Create tender'}
-            </Button>
-          </>
-        }
+        title="Add tender"
       >
-        <div className="space-y-3">
+        <div className="space-y-4">
           {manualError && (
-            <div role="alert" className="rounded-lg bg-danger-soft px-3 py-2 text-xs font-medium text-danger">
+            <div className="rounded-lg bg-danger-soft p-3 text-xs text-danger">
               {manualError}
             </div>
           )}
 
-          <div className="rounded-lg border border-dashed border-line bg-surface-2 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <label className="cursor-pointer text-xs font-semibold text-accent hover:underline">
-                <input
-                  type="file"
-                  accept="image/*,.pdf"
-                  className="hidden"
-                  onChange={e => {
-                    const f = e.target.files?.[0];
-                    if (f) void handleManualFilePicked(f);
-                  }}
-                />
-                {manualFile ? `Attached: ${manualFile.filename}` : 'Attach tender notice image or PDF (optional)'}
+          <div className="rounded-lg border border-dashed border-line p-4 text-center">
+            <input
+              type="file"
+              accept="image/*,.pdf"
+              id="manual-file-input"
+              className="hidden"
+              onChange={e => {
+                const f = e.target.files?.[0];
+                if (f) void handleManualFilePicked(f);
+                e.target.value = '';
+              }}
+            />
+            {manualFile ? (
+              <div className="flex items-center justify-between">
+                <span className="truncate text-xs font-medium">{manualFile.filename}</span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() => void handleAutoFillManualWithAi()}
+                    disabled={extractingManualAi}
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    {extractingManualAi ? 'Extracting…' : 'Extract with AI'}
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => setManualFile(null)}
+                    className="cursor-pointer text-ink-muted hover:text-ink"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <label htmlFor="manual-file-input" className="cursor-pointer text-xs text-ink-muted hover:text-ink">
+                Upload image or PDF to extract details with AI
               </label>
-              {manualFile && (
-                <Button size="sm" onClick={() => void handleAutoFillManualWithAi()} disabled={extractingManualAi}>
-                  <Sparkles className="h-3.5 w-3.5" />
-                  {extractingManualAi ? 'Extracting…' : 'Auto-fill with AI'}
-                </Button>
-              )}
-            </div>
+            )}
           </div>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-semibold text-ink-muted">Tender title *</span>
+            <span className="mb-1 block text-xs font-semibold text-ink-muted">Title *</span>
             <input
               value={manualForm.title}
               onChange={e => setManualForm({ ...manualForm, title: e.target.value })}
@@ -1358,11 +1713,11 @@ export function InboxScreen(props: InboxScreenProps) {
 
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
-              <span className="mb-1 block text-xs font-semibold text-ink-muted">Organization</span>
+              <span className="mb-1 block text-xs font-semibold text-ink-muted">Organization *</span>
               <input
                 value={manualForm.organization}
                 onChange={e => setManualForm({ ...manualForm, organization: e.target.value })}
-                placeholder="Procuring agency"
+              placeholder="Procuring agency"
                 className={fieldInputClass}
               />
             </label>
@@ -1371,7 +1726,7 @@ export function InboxScreen(props: InboxScreenProps) {
               <input
                 value={manualForm.reference_no}
                 onChange={e => setManualForm({ ...manualForm, reference_no: e.target.value })}
-                placeholder="e.g. PPRA-2026-104"
+              placeholder="e.g. PPRA-2026-104"
                 className={`${fieldInputClass} font-mono`}
               />
             </label>
@@ -1389,22 +1744,39 @@ export function InboxScreen(props: InboxScreenProps) {
               <input
                 value={manualForm.estimated_value}
                 onChange={e => setManualForm({ ...manualForm, estimated_value: e.target.value })}
-                placeholder="e.g. PKR 15,000,000"
+                placeholder="e.g. PKR 25,000,000"
                 className={fieldInputClass}
               />
             </label>
           </div>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-semibold text-ink-muted">Summary / Scope</span>
-            <textarea
-              rows={3}
-              value={manualForm.description}
-              onChange={e => setManualForm({ ...manualForm, description: e.target.value })}
-              placeholder="Key deliverables, eligibility criteria, bid security…"
+            <span className="mb-1 block text-xs font-semibold text-ink-muted">Direct Portal URL</span>
+            <input
+              value={manualForm.direct_url}
+              onChange={e => setManualForm({ ...manualForm, direct_url: e.target.value })}
+              placeholder="https://..."
               className={fieldInputClass}
             />
           </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-ink-muted">Summary / Scope</span>
+            <textarea
+              rows={4}
+              value={manualForm.description}
+              onChange={e => setManualForm({ ...manualForm, description: e.target.value })}
+              placeholder="Enter tender scope, requirements…"
+              className={fieldInputClass}
+            />
+          </label>
+
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setAddingManual(false)}>Cancel</Button>
+            <Button variant="primary" disabled={creatingManual || !manualForm.title.trim()} onClick={() => void handleCreateManualTender()}>
+              {creatingManual ? 'Creating…' : 'Create tender'}
+            </Button>
+          </div>
         </div>
       </Dialog>
     </div>

@@ -91,7 +91,7 @@ export function parseDateString(raw: string): string | null {
     }
 
     // 2b. Named month format (Month first): e.g. September 25, 2026, Jun 30th 2026, Aug 17, 2026
-    const monthFirstMatch = cleanStr.match(/^([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{1,2})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/i);
+    const monthFirstMatch = cleanStr.match(/^([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{1,2})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
     if (monthFirstMatch) {
       const month = MONTH_NAMES[monthFirstMatch[1].toLowerCase()];
       const day = parseInt(monthFirstMatch[2], 10);
@@ -118,6 +118,13 @@ export function parseDateString(raw: string): string | null {
         }
       }
       return null;
+    }
+
+    // 3a. Full ISO timestamp with an explicit offset (e.g. "...Z" or "...+05:00") is already unambiguous.
+    // Re-reading it as PKT wall-clock time would shift UTC timestamps by 5 hours on every round trip.
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(str)) {
+      const d = new Date(str);
+      return isNaN(d.getTime()) ? null : d.toISOString();
     }
 
     // 3. ISO format YYYY-MM-DD with optional time
@@ -178,6 +185,59 @@ export function formatClosingDate(isoDate: string | null): string {
   }
 }
 
+/**
+ * Normalizes an AI/OCR-extracted (or otherwise untrusted) date string into a canonical UTC ISO
+ * timestamp. Returns null when the value cannot be parsed, so malformed model output is never
+ * persisted: SQLite's julianday() returns NULL for such strings, which would silently exempt the
+ * tender from every expiry check and retention query.
+ */
+export function normalizeExtractedDate(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  const iso = parseDateString(String(raw));
+  if (!iso) return null;
+  const ms = new Date(iso).getTime();
+  return isNaN(ms) ? null : new Date(ms).toISOString();
+}
+
+export interface DeadlineResolution {
+  /** The deadline to keep: the later of the known and extracted deadlines (or whichever one is valid). */
+  closingDate: string | null;
+  /** True when the extracted deadline is strictly later than a valid known deadline. */
+  isExtension: boolean;
+  /** True when the resolved deadline is in the past. */
+  isExpired: boolean;
+}
+
+/**
+ * Reconciles a tender's known deadline with a newly extracted one. The later valid date wins, so an
+ * old attachment (or an AI misread) can never pull a deadline backwards past a listing's extension
+ * and cause a still-open tender to be auto-expired.
+ */
+export function reconcileDeadline(
+  known: string | null | undefined,
+  extracted: string | null | undefined,
+  nowMs: number = Date.now()
+): DeadlineResolution {
+  const knownMs = known ? new Date(known).getTime() : NaN;
+  const validKnown = !isNaN(knownMs) ? known! : null;
+  const extractedIso = normalizeExtractedDate(extracted);
+  const extractedMs = extractedIso ? new Date(extractedIso).getTime() : NaN;
+
+  let closingDate: string | null = validKnown;
+  let isExtension = false;
+  if (extractedIso) {
+    if (!validKnown) {
+      closingDate = extractedIso;
+    } else if (extractedMs > knownMs) {
+      closingDate = extractedIso;
+      isExtension = true;
+    }
+  }
+
+  const resolvedMs = closingDate ? new Date(closingDate).getTime() : NaN;
+  return { closingDate, isExtension, isExpired: !isNaN(resolvedMs) && resolvedMs < nowMs };
+}
+
 export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:st|nd|rd|th)?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
 
 /**
@@ -186,7 +246,7 @@ export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\
 export function extractDatesFromText(rowText: string): { publishDate: string | null; closingDate: string | null } {
   // 1. Look for explicit labels (including "Dead Line" with space used on BPPRA ePPS)
   const closingLabelRegex = new RegExp(`(?:closing|submission|dead\\s*line|due|last)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
-  const publishLabelRegex = new RegExp(`(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
+  const publishLabelRegex = new RegExp(`(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening|create(?:d)?|creation)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
 
   const closingMatch = rowText.match(closingLabelRegex);
   const publishMatch = rowText.match(publishLabelRegex);

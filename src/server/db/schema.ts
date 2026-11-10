@@ -29,6 +29,8 @@ export function initDatabase() {
       status_notes TEXT DEFAULT '',
       is_bookmarked INTEGER DEFAULT 0,
       viewed INTEGER DEFAULT 0,
+      passed_at TEXT,
+      slimmed_at TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
@@ -94,10 +96,31 @@ export function initDatabase() {
       key TEXT PRIMARY KEY,
       value TEXT
     );
+
+    -- 7. Pending File Purges (Resilient lock-retry queue for Windows / GDrive)
+    CREATE TABLE IF NOT EXISTS pending_file_purges (
+      id TEXT PRIMARY KEY,
+      folder_path TEXT NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- 8. Deleted Tenders (Suppression list preventing scraper re-importing open manual deletes)
+    CREATE TABLE IF NOT EXISTS deleted_tenders (
+      id TEXT PRIMARY KEY,
+      canonical_id TEXT NOT NULL,
+      closing_date TEXT,
+      deleted_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_deleted_tenders_canonical ON deleted_tenders(canonical_id);
   `);
 
-  // Optional date the owner expects the award result and hybrid embedding columns.
+  // Migrations for columns added over time
   try { db.prepare('ALTER TABLE tenders ADD COLUMN result_expected_date TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE tenders ADD COLUMN passed_at TEXT').run(); } catch {}
+  try { db.prepare('ALTER TABLE tenders ADD COLUMN slimmed_at TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE tenders ADD COLUMN embedding BLOB').run(); } catch {}
   try { db.prepare('ALTER TABLE tenders ADD COLUMN semantic_score REAL DEFAULT 0').run(); } catch {}
   try { db.prepare('ALTER TABLE domain_tracks ADD COLUMN embedding BLOB').run(); } catch {}

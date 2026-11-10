@@ -8,7 +8,9 @@ describe('seed-sample script smoke test', () => {
     // Run seed-sample
     await import('../../scripts/seed-sample.js');
 
-    const sampleDbPath = path.resolve(process.cwd(), 'data-sample', 'tender_tracker.db');
+    const sampleDbPath = process.env.TENDER_DATA_DIR
+      ? path.resolve(process.env.TENDER_DATA_DIR, 'tender_tracker.db')
+      : path.resolve(process.cwd(), 'data-sample', 'tender_tracker.db');
     expect(fs.existsSync(sampleDbPath)).toBe(true);
 
     const checkDb = new Database(sampleDbPath, { readonly: true });

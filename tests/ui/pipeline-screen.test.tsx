@@ -258,6 +258,9 @@ describe('PipelineScreen component', () => {
     // Click "Pass" button
     const passBtn = screen.getByRole('button', { name: 'Pass' });
     await user.click(passBtn);
+    // Confirm pass in modal
+    const confirmBtn = screen.getByRole('button', { name: /Pass & Remove Files/i });
+    await user.click(confirmBtn);
     expect(handleStatusChange).toHaveBeenCalledWith('tender-p1', 'Passed');
   });
 
@@ -296,7 +299,7 @@ describe('PipelineScreen component', () => {
     // Click Reopen button
     const reopenBtn = screen.getByRole('button', { name: 'Reopen' });
     await user.click(reopenBtn);
-    expect(handleStatusChange).toHaveBeenCalledWith('passed-1', 'Under Review');
+    expect(handleStatusChange).toHaveBeenCalledWith('passed-1', 'New Opportunity');
 
     // Rerender with 0 passed tenders
     rerender(
