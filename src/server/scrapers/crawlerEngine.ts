@@ -10,8 +10,7 @@ import {
   buildTrackEmbeddingText,
   buildTenderEmbeddingText,
   computeTextSemanticSimilarity,
-  generateEmbeddingAsync,
-  serializeEmbedding
+  embedTextToBlobAsync
 } from '../embeddingService.js';
 import * as cheerio from 'cheerio';
 import https from 'https';
@@ -1272,8 +1271,9 @@ export async function processAndSaveTender(
     return { isNew: false, hasCorrigendum: false, matched: false };
   }
 
-  const tenderEmbeddingVec = await generateEmbeddingAsync(buildTenderEmbeddingText(item));
-  const tenderEmbeddingBuf = serializeEmbedding(tenderEmbeddingVec);
+  // Tagged with its vector space (MiniLM, or fast if the model is not loaded yet) so it is
+  // only ever compared against vectors of the same kind.
+  const tenderEmbeddingBuf = await embedTextToBlobAsync(buildTenderEmbeddingText(item));
 
   // Check Deduplication (3-Tier: Reference No -> Bigram -> Semantic Vector)
   const dedupMatch = findCanonicalMatch({
@@ -1554,7 +1554,8 @@ export async function processAndSaveTender(
                   db.prepare('UPDATE tenders SET reference_no = ? WHERE id = ?').run(ocrResult.referenceNo, tenderId);
                 }
                 if (ocrResult.summaryScope && (!currentTender.description || currentTender.description === item.title)) {
-                  db.prepare('UPDATE tenders SET description = ? WHERE id = ?').run(ocrResult.summaryScope, tenderId);
+                  // Clear the now-stale embedding; the background backfill re-embeds the new text.
+                  db.prepare('UPDATE tenders SET description = ?, embedding = NULL WHERE id = ?').run(ocrResult.summaryScope, tenderId);
                 }
                 if (ocrResult.estimatedValue && !currentTender.estimated_value) {
                   db.prepare('UPDATE tenders SET estimated_value = ? WHERE id = ?').run(ocrResult.estimatedValue, tenderId);

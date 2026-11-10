@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   clearAllTenders,
+  countTenderEmbeddingsBySpace,
   getAllTenders,
   listBackups,
   backupNow,
@@ -169,17 +170,14 @@ systemRouter.post('/ai/extract-file', async (req, res) => {
 // 5. Local Hybrid Embedding Engine Status
 systemRouter.get('/system/embedding-status', (req, res) => {
   const engineStatus = getEmbeddingEngineStatus();
-  let indexedTenders = 0;
-  let totalTenders = 0;
+  let counts = { totalTenders: 0, indexedTenders: 0, modelIndexedTenders: 0 };
   try {
-    totalTenders = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any)?.c || 0;
-    indexedTenders = (db.prepare('SELECT COUNT(*) as c FROM tenders WHERE embedding IS NOT NULL').get() as any)?.c || 0;
+    counts = countTenderEmbeddingsBySpace();
   } catch {}
 
   res.json({
     ...engineStatus,
-    indexedTenders,
-    totalTenders
+    ...counts
   });
 });
 

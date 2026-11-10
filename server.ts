@@ -11,6 +11,7 @@ import {
 } from './src/server/db.js';
 import { initStartupScheduler, stopStartupScheduler } from './src/server/scheduler.js';
 import { initEmbeddingModel } from './src/server/embeddingService.js';
+import { backfillModelEmbeddings } from './src/server/embeddingBackfill.js';
 import { apiRouter } from './src/server/routes/index.js';
 import { initSessionLogger, closeSessionLogger, requestLoggerMiddleware } from './src/server/logger.js';
 
@@ -53,7 +54,10 @@ export async function startServer() {
   initSessionLogger();
   initDatabase();
   initStartupScheduler();
-  void initEmbeddingModel().then(() => {
+  void initEmbeddingModel().then(async () => {
+    // Upgrade legacy/fast vectors to MiniLM before re-scoring, so track matching compares
+    // like with like.
+    try { await backfillModelEmbeddings(1000); } catch (err) { console.warn('[Embedding Engine] Backfill failed:', err); }
     try { reScoreTendersAgainstTracks(); } catch {}
   });
 

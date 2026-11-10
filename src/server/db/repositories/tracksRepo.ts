@@ -5,8 +5,36 @@ import {
   buildTenderEmbeddingText,
   computeFastSemanticEmbedding,
   computeTextSemanticSimilarity,
-  serializeEmbedding
+  serializeEmbedding,
+  EMBEDDING_BLOB_BYTES,
+  MINILM_BLOB_HEADER_HEX
 } from '../../embeddingService.js';
+
+export interface TrackEmbeddingBackfillRow {
+  id: string;
+  name: string;
+  positive_keywords: string;
+  embedding: Buffer | null;
+}
+
+/** Tracks whose stored embedding is missing, legacy-untagged, or not in the MiniLM space. */
+export function getTracksNeedingModelEmbedding(): TrackEmbeddingBackfillRow[] {
+  return db.prepare(`
+    SELECT id, name, positive_keywords, embedding FROM domain_tracks
+    WHERE embedding IS NULL
+       OR length(embedding) <> ?
+       OR hex(substr(embedding, 1, 4)) <> ?
+  `).all(EMBEDDING_BLOB_BYTES, MINILM_BLOB_HEADER_HEX) as TrackEmbeddingBackfillRow[];
+}
+
+/** Stores a re-computed track embedding only if the track is unchanged since it was read. */
+export function setTrackEmbeddingIfUnchanged(row: TrackEmbeddingBackfillRow, blob: Buffer): boolean {
+  const res = db.prepare(`
+    UPDATE domain_tracks SET embedding = ?
+    WHERE id = ? AND name IS ? AND positive_keywords IS ? AND embedding IS ?
+  `).run(blob, row.id, row.name, row.positive_keywords, row.embedding);
+  return res.changes > 0;
+}
 
 export function getAllDomainTracks(): DomainTrack[] {
   const rows = db.prepare('SELECT * FROM domain_tracks ORDER BY name ASC').all() as any[];

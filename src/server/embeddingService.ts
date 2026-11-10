@@ -236,21 +236,74 @@ export function normalizeVectorL2(vec: Float32Array): Float32Array {
 }
 
 /**
- * Serializes a 384-dimensional Float32Array into a compact 1,536-byte SQLite BLOB Buffer.
+ * Vector spaces. Both produce 384-dim vectors, but their coordinates mean entirely different
+ * things: a cosine between a 'fast' vector and a 'minilm' vector is meaningless noise. Every
+ * stored BLOB therefore carries a 4-byte header naming its space, and similarity is only ever
+ * computed between two vectors of the same space.
  */
-export function serializeEmbedding(vec: Float32Array | null | undefined): Buffer | null {
+export type EmbeddingSpace = 'fast' | 'minilm';
+export type StoredEmbeddingSpace = EmbeddingSpace | 'unknown';
+
+const BLOB_MAGIC = [0x45, 0x56]; // "EV"
+const BLOB_VERSION = 1;
+const BLOB_HEADER_BYTES = 4;
+const SPACE_CODES: Record<EmbeddingSpace, number> = { fast: 1, minilm: 2 };
+export const EMBEDDING_BLOB_BYTES = BLOB_HEADER_BYTES + EMBEDDING_DIM * 4; // 1,540
+/** SQLite hex literal of the header of a MiniLM-tagged BLOB, for repository queries. */
+export const MINILM_BLOB_HEADER_HEX = '45560102';
+
+/**
+ * Serializes a 384-dimensional Float32Array into a tagged 1,540-byte SQLite BLOB
+ * (4-byte header naming the vector space + 1,536 bytes of float32 data).
+ */
+export function serializeEmbedding(vec: Float32Array | null | undefined, space: EmbeddingSpace = 'fast'): Buffer | null {
   if (!vec || vec.length !== EMBEDDING_DIM) return null;
-  return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
+  const out = Buffer.alloc(EMBEDDING_BLOB_BYTES);
+  out[0] = BLOB_MAGIC[0];
+  out[1] = BLOB_MAGIC[1];
+  out[2] = BLOB_VERSION;
+  out[3] = SPACE_CODES[space];
+  Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength).copy(out, BLOB_HEADER_BYTES);
+  return out;
 }
 
 /**
- * Deserializes a SQLite BLOB Buffer back into a 384-dimensional Float32Array.
+ * Reads a stored embedding BLOB. Legacy untagged 1,536-byte BLOBs (written before tagging) are
+ * returned with space 'unknown': they may be MiniLM or fast vectors and must not be compared.
+ */
+export function readEmbeddingBlob(
+  buf: Buffer | Uint8Array | null | undefined
+): { vec: Float32Array; space: StoredEmbeddingSpace } | null {
+  if (!buf) return null;
+  const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  let offset = 0;
+  let space: StoredEmbeddingSpace = 'unknown';
+
+  if (
+    bytes.byteLength === EMBEDDING_BLOB_BYTES &&
+    bytes[0] === BLOB_MAGIC[0] && bytes[1] === BLOB_MAGIC[1] && bytes[2] === BLOB_VERSION
+  ) {
+    offset = BLOB_HEADER_BYTES;
+    space = bytes[3] === SPACE_CODES.minilm ? 'minilm' : bytes[3] === SPACE_CODES.fast ? 'fast' : 'unknown';
+  } else if (bytes.byteLength !== EMBEDDING_DIM * 4) {
+    return null;
+  }
+
+  const copy = new Uint8Array(EMBEDDING_DIM * 4);
+  copy.set(bytes.subarray(offset, offset + EMBEDDING_DIM * 4));
+  return { vec: new Float32Array(copy.buffer), space };
+}
+
+/**
+ * Deserializes a stored BLOB (tagged or legacy) back into a 384-dimensional Float32Array.
  */
 export function deserializeEmbedding(buf: Buffer | Uint8Array | null | undefined): Float32Array | null {
-  if (!buf || buf.byteLength !== EMBEDDING_DIM * 4) return null;
-  const copy = new Uint8Array(buf.byteLength);
-  copy.set(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
-  return new Float32Array(copy.buffer);
+  return readEmbeddingBlob(buf)?.vec ?? null;
+}
+
+/** Returns the vector space a stored BLOB belongs to, or null for a missing/malformed BLOB. */
+export function getEmbeddingSpace(buf: Buffer | Uint8Array | null | undefined): StoredEmbeddingSpace | null {
+  return readEmbeddingBlob(buf)?.space ?? null;
 }
 
 /**
@@ -405,37 +458,78 @@ export async function initEmbeddingModel(forceInitInTest = false): Promise<boole
  * or falls back seamlessly to `computeFastSemanticEmbedding`.
  */
 export async function generateEmbeddingAsync(rawText: string): Promise<Float32Array> {
+  return (await generateEmbeddingWithSpaceAsync(rawText)).vec;
+}
+
+/**
+ * Like generateEmbeddingAsync, but also reports which vector space the result is in, so callers
+ * that persist it can tag the BLOB correctly. Falls back to the fast space when the model is
+ * not loaded (e.g. during startup) or inference fails.
+ */
+export async function generateEmbeddingWithSpaceAsync(rawText: string): Promise<{ vec: Float32Array; space: EmbeddingSpace }> {
   const norm = normalizeEmbeddingText(rawText);
-  if (!norm) return new Float32Array(EMBEDDING_DIM);
+  if (!norm) return { vec: new Float32Array(EMBEDDING_DIM), space: 'fast' };
+  const modelVec = await embedWithModelAsync(norm);
+  if (modelVec) return { vec: modelVec, space: 'minilm' };
+  return { vec: computeFastSemanticEmbedding(norm), space: 'fast' };
+}
+
+/** Embeds text and returns a correctly tagged BLOB ready to store. */
+export async function embedTextToBlobAsync(rawText: string): Promise<Buffer | null> {
+  const { vec, space } = await generateEmbeddingWithSpaceAsync(rawText);
+  return serializeEmbedding(vec, space);
+}
+
+/** True when the MiniLM pipeline is loaded and can produce 'minilm' vectors. */
+export function isModelEmbeddingAvailable(): boolean {
+  return Boolean(extractorPipeline);
+}
+
+/**
+ * Returns a MiniLM vector for the text, or null when the model is unavailable. Never falls back
+ * to the fast space, so the result is always safe to tag as 'minilm'.
+ */
+export async function embedWithModelAsync(rawText: string): Promise<Float32Array | null> {
+  const norm = normalizeEmbeddingText(rawText);
+  if (!norm) return null;
 
   const cachedOnnx = onnxEmbeddingCache.get(norm);
   if (cachedOnnx) return cachedOnnx;
+  if (!extractorPipeline) return null;
 
-  if (extractorPipeline) {
-    try {
-      const output = await extractorPipeline(norm, { pooling: 'mean', normalize: true });
-      if (output && output.data && output.data.length === EMBEDDING_DIM) {
-        const vec = new Float32Array(output.data);
-        normalizeVectorL2(vec);
-        if (onnxEmbeddingCache.size >= MAX_CACHE_ENTRIES) {
-          const oldest = onnxEmbeddingCache.keys().next().value;
-          if (oldest !== undefined) onnxEmbeddingCache.delete(oldest);
-        }
-        onnxEmbeddingCache.set(norm, vec);
-        return vec;
+  try {
+    const output = await extractorPipeline(norm, { pooling: 'mean', normalize: true });
+    if (output && output.data && output.data.length === EMBEDDING_DIM) {
+      const vec = new Float32Array(output.data);
+      normalizeVectorL2(vec);
+      if (onnxEmbeddingCache.size >= MAX_CACHE_ENTRIES) {
+        const oldest = onnxEmbeddingCache.keys().next().value;
+        if (oldest !== undefined) onnxEmbeddingCache.delete(oldest);
       }
-    } catch (err: any) {
-      console.warn('[Embedding Engine] ONNX inference warning, using fast semantic fallback:', err?.message);
+      onnxEmbeddingCache.set(norm, vec);
+      return vec;
     }
+  } catch (err: any) {
+    console.warn('[Embedding Engine] ONNX inference warning, using fast semantic fallback:', err?.message);
   }
+  return null;
+}
 
-  return computeFastSemanticEmbedding(norm);
+/**
+ * Test seam: installs a fake feature-extraction pipeline (or removes it with null) so the
+ * MiniLM code paths can be exercised without loading the 22 MB model.
+ */
+export function __setExtractorPipelineForTests(pipeline: any): void {
+  extractorPipeline = pipeline;
+  onnxEmbeddingCache.clear();
 }
 
 /**
  * Computes semantic similarity between two texts in [0.0, 1.0].
- * Uses cached ONNX vectors when both are available in the ONNX space, and combines with
- * the deterministic 384-dim procurement concept space so coordinate spaces are never mismatched.
+ * The fast concept-space similarity is always computed from the texts themselves. A MiniLM
+ * similarity is added only when BOTH sides have a MiniLM vector (a 'minilm'-tagged BLOB or the
+ * in-memory model cache). Fast-tagged and legacy untagged BLOBs are never compared against
+ * MiniLM vectors, because the two coordinate spaces are unrelated.
  */
 export function computeTextSemanticSimilarity(
   textA: string,
@@ -453,15 +547,22 @@ export function computeTextSemanticSimilarity(
   const fastB = computeFastSemanticEmbedding(normB);
   const fastSim = Math.max(0, cosineSimilarity(fastA, fastB));
 
-  // 2. If both have precomputed or cached ONNX vectors, compute similarity in ONNX space
-  const vecA = onnxEmbeddingCache.get(normA) || deserializeEmbedding(precomputedBlobA);
-  const vecB = onnxEmbeddingCache.get(normB) || deserializeEmbedding(precomputedBlobB);
+  // 2. If both sides have a MiniLM vector, also compute similarity in the MiniLM space.
+  // A stored BLOB is preferred over the cache because it describes the stored record's full text.
+  const vecA = minilmVectorFor(normA, precomputedBlobA);
+  const vecB = minilmVectorFor(normB, precomputedBlobB);
   if (vecA && vecB) {
     const blobSim = Math.max(0, cosineSimilarity(vecA, vecB));
     return Math.max(fastSim, blobSim);
   }
 
   return fastSim;
+}
+
+function minilmVectorFor(norm: string, blob?: Buffer | Uint8Array | null): Float32Array | null {
+  const stored = readEmbeddingBlob(blob);
+  if (stored && stored.space === 'minilm') return stored.vec;
+  return onnxEmbeddingCache.get(norm) || null;
 }
 
 /**

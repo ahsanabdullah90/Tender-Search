@@ -1,6 +1,7 @@
 import { db, backupDatabase, getPortalHealthList, updatePortalHealth } from './db.js';
 import { startCrawlerScan, getActivePortalsList } from './scrapers/crawlerEngine.js';
 import { runRetentionCycle } from './retention.js';
+import { backfillModelEmbeddings } from './embeddingBackfill.js';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 let retentionInterval: NodeJS.Timeout | null = null;
@@ -9,7 +10,8 @@ let lastDailyHealthCheck: number = 0;
 export const schedulerDeps = {
   startCrawlerScan: (portalId?: string, awaitCompletion?: boolean) => startCrawlerScan(portalId, awaitCompletion),
   backupDatabase: () => backupDatabase(),
-  runRetentionCycle: (opts?: any) => runRetentionCycle(opts)
+  runRetentionCycle: (opts?: any) => runRetentionCycle(opts),
+  backfillModelEmbeddings: (limit?: number) => backfillModelEmbeddings(limit)
 };
 
 export function initStartupScheduler() {
@@ -42,6 +44,10 @@ export function initStartupScheduler() {
     } catch (err) {
       console.warn('[Tender Tracker Scheduler] Retention cycle error:', err);
     }
+    // Upgrade vectors written while the model was unavailable or after edits (no-op if the model is not loaded)
+    schedulerDeps.backfillModelEmbeddings(100).catch(err =>
+      console.warn('[Tender Tracker Scheduler] Embedding backfill error:', err)
+    );
   }, 5 * 60 * 1000);
 
   // 2. Check if a catch-up scan is required

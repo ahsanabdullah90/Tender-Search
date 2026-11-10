@@ -5,8 +5,54 @@ import {
   buildTenderEmbeddingText,
   computeFastSemanticEmbedding,
   computeTextSemanticSimilarity,
-  serializeEmbedding
+  serializeEmbedding,
+  EMBEDDING_BLOB_BYTES,
+  MINILM_BLOB_HEADER_HEX
 } from '../../embeddingService.js';
+
+export interface EmbeddingBackfillRow {
+  id: string;
+  title: string;
+  organization: string | null;
+  description: string | null;
+  embedding: Buffer | null;
+}
+
+/** Tenders whose stored embedding is missing, legacy-untagged, or not in the MiniLM space. */
+export function getTendersNeedingModelEmbedding(limit: number = 100): EmbeddingBackfillRow[] {
+  return db.prepare(`
+    SELECT id, title, organization, description, embedding FROM tenders
+    WHERE embedding IS NULL
+       OR length(embedding) <> ?
+       OR hex(substr(embedding, 1, 4)) <> ?
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(EMBEDDING_BLOB_BYTES, MINILM_BLOB_HEADER_HEX, limit) as EmbeddingBackfillRow[];
+}
+
+/**
+ * Stores a re-computed embedding only if the tender's text and embedding are unchanged since
+ * `row` was read, so a concurrent edit is never overwritten with a vector of the old text.
+ * Does not touch updated_at (Inbox ordering).
+ */
+export function setTenderEmbeddingIfUnchanged(row: EmbeddingBackfillRow, blob: Buffer): boolean {
+  const res = db.prepare(`
+    UPDATE tenders SET embedding = ?
+    WHERE id = ? AND title IS ? AND organization IS ? AND description IS ? AND embedding IS ?
+  `).run(blob, row.id, row.title, row.organization, row.description, row.embedding);
+  return res.changes > 0;
+}
+
+export function countTenderEmbeddingsBySpace(): { totalTenders: number; indexedTenders: number; modelIndexedTenders: number } {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS indexed,
+      SUM(CASE WHEN length(embedding) = ? AND hex(substr(embedding, 1, 4)) = ? THEN 1 ELSE 0 END) AS model
+    FROM tenders
+  `).get(EMBEDDING_BLOB_BYTES, MINILM_BLOB_HEADER_HEX) as any;
+  return { totalTenders: row?.total || 0, indexedTenders: row?.indexed || 0, modelIndexedTenders: row?.model || 0 };
+}
 
 function mapTenderRow(row: any): Tender {
   const { embedding, ...rest } = row;
@@ -391,9 +437,20 @@ export function updateTenderFields(
   const nextTitle = fields.title !== undefined ? fields.title : existing.title;
   const nextOrg = fields.organization !== undefined ? fields.organization : existing.organization;
   const nextDesc = fields.description !== undefined ? fields.description : existing.description;
-  const embeddingBuf = serializeEmbedding(
-    computeFastSemanticEmbedding(buildTenderEmbeddingText({ title: nextTitle, organization: nextOrg, description: nextDesc }))
-  );
+
+  // Only re-embed when the embedded text actually changed. Previously every update (including
+  // fetch-documents and analyze, which only touch dossiers/dates) overwrote a MiniLM vector with
+  // a fast-space one. When the text did change, a fast-tagged vector is stored now and the
+  // background backfill upgrades it to MiniLM.
+  const textChanged =
+    nextTitle !== existing.title || nextOrg !== existing.organization || (nextDesc || '') !== (existing.description || '');
+  const existingEmbedding = (db.prepare('SELECT embedding FROM tenders WHERE id = ?').get(id) as any)?.embedding ?? null;
+  const embeddingBuf = textChanged || !existingEmbedding
+    ? serializeEmbedding(
+        computeFastSemanticEmbedding(buildTenderEmbeddingText({ title: nextTitle, organization: nextOrg, description: nextDesc })),
+        'fast'
+      )
+    : existingEmbedding;
 
   db.prepare(`
     UPDATE tenders

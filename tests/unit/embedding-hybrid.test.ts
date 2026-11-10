@@ -41,12 +41,12 @@ describe('Local Hybrid Semantic & Keyword Engine', () => {
       expect(simSelf).toBeCloseTo(1.0, 4);
     });
 
-    it('serializes and deserializes 384-dim Float32Array to 1,536-byte Buffer losslessly', () => {
+    it('serializes and deserializes 384-dim Float32Array to a tagged 1,540-byte Buffer losslessly', () => {
       const original = computeFastSemanticEmbedding('Enterprise datacenter rack servers and SAN storage');
       const buf = serializeEmbedding(original);
 
       expect(buf).not.toBeNull();
-      expect(buf!.byteLength).toBe(EMBEDDING_DIM * 4); // 1,536 bytes
+      expect(buf!.byteLength).toBe(4 + EMBEDDING_DIM * 4); // 4-byte space header + 1,536 bytes
 
       const restored = deserializeEmbedding(buf);
       expect(restored).not.toBeNull();
