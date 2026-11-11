@@ -63,12 +63,13 @@ When creating a new file, find its exact home using this decision table:
 | **New API endpoint or REST domain** | `src/server/routes/` | `<domain>.routes.ts` (register in `routes/index.ts`) |
 | **New database query or table access** | `src/server/db/repositories/` | `<domain>Repo.ts` (export via `db/index.ts`) |
 | **Database table DDL or schema migration** | `src/server/db/schema.ts` | Within `initDatabase()` or migration block |
-| **New procurement portal parser** | `src/server/scrapers/` | Specific parser or registered in `crawlerEngine.ts` |
+| **New procurement portal parser** | `src/server/scrapers/` | `portalParsers.ts` or registered in `crawlerEngine.ts` |
 | **Date / string / parsing utility** | `src/server/scrapers/dateParser.ts` | Standalone exported function with tests |
 | **Scraper recovery or link scoring** | `src/server/scrapers/healer.ts` | Adhere strictly to the 7 Anti-Corruption Rules |
+| **Scraper transport & ingestion pipeline** | `src/server/scrapers/` | `htmlFetcher.ts`, `ingestPipeline.ts`, `tenderAnalysis.ts` |
 | **Core backend service or orchestrator** | `src/server/` | `<serviceName>.ts` (e.g. `dossierManager.ts`) |
 | **React screen or full view** | `src/components/` | `<Name>Screen.tsx` |
-| **Reusable UI widget / slideover / modal** | `src/components/` | `<Name>.tsx` |
+| **Reusable UI widget / slideover / modal** | `src/components/<screen>/` | Subdivided component (`Detail.tsx`, `AddTenderModal.tsx`, `TenderRow.tsx`) |
 | **Atomic UI primitive (button, input, badge)** | `src/ui/` | Within `src/ui/index.tsx` or `src/ui/<primitive>.tsx` |
 | **Logo, icon, or static brand image** | `public/brand/` | Lowercase kebab/hyphenated PNG/SVG (`logo-*.png`) |
 | **Standalone CLI or maintenance script** | `scripts/` | `<action>-<target>.ts` |

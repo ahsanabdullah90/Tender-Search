@@ -267,6 +267,16 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
         </Button>
       </div>
 
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-muted">
+        <div>
+          <span className="font-semibold text-ink">{portals.filter(p => p.status === 'online').length} of {portals.length}</span> sources checked successfully
+          {(() => {
+            const latestSuccess = portals.map(p => p.last_success_at).filter((x): x is string => Boolean(x)).sort().reverse()[0];
+            return latestSuccess ? <span> · Last success {lastChecked(latestSuccess)}</span> : null;
+          })()}
+        </div>
+      </div>
+
       <Panel>
         {[...portals]
           .sort((a, b) => ['verify', 'offline', 'working'].indexOf(portalState(a)) - ['verify', 'offline', 'working'].indexOf(portalState(b)))
@@ -594,6 +604,7 @@ interface Storage {
   passed_bytes: number;
   passed_tenders: number;
   tenders_with_documents: number;
+  awaiting_scope_count?: number;
   ai_configured?: boolean;
   ai_masked_key?: string | null;
   session_logs?: SessionLogMeta[];
@@ -607,7 +618,17 @@ interface Storage {
       pendingSlimCount: number;
       expiredUnreviewedCount: number;
       agedOutPassedCount: number;
+      awaitingScopeCount?: number;
     };
+  };
+  ingest_budgets?: {
+    upfrontTimeBudgetSec: number;
+    maxFileMb: number;
+    visionCallsPerScan: number;
+    visionCallsPerDay: number;
+    dailyVisionUsed: number;
+    aiTextCallsPerDay?: number;
+    dailyAiTextUsed?: number;
   };
 }
 
@@ -638,6 +659,14 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const [busy, setBusy] = useState(false);
   const [aiKeyInput, setAiKeyInput] = useState('');
   const [aiSaving, setAiSaving] = useState(false);
+  const [budgetsForm, setBudgetsForm] = useState({
+    upfrontTimeBudgetSec: 300,
+    maxFileMb: 25,
+    visionCallsPerScan: 20,
+    visionCallsPerDay: 100,
+    aiTextCallsPerDay: 150
+  });
+  const [budgetsSaving, setBudgetsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<'inbox' | 'prune' | 'erase' | null>(null);
   const [typed, setTyped] = useState('');
@@ -649,6 +678,15 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
       if (s.ok) {
         const sData = await s.json();
         setStorage(sData);
+        if (sData.ingest_budgets) {
+          setBudgetsForm({
+            upfrontTimeBudgetSec: sData.ingest_budgets.upfrontTimeBudgetSec,
+            maxFileMb: sData.ingest_budgets.maxFileMb,
+            visionCallsPerScan: sData.ingest_budgets.visionCallsPerScan,
+            visionCallsPerDay: sData.ingest_budgets.visionCallsPerDay,
+            aiTextCallsPerDay: sData.ingest_budgets.aiTextCallsPerDay ?? 150
+          });
+        }
         if (Array.isArray(sData.session_logs)) {
           setSessionLogs(sData.session_logs);
         }
@@ -836,6 +874,102 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
         </div>
       </DataSection>
 
+      <DataSection
+        title="Document Ingest & Vision Budgets"
+        description="Controls how long scans spend fetching documents upfront, maximum file size, and Gemini Vision OCR caps per scan and per day."
+      >
+        <div className="space-y-3">
+          {storage?.ingest_budgets && (
+            <div className="flex flex-wrap gap-4 text-xs text-ink-muted">
+              <div>
+                Daily Vision usage today: <span className="font-mono font-semibold text-ink">{storage.ingest_budgets.dailyVisionUsed} / {storage.ingest_budgets.visionCallsPerDay}</span> calls
+              </div>
+              <div>
+                Daily AI-text usage today: <span className="font-mono font-semibold text-ink">{storage.ingest_budgets.dailyAiTextUsed ?? 0} / {storage.ingest_budgets.aiTextCallsPerDay ?? 150}</span> calls
+              </div>
+            </div>
+          )}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <Field label="Upfront scan budget (sec)">
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                value={budgetsForm.upfrontTimeBudgetSec}
+                onChange={e => setBudgetsForm(f => ({ ...f, upfrontTimeBudgetSec: Number(e.target.value) }))}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="Max file size (MB)">
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={budgetsForm.maxFileMb}
+                onChange={e => setBudgetsForm(f => ({ ...f, maxFileMb: Number(e.target.value) }))}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="Vision calls per scan">
+              <input
+                type="number"
+                min={0}
+                max={500}
+                value={budgetsForm.visionCallsPerScan}
+                onChange={e => setBudgetsForm(f => ({ ...f, visionCallsPerScan: Number(e.target.value) }))}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="Vision calls per day">
+              <input
+                type="number"
+                min={0}
+                max={5000}
+                value={budgetsForm.visionCallsPerDay}
+                onChange={e => setBudgetsForm(f => ({ ...f, visionCallsPerDay: Number(e.target.value) }))}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="AI-text calls per day">
+              <input
+                type="number"
+                min={0}
+                max={5000}
+                value={budgetsForm.aiTextCallsPerDay}
+                onChange={e => setBudgetsForm(f => ({ ...f, aiTextCallsPerDay: Number(e.target.value) }))}
+                className={inputClass}
+              />
+            </Field>
+          </div>
+          <Button
+            variant="primary"
+            disabled={budgetsSaving}
+            onClick={async () => {
+              setBudgetsSaving(true);
+              try {
+                const res = await fetch('/api/system/ingest-budgets', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(budgetsForm)
+                });
+                if (res.ok) {
+                  setMessage('Document ingest budgets saved.');
+                  void load();
+                } else {
+                  setMessage('Could not save ingest budgets.');
+                }
+              } catch {
+                setMessage('Could not save ingest budgets.');
+              } finally {
+                setBudgetsSaving(false);
+              }
+            }}
+          >
+            {budgetsSaving ? 'Saving…' : 'Save ingest budgets'}
+          </Button>
+        </div>
+      </DataSection>
+
       <DataSection title="Export to Excel" description="Downloads a spreadsheet file you can open in Excel.">
         <div className="flex flex-wrap items-end gap-3">
           <Field label="What to include">
@@ -943,7 +1077,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 Unreviewed closed opportunities are automatically cleaned after the deadline grace period. Backups are retained for 15 days.
               </p>
 
-              <div className="grid gap-3 sm:grid-cols-3 pt-2">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 pt-2">
                 <div className="rounded-lg bg-surface-2 p-2.5">
                   <div className="text-xs text-ink-muted">Pending Passed Slim</div>
                   <div className="mt-0.5 font-mono text-sm font-bold">{storage.retention.status.pendingSlimCount}</div>
@@ -955,6 +1089,10 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 <div className="rounded-lg bg-surface-2 p-2.5">
                   <div className="text-xs text-ink-muted">Aged-out Passed</div>
                   <div className="mt-0.5 font-mono text-sm font-bold">{storage.retention.status.agedOutPassedCount}</div>
+                </div>
+                <div className="rounded-lg bg-surface-2 p-2.5">
+                  <div className="text-xs text-ink-muted">Awaiting Scope</div>
+                  <div className="mt-0.5 font-mono text-sm font-bold">{storage.retention.status.awaitingScopeCount ?? storage.awaiting_scope_count ?? 0}</div>
                 </div>
               </div>
 

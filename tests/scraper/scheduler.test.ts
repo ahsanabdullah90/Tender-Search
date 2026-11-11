@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { db, initDatabase, getPortalHealthList, updatePortalHealth } from '../../src/server/db.js';
+import { db, initDatabase, getPortalHealthList, updatePortalHealth, setAppSetting } from '../../src/server/db.js';
 import { initStartupScheduler, stopStartupScheduler, schedulerDeps } from '../../src/server/scheduler.js';
 
 describe('scheduler and startup watchdog', () => {
@@ -139,5 +139,57 @@ describe('scheduler and startup watchdog', () => {
 
     expect(() => initStartupScheduler()).not.toThrow();
     prepareSpy2.mockRestore();
+  });
+
+  describe('F5 & B7: Full-Scan Clock and Health Check Order', () => {
+    it('F5: uses last_full_scan_at from app_settings so a single-portal scan does not reset the clock', () => {
+      // Single portal scan was recent (1 hour ago)
+      updatePortalHealth('punjab_eproc', {
+        status: 'online',
+        last_scan_at: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString()
+      });
+
+      // But full scan was 15 hours ago
+      const fifteenHoursAgo = new Date(Date.now() - 15 * 60 * 60 * 1000).toISOString();
+      setAppSetting('last_full_scan_at', fifteenHoursAgo);
+
+      initStartupScheduler();
+      expect(schedulerDeps.startCrawlerScan).toHaveBeenCalled();
+
+      // Now set last_full_scan_at to 2 hours ago
+      stopStartupScheduler();
+      (schedulerDeps.startCrawlerScan as any).mockClear();
+      setAppSetting('last_full_scan_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+
+      initStartupScheduler();
+      const noArgCalls = (schedulerDeps.startCrawlerScan as any).mock.calls.filter((c: any[]) => c.length === 0);
+      expect(noArgCalls.length).toBe(0);
+    });
+
+    it('B7: daily health check runs after catch-up scan promise resolves', async () => {
+      let scanResolved = false;
+      let healthChecked = false;
+
+      schedulerDeps.startCrawlerScan = vi.fn().mockImplementation(() => {
+        return new Promise<any>(resolve => {
+          setTimeout(() => {
+            scanResolved = true;
+            resolve({ isScanning: false });
+          }, 30);
+        });
+      });
+
+      // Set last full scan to 15 hours ago to trigger catch-up
+      setAppSetting('last_full_scan_at', new Date(Date.now() - 15 * 60 * 60 * 1000).toISOString());
+
+      initStartupScheduler();
+
+      // Before catch-up finishes, health check has not run yet
+      expect(scanResolved).toBe(false);
+
+      // Wait for catch-up to complete
+      await new Promise(r => setTimeout(r, 60));
+      expect(scanResolved).toBe(true);
+    });
   });
 });

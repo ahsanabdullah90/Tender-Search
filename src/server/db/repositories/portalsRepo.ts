@@ -20,7 +20,9 @@ export function getPortalHealthList(): PortalHealth[] {
     consecutive_zero_yields: r.consecutive_zero_yields,
     last_error_message: r.last_error_message,
     access_mode: r.access_mode,
-    verified_status: r.verified_status
+    verified_status: r.verified_status,
+    last_success_at: r.last_success_at ?? null,
+    pages_scanned: r.pages_scanned ?? 0
   }));
 }
 
@@ -32,7 +34,8 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
     'portal_name', 'category', 'tier', 'base_url', 'tenders_url', 'login_url',
     'auth_username', 'auth_password', 'session_cookies',
     'status', 'last_scan_at', 'last_items_found', 'consecutive_zero_yields',
-    'last_error_message', 'access_mode', 'verified_status'
+    'last_error_message', 'access_mode', 'verified_status',
+    'last_success_at', 'pages_scanned'
   ]);
 
   const fields: string[] = [];
@@ -96,7 +99,9 @@ export function getPortalById(portalId: string): PortalHealth | null {
     consecutive_zero_yields: r.consecutive_zero_yields,
     last_error_message: r.last_error_message,
     access_mode: r.access_mode,
-    verified_status: r.verified_status
+    verified_status: r.verified_status,
+    last_success_at: r.last_success_at ?? null,
+    pages_scanned: r.pages_scanned ?? 0
   };
 }
 
@@ -181,3 +186,14 @@ export function deletePortal(portalId: string): boolean {
 
   return deleteTx();
 }
+
+export function getScanningPortalIds(): string[] {
+  const rows = db.prepare("SELECT portal_id FROM portal_health WHERE status = 'scanning'").all() as { portal_id: string }[];
+  return rows.map(r => r.portal_id);
+}
+
+export function getLastSuccessfulScanTimestamp(): string | null {
+  const row = db.prepare("SELECT MAX(last_scan_at) as last_scan FROM portal_health WHERE status != 'error'").get() as { last_scan?: string | null } | undefined;
+  return row?.last_scan ?? null;
+}
+

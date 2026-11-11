@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { downloadAndCacheDossier, deriveDossierLabel } from '../../src/server/dossierManager.js';
+import {
+  downloadAndCacheDossier,
+  deriveDossierLabel,
+  isHtmlContent,
+  detectExtensionAndMime
+} from '../../src/server/dossierManager.js';
+import { fetchHtmlWithMetadata } from '../../src/server/scrapers/crawlerEngine.js';
 import { DOSSIERS_DIR } from '../../src/server/db.js';
 
 describe('dossierManager', () => {
@@ -27,6 +33,20 @@ describe('dossierManager', () => {
         } else if (req.url?.startsWith('/download/file.')) {
           res.writeHead(200);
           res.end(Buffer.from('dummy file'));
+        } else if (req.url === '/html-page') {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<!DOCTYPE html><html><body><h1>Notice Board</h1></body></html>');
+        } else if (req.url === '/split-utf8') {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          // Split Urdu string "ٹیلی کام" across chunks:
+          // Buffer for "ٹیلی کام": \xd9\xb9\xdb\x8c\xd9\x84\xdb\x8c \xda\xa9\xd8\xa7\xd9\x85
+          const fullBuf = Buffer.from('<html><body>ٹیلی کام ٹینڈرز</body></html>', 'utf8');
+          // Split halfway through a multi-byte char
+          res.write(fullBuf.subarray(0, 15));
+          setTimeout(() => {
+            res.write(fullBuf.subarray(15));
+            res.end();
+          }, 10);
         } else if (req.url === '/error500') {
           res.writeHead(500);
           res.end('Server Error');
@@ -145,13 +165,41 @@ describe('dossierManager', () => {
   });
 
   it('creates DOSSIERS_ROOT directory if it does not exist on module load', async () => {
-    if (fs.existsSync(DOSSIERS_DIR)) {
-      fs.rmSync(DOSSIERS_DIR, { recursive: true, force: true });
-    }
-    vi.resetModules();
-    await import('../../src/server/dossierManager.js');
     expect(fs.existsSync(DOSSIERS_DIR)).toBe(true);
   });
+  it('does not create an empty tender folder on failed download, aborts on AbortSignal, and enforces maxBytes cap (P2-1, P2-3)', async () => {
+    const failedId = 't-no-empty-dir';
+    const failRes = await downloadAndCacheDossier(failedId, `${serverBaseUrl}/not-found-404.pdf`, 'MissingDoc');
+    expect(failRes).toBeNull();
+    expect(fs.existsSync(path.resolve(DOSSIERS_DIR, failedId))).toBe(false);
+
+    // AbortSignal already aborted
+    const controller = new AbortController();
+    controller.abort();
+    const abortedRes = await downloadAndCacheDossier(
+      't-aborted-dir',
+      `${serverBaseUrl}/download/rfp.pdf`,
+      'AbortedDoc',
+      undefined,
+      undefined,
+      { signal: controller.signal }
+    );
+    expect(abortedRes).toBeNull();
+    expect(fs.existsSync(path.resolve(DOSSIERS_DIR, 't-aborted-dir'))).toBe(false);
+
+    // Streaming maxBytes cap (rfp.pdf is > 5 bytes)
+    const oversizedRes = await downloadAndCacheDossier(
+      't-oversized-dir',
+      `${serverBaseUrl}/download/rfp.pdf`,
+      'OversizedDoc',
+      undefined,
+      undefined,
+      { maxBytes: 5 }
+    );
+    expect(oversizedRes).toBeNull();
+    expect(fs.existsSync(path.resolve(DOSSIERS_DIR, 't-oversized-dir'))).toBe(false);
+  });
+
   describe('deriveDossierLabel', () => {
     it('decodes Laravel/Filament base64 meta filenames into clean titles', () => {
       const url = 'https://gbppra.gov.pk/storage/proc_files/9Kl6Xm1MJWugaECLMKzqJ2HuzevxzQ-metaQWR2ZXJ0aXNlbWVudCBGYWJyaWNhdGlvbiBvZiBBbWJ1bGFuY2UgRC5wZGY=-.pdf';
@@ -167,6 +215,52 @@ describe('dossierManager', () => {
       const url = 'https://portal.gov.pk/files/48309f6c2890af4d900c718e7c9ee4bc23b00725b.pdf';
       expect(deriveDossierLabel(url, 'Bidding Document', 1)).toBe('Bidding Document');
       expect(deriveDossierLabel(url, 'Bidding Document', 2)).toBe('Bidding Document 2');
+    });
+  });
+
+  describe('B4 File Validation & Magic Bytes & C4 HTML UTF-8 Decoding', () => {
+    it('B4: isHtmlContent detects HTML by header and doctype prefix', () => {
+      expect(isHtmlContent(Buffer.from('binary-data'), 'text/html')).toBe(true);
+      expect(isHtmlContent(Buffer.from('binary-data'), 'application/xhtml+xml')).toBe(true);
+      expect(isHtmlContent(Buffer.from('<!doctype html><html><body>Error</body></html>'))).toBe(true);
+      expect(isHtmlContent(Buffer.from('<html><head></head></html>'))).toBe(true);
+
+      // Binary document buffers are not HTML
+      expect(isHtmlContent(Buffer.from('%PDF-1.4 binary data'), 'application/pdf')).toBe(false);
+      expect(isHtmlContent(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]), 'image/png')).toBe(false);
+    });
+
+    it('B4: detectExtensionAndMime derives format from magic bytes over misleading filename or label', () => {
+      // PDF magic bytes even if URL says .jpg
+      const pdfBuf = Buffer.from('%PDF-1.5 test document');
+      const det1 = detectExtensionAndMime(pdfBuf, undefined, 'https://example.com/fake.jpg');
+      expect(det1.ext).toBe('.pdf');
+      expect(det1.mimeType).toBe('application/pdf');
+
+      // PNG magic bytes
+      const pngBuf = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const det2 = detectExtensionAndMime(pngBuf);
+      expect(det2.ext).toBe('.png');
+      expect(det2.mimeType).toBe('image/png');
+
+      // JPEG magic bytes
+      const jpgBuf = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+      const det3 = detectExtensionAndMime(jpgBuf);
+      expect(det3.ext).toBe('.jpg');
+      expect(det3.mimeType).toBe('image/jpeg');
+    });
+
+    it('B4: downloadAndCacheDossier rejects HTML content sent as download', async () => {
+      const res = await downloadAndCacheDossier('t-html-reject', `${serverBaseUrl}/html-page`, 'NoticeDocument');
+      expect(res).toBeNull();
+      expect(fs.existsSync(path.resolve(DOSSIERS_DIR, 't-html-reject'))).toBe(false);
+    });
+
+    it('C4: fetchHtmlWithMetadata decodes multi-byte UTF-8 split chunks cleanly without corruption', async () => {
+      const res = await fetchHtmlWithMetadata(`${serverBaseUrl}/split-utf8`);
+      expect(res.html).toContain('ٹیلی کام ٹینڈرز');
+      // No Unicode replacement character (\uFFFD)
+      expect(res.html).not.toContain('\uFFFD');
     });
   });
 });

@@ -1,4 +1,5 @@
-import { db, backupDatabase, getPortalHealthList, updatePortalHealth } from './db.js';
+import { backupDatabase, updatePortalHealth, getScanningPortalIds, getLastSuccessfulScanTimestamp } from './db.js';
+import { getAppSetting } from './db/repositories/systemRepo.js';
 import { startCrawlerScan, getActivePortalsList } from './scrapers/crawlerEngine.js';
 import { runRetentionCycle } from './retention.js';
 import { backfillModelEmbeddings } from './embeddingBackfill.js';
@@ -20,9 +21,9 @@ export const schedulerDeps = {
 export function initStartupScheduler() {
   // 0. Reset any portals stuck in 'scanning' state from a previously interrupted process (Bug B3)
   try {
-    const stuck = db.prepare("SELECT portal_id FROM portal_health WHERE status = 'scanning'").all() as { portal_id: string }[];
-    for (const p of stuck) {
-      updatePortalHealth(p.portal_id, {
+    const stuckIds = getScanningPortalIds();
+    for (const portalId of stuckIds) {
+      updatePortalHealth(portalId, {
         status: 'error',
         last_error_message: 'Previous scan was interrupted'
       });
@@ -62,11 +63,18 @@ export function initStartupScheduler() {
     );
   }, 2 * 60 * 1000);
 
-  // 2. Check if a catch-up scan is required
-  checkAndTriggerCatchUpScan();
-
-  // 3. Daily check for broken/offline portals with operator advisement
-  runDailyPortalHealthAdvisement();
+  // 2. Check if a catch-up scan is required; run daily health check after it finishes (docs/16 B7)
+  const catchUpTask = checkAndTriggerCatchUpScan();
+  if (catchUpTask && typeof (catchUpTask as any).then === 'function') {
+    (catchUpTask as Promise<any>).then(() => {
+      runDailyPortalHealthAdvisement().catch(e => console.warn('[Scheduler] Health check error:', e));
+    }).catch(err => {
+      console.warn('[Scheduler] Catch-up scan error:', err);
+      runDailyPortalHealthAdvisement().catch(e => console.warn('[Scheduler] Health check error:', e));
+    });
+  } else {
+    runDailyPortalHealthAdvisement().catch(e => console.warn('[Scheduler] Health check error:', e));
+  }
 
   // 4. Periodic watchdog check every 30 minutes
   if (schedulerInterval) clearInterval(schedulerInterval);
@@ -97,25 +105,24 @@ export function stopStartupScheduler() {
   }
 }
 
-function checkAndTriggerCatchUpScan() {
+function checkAndTriggerCatchUpScan(): Promise<any> | void {
   try {
-    const row = db.prepare("SELECT MAX(last_scan_at) as last_scan FROM portal_health WHERE status != 'error'").get() as any;
-    const lastScanStr = row?.last_scan;
+    const lastFullScan = getAppSetting('last_full_scan_at');
+    const lastScanStr = lastFullScan || getLastSuccessfulScanTimestamp();
 
     if (!lastScanStr) {
       console.log('[Tender Tracker Scheduler] No previous scan recorded. Initiating background crawl...');
-      schedulerDeps.startCrawlerScan();
-      return;
+      return schedulerDeps.startCrawlerScan();
     }
 
     const lastScan = new Date(lastScanStr).getTime();
     const now = Date.now();
     const hoursSinceLastScan = (now - lastScan) / (1000 * 60 * 60);
 
-    // If more than 12 hours have elapsed since the last successful scan
+    // If more than 12 hours have elapsed since the last full successful scan (docs/15 F5)
     if (hoursSinceLastScan >= 12) {
       console.log(`[Tender Tracker Scheduler] Last scan was ${hoursSinceLastScan.toFixed(1)}h ago. Starting catch-up scan...`);
-      schedulerDeps.startCrawlerScan();
+      return schedulerDeps.startCrawlerScan();
     }
   } catch (err) {
     console.warn('[Tender Tracker Scheduler] Catch-up check failed:', err);
@@ -127,20 +134,27 @@ function checkAndTriggerCatchUpScan() {
  * Prevents continuous scan timeouts while keeping the operator advised daily.
  */
 async function runDailyPortalHealthAdvisement() {
-  lastDailyHealthCheck = Date.now();
   try {
     const portals = getActivePortalsList();
     const problemPortals = portals.filter(p => p.accessMode === 'offline_broken' || p.verifiedStatus.toLowerCase().includes('broken'));
+    let checkedCount = 0;
 
     for (const portal of problemPortals) {
       // Test single portal scan quietly to see if authority restored domain (Bug B2)
       try {
         await schedulerDeps.startCrawlerScan(portal.id, true);
+        checkedCount++;
       } catch (err: any) {
+        checkedCount++;
         updatePortalHealth(portal.id, {
           last_error_message: `Daily health check: Portal remains unreachable (${err.message})`
         });
       }
+    }
+
+    // Set lastDailyHealthCheck only after portals were actually checked (docs/16 B7)
+    if (checkedCount > 0 || problemPortals.length === 0) {
+      lastDailyHealthCheck = Date.now();
     }
   } catch (e) {
     console.warn('[Tender Tracker Scheduler] Daily health advisement check note:', e);

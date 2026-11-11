@@ -45,13 +45,18 @@ When you open Tender Tracker:
 
 ---
 
-### 4. Reviewing the Inbox
+### 4. Reviewing the Inbox & Provenance Badges
 
 The **Inbox** holds newly discovered opportunities that matched your domain keywords:
+- **Deadline Provenance Badges**: Below the closing date, a badge shows where the deadline came from (`Verified from corrigendum`, `Verified from tender document`, `Portal listing date`, `No deadline · Portal HTML only`, or `Fetching documents in the background…`).
+- **Operator Review Banner (`Review: ...`)**: Tenders flagged because a corrigendum or re-scan moved the deadline earlier, cancelled the notice, or suggested an uncertain past deadline appear at the top of the list with a red **Review** chip:
+  - Click **Confirm** to clear the review flag and keep the tender.
+  - Click **Pass** (or **Pass as cancelled** on cancelled notices) to move it to Passed.
+- **Retry Document Fetch**: If background document downloads failed (`Could not fetch all documents`), click **"Retry document fetch"** in the detail header to re-queue them immediately.
 - **Filtering**: Use the search bar or the **Filters** popover (domain tracks, bookmarked, amended, sort by closing soonest / newest).
 - **Track this bid**: Moves the tender out of the Inbox and into your active **Pipeline** under `Under Review`.
-- **Pass**: Archives the notice if it is not commercially viable.
-- **Star (Bookmark)**: Pins high-priority opportunities so you never lose sight of them.
+- **Pass**: Archives the notice if it is not commercially viable (with an instant **Undo** toast).
+- **Star (Bookmark)**: Pins high-priority opportunities so you never lose sight of them (bookmarked tenders are never auto-expired).
 - **Refresh from Portal**: Click the refresh button in the detail view to re-crawl the live portal page in real-time and regenerate the AI summary.
 - **Inline Editing**: Click **"Edit details"** to update title, reference number, deadline, budget, or scope directly in the app.
 
@@ -96,7 +101,8 @@ Navigate to **Sources & Keywords**:
    - **Streamlined Editing**: Click **"Edit"** on any portal to update its **Portal name** and **Website address** in a clean two-field dialog.
    - **Portal Login**: Enter your login credentials for **Tender Services Pakistan** (`https://tenderservice.pk/permits/login.php`).
 3. **Data Subtab**:
+   - **Document Ingest & Vision Budgets**: View today's Gemini Vision usage and configure the upfront scan time budget (seconds), maximum file size (MB), and Vision OCR call caps per scan and per day.
    - **CSV Export**: Export all bids, unreviewed inbox items, or active pipeline pursuits formatted with UTF-8 BOM for Microsoft Excel.
-   - **Backups**: Create on-demand database snapshots.
-   - **Pruning**: Delete cached documents for passed tenders to free up hard drive space without losing tender history.
+   - **Backups**: Create on-demand database snapshots (`data/backups/`).
+   - **Saved Documents & Automated Retention**: Delete cached documents for passed tenders, run on-demand disk-to-DB file reconciliation (`Reconcile files on disk`), or configure automated background retention cleanup.
    - **Clear Inbox**: Safely removes unreviewed opportunities from the Inbox while strictly preserving active pipeline bids and starred bookmarks.

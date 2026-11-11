@@ -14,6 +14,7 @@ export const INGEST_DEFAULTS = {
   maxFileMb: 25,
   visionCallsPerScan: 20,
   visionCallsPerDay: 100,
+  aiTextCallsPerDay: 150,
   perTenderBudgetMs: 20000
 };
 
@@ -67,10 +68,14 @@ export function noteDeferredDocuments(count: number): void {
   if (activeBudget && count > 0) activeBudget.documentsDeferred += count;
 }
 
-/** Spends one Vision call from the current scan's budget; false once it is used up. */
+/** Spends one Vision call from the current scan's budget (or daily budget if outside a scan); false once used up. */
 export function tryConsumeScanVision(): boolean {
-  if (!activeBudget) return true;
+  if (!activeBudget) return tryConsumeDailyVision();
   if (activeBudget.visionLeft <= 0) {
+    activeBudget.visionDeferred++;
+    return false;
+  }
+  if (!tryConsumeDailyVision()) {
     activeBudget.visionDeferred++;
     return false;
   }
@@ -78,8 +83,36 @@ export function tryConsumeScanVision(): boolean {
   return true;
 }
 
+function pktDayString(): string {
+  return new Date(Date.now() + 5 * 3600000).toISOString().slice(0, 10);
+}
+
 function todayKey(): string {
-  return `ingest_vision_calls_${new Date(Date.now() + 5 * 3600000).toISOString().slice(0, 10)}`; // PKT day
+  return `ingest_vision_calls_${pktDayString()}`; // PKT day
+}
+
+function todayAiTextKey(): string {
+  return `ingest_ai_text_calls_${pktDayString()}`;
+}
+
+/**
+ * Spends one Gemini text call (document cross-check, on-demand Analyze summary) from the daily
+ * budget; false once it is used up (docs/16 C3).
+ */
+export function tryConsumeDailyAiText(): boolean {
+  const limit = intSetting('ingest_ai_text_calls_per_day', INGEST_DEFAULTS.aiTextCallsPerDay);
+  const key = todayAiTextKey();
+  const used = parseInt(getAppSetting(key) || '0', 10) || 0;
+  if (used >= limit) return false;
+  setAppSetting(key, String(used + 1));
+  return true;
+}
+
+export function getDailyAiTextUsage(): { used: number; limit: number } {
+  return {
+    used: parseInt(getAppSetting(todayAiTextKey()) || '0', 10) || 0,
+    limit: intSetting('ingest_ai_text_calls_per_day', INGEST_DEFAULTS.aiTextCallsPerDay)
+  };
 }
 
 /** Spends one Vision call from the background worker's daily budget; false once it is used up. */
@@ -97,4 +130,58 @@ export function getDailyVisionUsage(): { used: number; limit: number } {
     used: parseInt(getAppSetting(todayKey()) || '0', 10) || 0,
     limit: intSetting('ingest_vision_calls_per_day', INGEST_DEFAULTS.visionCallsPerDay)
   };
+}
+
+export interface IngestBudgetSettings {
+  upfrontTimeBudgetSec: number;
+  maxFileMb: number;
+  visionCallsPerScan: number;
+  visionCallsPerDay: number;
+  dailyVisionUsed: number;
+  aiTextCallsPerDay: number;
+  dailyAiTextUsed: number;
+}
+
+export function getIngestBudgetSettings(): IngestBudgetSettings {
+  const daily = getDailyVisionUsage();
+  const aiText = getDailyAiTextUsage();
+  return {
+    upfrontTimeBudgetSec: intSetting('ingest_upfront_time_budget_sec', INGEST_DEFAULTS.upfrontTimeBudgetSec),
+    maxFileMb: intSetting('ingest_max_file_mb', INGEST_DEFAULTS.maxFileMb),
+    visionCallsPerScan: intSetting('ingest_vision_calls_per_scan', INGEST_DEFAULTS.visionCallsPerScan),
+    visionCallsPerDay: daily.limit,
+    dailyVisionUsed: daily.used,
+    aiTextCallsPerDay: aiText.limit,
+    dailyAiTextUsed: aiText.used
+  };
+}
+
+export function updateIngestBudgetSettings(input: Partial<{
+  upfrontTimeBudgetSec: number;
+  maxFileMb: number;
+  visionCallsPerScan: number;
+  visionCallsPerDay: number;
+  aiTextCallsPerDay: number;
+}>): IngestBudgetSettings {
+  if (input.aiTextCallsPerDay !== undefined) {
+    const val = Math.max(0, Math.min(5000, Math.round(Number(input.aiTextCallsPerDay))));
+    if (Number.isFinite(val)) setAppSetting('ingest_ai_text_calls_per_day', String(val));
+  }
+  if (input.upfrontTimeBudgetSec !== undefined) {
+    const val = Math.max(0, Math.min(3600, Math.round(Number(input.upfrontTimeBudgetSec))));
+    if (Number.isFinite(val)) setAppSetting('ingest_upfront_time_budget_sec', String(val));
+  }
+  if (input.maxFileMb !== undefined) {
+    const val = Math.max(1, Math.min(200, Math.round(Number(input.maxFileMb))));
+    if (Number.isFinite(val)) setAppSetting('ingest_max_file_mb', String(val));
+  }
+  if (input.visionCallsPerScan !== undefined) {
+    const val = Math.max(0, Math.min(500, Math.round(Number(input.visionCallsPerScan))));
+    if (Number.isFinite(val)) setAppSetting('ingest_vision_calls_per_scan', String(val));
+  }
+  if (input.visionCallsPerDay !== undefined) {
+    const val = Math.max(0, Math.min(5000, Math.round(Number(input.visionCallsPerDay))));
+    if (Number.isFinite(val)) setAppSetting('ingest_vision_calls_per_day', String(val));
+  }
+  return getIngestBudgetSettings();
 }

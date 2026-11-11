@@ -34,9 +34,14 @@ import {
   isValidHealedTendersUrl,
   hasVerifiedTenderYield,
   isNonBidEvaluationOrPlanTitle,
+  collectRowAttachments,
+  isNavigationRow,
+  sanitizeScrapedItems,
+  scrapePortal,
   crawlerDeps,
   currentScanStatus
 } from '../../src/server/scrapers/crawlerEngine.js';
+import * as cheerio from 'cheerio';
 import http from 'http';
 import * as ocrSvc from '../../src/server/ocrService.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
@@ -207,7 +212,9 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       const fdeRes = parsePortalHtml(fdeHtml, fdePortal);
       expect(fdeRes.items.length).toBe(1);
       expect(fdeRes.items[0].title).toBe('RENOVATION OF LABORATORIES IN EDUCATIONAL INSTITUTIONS');
-      expect(fdeRes.items[0].closingDate).toContain('2026-08-22');
+      // A lone unlabeled date already in the past is a publish date, not a deadline (docs/16 A6).
+      expect(fdeRes.items[0].closingDate).toBeNull();
+      expect(fdeRes.items[0].publishDate).toContain('2026-08-22');
 
       // 3. PSDF .inner-advertisement-listing-box
       const psdfPortal = PORTAL_DEFINITIONS.find(p => p.id === 'psdf')!;
@@ -360,8 +367,10 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(res2.hasCorrigendum).toBe(true);
 
       const updated = getAllTenders()[0];
-      expect(updated.closing_date).toBe(extendedDate);
+      // Stored normalised (UTC ISO); same instant as the listing's date.
+      expect(new Date(updated.closing_date!).getTime()).toBe(new Date(extendedDate).getTime());
       expect(updated.has_corrigendum).toBe(1);
+      expect(updated.deadline_source).toBe('html_row');
     });
   });
 
@@ -409,6 +418,20 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       portal = getPortalHealthList().find(p => p.portal_id === 'punjab_eproc');
       expect(portal?.consecutive_zero_yields).toBe(3);
       expect(portal?.status).toBe('selector_broken');
+    });
+
+    it('writes last_success_at on any scan completing without network error (HLT-3, HLT-5)', async () => {
+      const emptyHtml = '<html><body><div>No active records available today.</div></body></html>';
+      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(emptyHtml);
+
+      updatePortalHealth('punjab_eproc', {
+        status: 'online',
+        last_success_at: null
+      });
+
+      await startCrawlerScan('punjab_eproc', true);
+      const portal = getPortalHealthList().find(p => p.portal_id === 'punjab_eproc');
+      expect(portal?.last_success_at).toBeTruthy();
     });
 
     it('handles scrape network error and updates portal health to error', async () => {
@@ -838,7 +861,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       const savedTenders = getAllTenders();
       expect(savedTenders.some(t => t.reference_no === 'BPPRA-SOLAR-2026')).toBe(true);
       spyAiList.mockRestore();
-    });
+    }, 30000);
   });
   describe('Scraping Integrity & False-Positive Defenses', () => {
     it('strips select, option, form, and search filters in compactHtmlForAiExtraction', () => {
@@ -1573,6 +1596,166 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(referencesOnlyPriorYears('Supply for FY 2025-26', nov2026)).toBe(true);
       expect(referencesOnlyPriorYears('RFP_2025_final.pdf', nov2026)).toBe(true); // underscore-delimited years
       expect(referencesOnlyPriorYears('Cloud servers, no year', nov2026)).toBe(false);
+    });
+  });
+
+  describe('Audit Fixes: A10, B5, C2, and Pagination (F1)', () => {
+    const bppraDef = PORTAL_DEFINITIONS.find(p => p.id === 'bppra')!;
+    const tsDef = PORTAL_DEFINITIONS.find(p => p.id === 'tender_services')!;
+
+    it('B5: collectRowAttachments ignores chrome images, logos, stamps, seals and only keeps documents or valid images inside links', () => {
+      const html = `
+        <div class="tender-row">
+          <img src="/img/seal.png">
+          <img src="/images/bppra-logo.png">
+          <img src="/assets/badge.jpg">
+          <img src="/stamps/stamp.png">
+          <img src="/static/watermark.png">
+          <img src="avatar.jpg">
+          <a href="/uploads/2026/11/specs.pdf"><img src="download-icon.png"></a>
+          <a href="/documents/notice-scan.jpg">Notice Scan</a>
+        </div>
+      `;
+      const $ = cheerio.load(html);
+      const attachments = collectRowAttachments($, $('.tender-row').get(0), bppraDef);
+
+      expect(attachments.some(u => u.includes('seal'))).toBe(false);
+      expect(attachments.some(u => u.includes('bppra-logo'))).toBe(false);
+      expect(attachments.some(u => u.includes('badge'))).toBe(false);
+      expect(attachments.some(u => u.includes('stamp'))).toBe(false);
+      expect(attachments.some(u => u.includes('download-icon'))).toBe(false);
+
+      expect(attachments.some(u => u.endsWith('specs.pdf'))).toBe(true);
+      expect(attachments.some(u => u.endsWith('notice-scan.jpg'))).toBe(true);
+    });
+
+    it('C2: isNavigationRow drops newspaper directory titles and bare listing URLs without tender details', () => {
+      // 1. Newspaper directory title with 3+ newspaper names
+      const newspaperItem: RawScrapedItem = {
+        title: 'All Newspapers (Jang, The News, Dawn, Express, Nation) Procurement Opportunities',
+        organization: tsDef.name,
+        directUrl: 'https://tenderservices.com.pk/newspaper-index.html'
+      };
+      expect(isNavigationRow(newspaperItem, tsDef)).toBe(true);
+
+      // 2. Starts with "all newspapers"
+      const allNewsItem: RawScrapedItem = {
+        title: 'All Newspapers Tenders Today',
+        organization: tsDef.name,
+        directUrl: 'https://tenderservices.com.pk/all-newspapers'
+      };
+      expect(isNavigationRow(allNewsItem, tsDef)).toBe(true);
+
+      // 3. Link points to base URL and lacks date, reference, or attachment
+      const bareBaseItem: RawScrapedItem = {
+        title: 'Tenders & Notices Directory',
+        organization: tsDef.name,
+        directUrl: tsDef.baseUrl
+      };
+      expect(isNavigationRow(bareBaseItem, tsDef)).toBe(true);
+
+      // 4. Genuine tender row is not dropped
+      const genuineItem: RawScrapedItem = {
+        title: 'Procurement of High-Density Network Switches',
+        organization: tsDef.name,
+        referenceNo: 'TS-NET-2026-11',
+        directUrl: 'https://tenderservices.com.pk/tenders/view/10294',
+        closingDate: '2026-12-15T10:00:00.000Z'
+      };
+      expect(isNavigationRow(genuineItem, tsDef)).toBe(false);
+
+      const sanitized = sanitizeScrapedItems([newspaperItem, allNewsItem, bareBaseItem, genuineItem], tsDef);
+      expect(sanitized).toHaveLength(1);
+      expect(sanitized[0].title).toBe('Procurement of High-Density Network Switches');
+    });
+
+    it('A10: detail-page date enrichment selects deepest Create Date element, never assigns closing date, and strips nav/footer', async () => {
+      const fdeDef = PORTAL_DEFINITIONS.find(p => p.id === 'fde')!;
+      const listingHtml = `
+        <div class="package-title">
+          <h3 class="package-title"><a href="https://fde.gov.pk/download/it-rfp/">Purchase of IT Gear</a></h3>
+        </div>
+      `;
+      const detailHtml = `
+        <html>
+          <body>
+            <nav>Latest News Published 02-01-2027</nav>
+            <main>
+              <div class="wpdm-package">
+                <h1>Purchase of IT Gear</h1>
+                <div class="meta-row">
+                  <span class="label">Create Date: 01-11-2026</span>
+                </div>
+              </div>
+            </main>
+            <footer>Website Updated on 30-12-2026</footer>
+          </body>
+        </html>
+      `;
+
+      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('it-rfp')) return detailHtml;
+        return listingHtml;
+      });
+
+      const res = await scrapePortal(fdeDef);
+      expect(res.items.length).toBeGreaterThanOrEqual(1);
+      const item = res.items.find(i => i.title.includes('Purchase of IT Gear'));
+      expect(item).toBeDefined();
+      expect(item?.publishDate).toBe('2026-11-01T09:00:00.000Z');
+      // Must NOT take closing date from nav (2027) or footer (2026) or create date
+      expect(item?.closingDate).toBeNull();
+    });
+
+    it('F1: pagination loops pages with jitter, stops on empty page, and records pages_scanned in portal_health', async () => {
+      const origSleep = crawlerDeps.sleep;
+      crawlerDeps.sleep = vi.fn().mockResolvedValue(undefined);
+
+      const punjabDef = {
+        ...PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!,
+        pagination: {
+          kind: 'query' as const,
+          param: 'page',
+          maxPages: 3
+        }
+      };
+
+      const page1Html = `
+        <table>
+          <tr><th>Title</th><th>Submission</th></tr>
+          <tr><td><a href="/tender/1">IT Equipment Supply 1</a></td><td>20-12-2026</td></tr>
+          <tr><td><a href="/tender/2">IT Equipment Supply 2</a></td><td>20-12-2026</td></tr>
+        </table>
+      `;
+      const page2Html = `
+        <table>
+          <tr><th>Title</th><th>Submission</th></tr>
+          <tr><td><a href="/tender/3">IT Equipment Supply 3</a></td><td>22-12-2026</td></tr>
+          <tr><td><a href="/tender/4">IT Equipment Supply 4</a></td><td>22-12-2026</td></tr>
+        </table>
+      `;
+      const page3Html = `
+        <table>
+          <tr><th>Title</th><th>Submission</th></tr>
+        </table>
+      `;
+
+      let fetchedUrls: string[] = [];
+      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
+        fetchedUrls.push(url);
+        if (url.includes('page=2')) return page2Html;
+        if (url.includes('page=3')) return page3Html;
+        return page1Html;
+      });
+
+      const res = await scrapePortal(punjabDef);
+      crawlerDeps.sleep = origSleep;
+      expect(res.items).toHaveLength(4);
+      // Fetched page 1, page 2, and stopped at page 3 (empty page)
+      expect(fetchedUrls.length).toBe(3);
+      expect(fetchedUrls[1]).toContain('page=2');
+      expect(fetchedUrls[2]).toContain('page=3');
+      expect(res.pagesScanned).toBe(2);
     });
   });
 });

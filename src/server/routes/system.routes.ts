@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import path from 'path';
+import fs from 'fs';
 import {
   clearAllTenders,
   countTenderEmbeddingsBySpace,
@@ -9,15 +11,37 @@ import {
   pruneDossiersForPassed,
   getGeminiApiKey,
   setAppSetting,
-  db
+  DOSSIERS_DIR
 } from '../db.js';
 import { CANDIDATE_MODELS, extractTenderFromImage } from '../ocrService.js';
 import { getEmbeddingEngineStatus } from '../embeddingService.js';
 import { listSessionLogs, readSessionLog, getCurrentSessionFilename } from '../logger.js';
 import { getRetentionStatus, runRetentionCycle } from '../retention.js';
 import { reconcileDossiers } from '../dossierStore.js';
+import { getIngestBudgetSettings, updateIngestBudgetSettings } from '../ingestBudget.js';
 
 export const systemRouter = Router();
+
+// 0. Dossier Static File Serving with Path-Traversal Guard
+systemRouter.get('/dossiers/:tenderId/:filename', (req, res) => {
+  const { tenderId, filename } = req.params;
+  const resolvedRoot = path.resolve(DOSSIERS_DIR);
+  const filePath = path.resolve(DOSSIERS_DIR, tenderId, filename);
+
+  if (!filePath.startsWith(resolvedRoot + path.sep)) {
+    return res.status(400).send('Invalid dossier path');
+  }
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Dossier file not found on disk');
+  }
+
+  if (req.query?.download === '1' || req.query?.download === 'true') {
+    return res.download(filePath, filename);
+  }
+
+  res.sendFile(filePath);
+});
 
 // 1. Tenders Wipe / Clear
 systemRouter.post('/tenders/clear', (req, res) => {
@@ -74,7 +98,7 @@ systemRouter.get('/export/csv', (req, res) => {
     escapeCsv(t.domain_tracks.join(', ')),
     escapeCsv(t.matched_keywords.join(', ')),
     escapeCsv(t.pipeline_status),
-    escapeCsv(t.closing_date_formatted),
+    escapeCsv(!t.closing_date || t.closing_date_formatted === 'Not Available' ? 'No deadline stated' : t.closing_date_formatted),
     escapeCsv(t.estimated_value),
     escapeCsv(t.location),
     escapeCsv(t.has_corrigendum ? 'Yes' : 'No'),
@@ -110,11 +134,27 @@ systemRouter.get('/storage', (req, res) => {
     ai_configured: Boolean(key),
     ai_masked_key: maskedKey,
     session_logs: listSessionLogs(),
-    retention: getRetentionStatus()
+    retention: getRetentionStatus(),
+    ingest_budgets: getIngestBudgetSettings()
   });
 });
 
 systemRouter.post('/dossiers/prune-passed', (req, res) => res.json(pruneDossiersForPassed()));
+
+// 3b. Ingest & Vision Budgets Configuration
+const handleGetIngestBudgets = (_req: any, res: any) => {
+  res.json(getIngestBudgetSettings());
+};
+
+const handleUpdateIngestBudgets = (req: any, res: any) => {
+  const updated = updateIngestBudgetSettings(req.body || {});
+  res.json({ success: true, budgets: updated });
+};
+
+systemRouter.get('/ingest-budgets', handleGetIngestBudgets);
+systemRouter.get('/system/ingest-budgets', handleGetIngestBudgets);
+systemRouter.post('/ingest-budgets', handleUpdateIngestBudgets);
+systemRouter.post('/system/ingest-budgets', handleUpdateIngestBudgets);
 
 // 4. Google AI Studio (Gemini API) Configuration & Extraction Routes
 systemRouter.get('/ai/status', (req, res) => {

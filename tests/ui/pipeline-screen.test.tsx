@@ -436,4 +436,52 @@ describe('PipelineScreen component', () => {
     await user.click(closeBtn);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+
+  it('sorts needs_review cards to the top, renders Review and provenance badges, and shows Pass as cancelled on corrigendum_cancelled (P1-3, P2-5)', async () => {
+    const user = userEvent.setup();
+    const handleStatusChange = vi.fn().mockResolvedValue(undefined);
+
+    const flaggedCancelled: Tender = {
+      ...samplePipelineTenders[0],
+      id: 'tender-cancelled',
+      title: 'Cancelled Solar Microgrid Project',
+      closing_date: '2026-09-15T14:00:00+05:00',
+      needs_review: 1,
+      review_reason: 'corrigendum_cancelled',
+      deadline_source: 'corrigendum_doc',
+      deadline_confidence: 'high'
+    };
+
+    const earlierUnflagged: Tender = {
+      ...samplePipelineTenders[0],
+      id: 'tender-normal',
+      title: 'Earlier Unflagged Project',
+      closing_date: '2026-06-10T14:00:00+05:00',
+      needs_review: 0
+    };
+
+    render(
+      <PipelineScreen
+        tenders={[earlierUnflagged, flaggedCancelled]}
+        corrigenda={[]}
+        onStatusChange={handleStatusChange}
+        onAcknowledgeCorrigendum={vi.fn()}
+        onSaveNotes={vi.fn()}
+        onToggleBookmark={vi.fn()}
+        onSetResultDate={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Review')).toBeInTheDocument();
+    expect(screen.getByText('Verified from corrigendum')).toBeInTheDocument();
+
+    await user.click(screen.getByText('Cancelled Solar Microgrid Project'));
+    const passAsCancelledBtn = screen.getByRole('button', { name: 'Pass as cancelled' });
+    expect(passAsCancelledBtn).toBeInTheDocument();
+    await user.click(passAsCancelledBtn);
+
+    const confirmPassBtn = screen.getByRole('button', { name: /Pass & Remove Files/i });
+    await user.click(confirmPassBtn);
+    expect(handleStatusChange).toHaveBeenCalledWith('tender-cancelled', 'Passed');
+  });
 });

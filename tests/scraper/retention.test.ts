@@ -85,7 +85,8 @@ describe('Retention Lifecycle Daemon', () => {
     const oldTender = getTenderById(tenderPassedOld);
     expect(oldTender).toBeDefined();
     expect(oldTender?.description).toBe('');
-    expect(oldTender?.status_notes).toBe('');
+    // Operator notes are never erased by slimming (docs/16 B2).
+    expect(oldTender?.status_notes).toBe('Interesting notes');
     expect(oldTender?.matched_keywords).toEqual([]);
     expect(oldTender?.slimmed_at).not.toBeNull();
     // Physical folder should be purged

@@ -41,6 +41,12 @@ describe('documentExtractor (Phase 2)', () => {
       expect(findSubmissionDeadlines('Last date for submission of documents shall be 20-11-2026 (11:00 a.m)')).toEqual([pkt('2026-11-20T11:00:00+05:00')]);
       expect(findSubmissionDeadlines('Closing Date: 3rd December, 2026')).toEqual([pkt('2026-12-03T14:00:00+05:00')]);
       expect(findSubmissionDeadlines('Sale of bidding documents on or before 05-11-2026')).toEqual([]);
+
+      // A8: military time formats
+      expect(findSubmissionDeadlines('on or before 15-12-2026 at 1100 hrs')).toEqual([pkt('2026-12-15T11:00:00+05:00')]);
+      expect(findSubmissionDeadlines('submission deadline: 15-12-2026 at 1430 hrs')).toEqual([pkt('2026-12-15T14:30:00+05:00')]);
+      expect(findSubmissionDeadlines('closing date: 15-12-2026 at 1430 hours')).toEqual([pkt('2026-12-15T14:30:00+05:00')]);
+      expect(findSubmissionDeadlines('last date for submission: 15-12-2026 at 11:00 AM')).toEqual([pkt('2026-12-15T11:00:00+05:00')]);
     });
 
     it('returns several distinct deadlines when a document is ambiguous', () => {
@@ -165,6 +171,26 @@ describe('documentExtractor (Phase 2)', () => {
       );
       expect(cancel.docType).toBe('corrigendum');
       expect(cancel.isCancellation).toBe(true);
+    });
+
+    it('A9: Standard Bidding Document Table of Contents is NOT detected as corrigendum or cancellation', async () => {
+      const sbdText = [
+        'STANDARD BIDDING DOCUMENT',
+        'Table of Contents',
+        '1. Instructions to Bidders',
+        '8. Amendment of Bidding Documents',
+        '23. Bid Security: forfeited if the bid is withdrawn',
+        ...FILLER,
+        'Last date for submission of bids: 25-12-2026 at 11:00 AM'
+      ];
+      const sbd = await extractFromDocument(
+        makePdf(sbdText),
+        'application/pdf',
+        'Bidding-Document-SBD.pdf'
+      );
+      expect(sbd.docType).not.toBe('corrigendum');
+      expect(sbd.isCancellation).toBe(false);
+      expect(sbd.closingDateISO).toBe(pkt('2026-12-25T11:00:00+05:00'));
     });
 
     it('a document with text but no deadline returns no date and low confidence', async () => {

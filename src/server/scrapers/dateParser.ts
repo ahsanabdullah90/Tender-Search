@@ -154,10 +154,13 @@ export function parseDateString(raw: string): string | null {
       return null;
     }
 
-    // 4. Fallback standard parse (only if it contains digits and not noise)
-    if (/\d/.test(str)) {
+    // 4. Fallback standard parse. V8 reads many short strings ("12", "Lot 3", "15 June") as dates
+    // in 2001, so only accept it when the text carries an explicit 4-digit year and that year is
+    // plausible for a tender (docs/16 A11).
+    const yearMatch = str.match(/(?<!\d)(20\d{2})(?!\d)/);
+    if (yearMatch) {
       const fallback = new Date(str);
-      if (!isNaN(fallback.getTime())) {
+      if (!isNaN(fallback.getTime()) && isPlausibleTenderYear(fallback.getUTCFullYear()) && fallback.getUTCFullYear() === parseInt(yearMatch[1], 10)) {
         return fallback.toISOString();
       }
     }
@@ -196,7 +199,21 @@ export function normalizeExtractedDate(raw: string | null | undefined): string |
   const iso = parseDateString(String(raw));
   if (!iso) return null;
   const ms = new Date(iso).getTime();
-  return isNaN(ms) ? null : new Date(ms).toISOString();
+  if (isNaN(ms)) return null;
+  // AI/OCR output and other untrusted dates outside a plausible window are dropped, never stored.
+  if (!isPlausibleTenderYear(new Date(ms).getUTCFullYear())) return null;
+  return new Date(ms).toISOString();
+}
+
+/** Years a tender deadline or notice date can plausibly carry: 2010 to five years ahead. */
+export function isPlausibleTenderYear(year: number, now: Date = new Date()): boolean {
+  return year >= 2010 && year <= now.getUTCFullYear() + 5;
+}
+
+/** End of the PKT calendar day (23:59:59.999 PKT) of an ISO instant, as epoch milliseconds. */
+export function endOfPktDayMs(iso: string): number {
+  const day = new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10);
+  return new Date(`${day}T23:59:59.999+05:00`).getTime();
 }
 
 export interface DeadlineResolution {
@@ -275,6 +292,8 @@ export interface CanonicalDeadline {
   needsReview: boolean;
   reviewReason: string | null;
   cancelled: boolean;
+  /** Past its stated time but still on the deadline's PKT calendar day: never auto-expired yet. */
+  withinDeadlineDay: boolean;
 }
 
 /** PKT calendar day (YYYY-MM-DD) of an ISO instant. */
@@ -323,7 +342,8 @@ export function resolveCanonicalDeadline(
     canAutoExpire: false,
     needsReview: false,
     reviewReason: null,
-    cancelled
+    cancelled,
+    withinDeadlineDay: false
   };
 
   const corrigenda = valid.filter(v => v.source === 'corrigendum_doc').sort((a, b) => b.ms - a.ms);
@@ -365,7 +385,11 @@ export function resolveCanonicalDeadline(
     result.isExpired = winner.ms < nowMs;
     result.isExtension = Boolean(knownValid && winner !== knownValid && winner.ms > knownValid.ms && pktDay(winner.date) !== pktDay(knownValid.date));
     const wellSourced = isDocumentSource(winner.source) ? winner.canAutoExpire : !hasDocSignal;
-    result.canAutoExpire = result.isExpired && !result.needsReview && wellSourced;
+    // Never auto-expire during the deadline's own PKT day: deadline times read from text are the
+    // least reliable part ("1100 hrs" was once read as midnight), so wait until the day is over
+    // (docs/16 A8). The tender is still shown as closed once its stated time has passed.
+    result.withinDeadlineDay = result.isExpired && nowMs <= endOfPktDayMs(winner.date);
+    result.canAutoExpire = result.isExpired && !result.withinDeadlineDay && !result.needsReview && wellSourced;
   }
   return result;
 }
@@ -390,16 +414,45 @@ export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\
 /**
  * Extracts and disambiguates publish dates vs closing dates using labels and chronological sorting (Bug B7)
  */
-export function extractDatesFromText(rowText: string): { publishDate: string | null; closingDate: string | null } {
-  // 1. Look for explicit labels (including "Dead Line" with space used on BPPRA ePPS)
-  const closingLabelRegex = new RegExp(`(?:closing|submission|dead\\s*line|due|last)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
+/**
+ * Words that, inside a closing-type label, mean the date is about something else:
+ * "Submission of queries", "Last date of sale", "Last updated", "Due date for pre-bid…" (docs/16 A7).
+ */
+const NON_CLOSING_LABEL = /quer(?:y|ies)|clarif|pre[-\s]?bid|\bsale\b|purchas|issu|opening|validity|meeting|updated|modified|posted|published/i;
+
+export interface ExtractDatesOptions {
+  /**
+   * What a lone date with no label means. 'auto' (default): a future date is the closing date and
+   * a past/today date is the publish date, because a publication date is never in the future and
+   * an open tender's deadline always is (docs/16 A6).
+   */
+  singleDate?: 'auto' | 'closing' | 'publish';
+  nowMs?: number;
+}
+
+export function extractDatesFromText(
+  rowText: string,
+  options: ExtractDatesOptions = {}
+): { publishDate: string | null; closingDate: string | null } {
+  const nowMs = options.nowMs ?? Date.now();
+  // 1. Look for explicit labels (including "Dead Line" with space used on BPPRA ePPS). Every
+  // labelled match is considered; labels about queries, sale, pre-bid etc. are ignored and the
+  // latest remaining closing-type date wins.
+  const closingLabelRegex = new RegExp(`\\b(closing|submission|dead\\s*line|due|last)((?:[\\s\\w]{0,20}?)(?:[:\\s-]))\\s*(${DATE_CANDIDATE_PATTERN})`, 'gi');
   const publishLabelRegex = new RegExp(`(?:publish(?:ed)?|posted|advertised|issue(?:d)?|opening|create(?:d)?|creation)(?:[\\s\\w]{0,20}?)(?:[:\\s-])\\s*(${DATE_CANDIDATE_PATTERN})`, 'i');
 
-  const closingMatch = rowText.match(closingLabelRegex);
   const publishMatch = rowText.match(publishLabelRegex);
-
-  let closingDate: string | null = closingMatch ? parseDateString(closingMatch[1]) : null;
   let publishDate: string | null = publishMatch ? parseDateString(publishMatch[1]) : null;
+
+  let closingDate: string | null = null;
+  for (const m of rowText.matchAll(closingLabelRegex)) {
+    const labelText = `${m[1]}${m[2]}`;
+    if (NON_CLOSING_LABEL.test(labelText)) continue;
+    const parsed = parseDateString(m[3]);
+    if (parsed && (!closingDate || new Date(parsed).getTime() > new Date(closingDate).getTime())) {
+      closingDate = parsed;
+    }
+  }
 
   if (closingDate) {
     return { publishDate, closingDate };
@@ -420,7 +473,12 @@ export function extractDatesFromText(rowText: string): { publishDate: string | n
     if (publishMatch && publishDate === parsedDates[0]) {
       return { publishDate, closingDate: null };
     }
-    return { publishDate: null, closingDate: parsedDates[0] };
+    const mode = options.singleDate ?? 'auto';
+    const isFuture = new Date(parsedDates[0]).getTime() > nowMs;
+    if (mode === 'closing' || (mode === 'auto' && isFuture)) {
+      return { publishDate: null, closingDate: parsedDates[0] };
+    }
+    return { publishDate: parsedDates[0], closingDate: null };
   }
 
   if (parsedDates.length >= 2) {

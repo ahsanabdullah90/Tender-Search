@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { getAppSetting } from '../db/repositories/systemRepo.js';
 import {
   startCrawlerScan,
   currentScanStatus,
@@ -15,7 +16,8 @@ scanRouter.post('/start', async (req, res) => {
 });
 
 scanRouter.get('/status', (req, res) => {
-  res.json(currentScanStatus);
+  const fullScanAt = getAppSetting('last_full_scan_at') || null;
+  res.json({ ...currentScanStatus, lastFullScanTimestamp: fullScanAt });
 });
 
 const handleScanSse = (req: any, res: any) => {

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseDateString, formatClosingDate, extractDatesFromText } from '../../src/server/scrapers/crawlerEngine.js';
+import { isPlausibleTenderYear, normalizeExtractedDate, reconcileDeadline } from '../../src/server/scrapers/dateParser.js';
 
 describe('parseDateString - Pakistani Procurement Date Formats', () => {
   it('parses standard DD/MM/YYYY and DD-MM-YYYY formats', () => {
@@ -131,8 +132,6 @@ describe('extractDatesFromText', () => {
     expect(res3.closingDate).toContain('2025-10-20');
   });
 });
-
-import { normalizeExtractedDate, reconcileDeadline } from '../../src/server/scrapers/dateParser.js';
 
 describe('Extracted date normalization & deadline reconciliation (audit findings 1 & 4)', () => {
   const NOW = Date.parse('2026-11-10T09:00:00.000Z');
@@ -291,5 +290,66 @@ describe('resolveCanonicalDeadline: corrigendum supersedes the original', () => 
     expect(r.closingDate).toBe(corrDate);
     expect(r.source).toBe('corrigendum_doc');
     expect(r.isExtension).toBe(false);
+  });
+});
+
+describe('A11 & isPlausibleTenderYear', () => {
+  it('validates plausible tender years (2010 through current + 5)', () => {
+    const simulatedNow = new Date('2026-11-10T00:00:00Z');
+    expect(isPlausibleTenderYear(2010, simulatedNow)).toBe(true);
+    expect(isPlausibleTenderYear(2019, simulatedNow)).toBe(true);
+    expect(isPlausibleTenderYear(2026, simulatedNow)).toBe(true);
+    expect(isPlausibleTenderYear(2031, simulatedNow)).toBe(true);
+
+    expect(isPlausibleTenderYear(2009, simulatedNow)).toBe(false);
+    expect(isPlausibleTenderYear(2001, simulatedNow)).toBe(false);
+    expect(isPlausibleTenderYear(2032, simulatedNow)).toBe(false);
+    expect(isPlausibleTenderYear(1995, simulatedNow)).toBe(false);
+  });
+
+  it('rejects short numbers, lot labels, and yearless dates that previously parsed as year 2001 (A11)', () => {
+    expect(parseDateString('12')).toBeNull();
+    expect(parseDateString('Lot 3')).toBeNull();
+    expect(parseDateString('Jun 15')).toBeNull();
+    expect(parseDateString('15 June')).toBeNull();
+  });
+
+  it('normalizeExtractedDate rejects implausible years', () => {
+    expect(normalizeExtractedDate('2001-11-30T19:00:00Z')).toBeNull();
+    expect(normalizeExtractedDate('1999-05-10')).toBeNull();
+    expect(normalizeExtractedDate('2035-01-01')).toBeNull();
+    expect(normalizeExtractedDate('2026-12-15T10:00:00.000Z')).toBe('2026-12-15T10:00:00.000Z');
+  });
+});
+
+describe('A6 & A7 extractDatesFromText logic', () => {
+  const simulatedNowMs = Date.parse('2026-11-10T09:00:00.000Z');
+
+  it('lone unlabeled date: future becomes closing date, past/today becomes publish date (A6)', () => {
+    // Past date (Nov 01, 2026 vs Nov 10, 2026 simulated now)
+    const pastText = 'hybrid solar system Jang November 01, 2026 Details';
+    const pastRes = extractDatesFromText(pastText, { nowMs: simulatedNowMs });
+    expect(pastRes.publishDate).toContain('2026-11-01');
+    expect(pastRes.closingDate).toBeNull();
+
+    // Future date (Nov 25, 2026 vs Nov 10, 2026 simulated now)
+    const futureText = 'hybrid solar system Jang November 25, 2026 Details';
+    const futureRes = extractDatesFromText(futureText, { nowMs: simulatedNowMs });
+    expect(futureRes.publishDate).toBeNull();
+    expect(futureRes.closingDate).toContain('2026-11-25');
+  });
+
+  it('ignores query, clarification, pre-bid, sale, and opening dates, and picks latest labelled closing date (A7)', () => {
+    const text1 = 'Submission of queries: 01-12-2026 Closing date: 20-12-2026';
+    const res1 = extractDatesFromText(text1, { nowMs: simulatedNowMs });
+    expect(res1.closingDate).toContain('2026-12-20');
+
+    const text2 = 'Pre-bid meeting: 05-12-2026 Last date of submission: 25-12-2026';
+    const res2 = extractDatesFromText(text2, { nowMs: simulatedNowMs });
+    expect(res2.closingDate).toContain('2026-12-25');
+
+    const text3 = 'Sale of tender documents: 10-12-2026 Opening date: 28-12-2026 Due date: 28-12-2026';
+    const res3 = extractDatesFromText(text3, { nowMs: simulatedNowMs });
+    expect(res3.closingDate).toContain('2026-12-28');
   });
 });

@@ -1,6 +1,13 @@
 # 04. API Reference
 
-All backend routes are mounted under the `/api` prefix. The server responds with `application/json` unless streaming files or Server-Sent Events.
+All backend routes are mounted under the `/api` prefix via `src/server/routes/index.ts` and organized into five domain route controllers under `src/server/routes/`:
+- `tenders.routes.ts`
+- `portals.routes.ts`
+- `tracks.routes.ts`
+- `scan.routes.ts`
+- `system.routes.ts`
+
+The server responds with `application/json` unless streaming files or Server-Sent Events.
 
 ---
 
@@ -197,8 +204,47 @@ Acknowledges and clears an amendment alert.
 ## 4. Portals, Health & Authentication
 
 ### `GET /api/portals`
-Returns health metrics, access modes, and configuration for all 18 procurement portals.
+Returns health metrics, access modes, and configuration for all active procurement portals.
 - **Response**: `200 OK` array of `PortalHealth` records.
+
+### `POST /api/portals`
+Adds a new custom procurement portal to SQLite.
+- **Request Body**:
+  ```json
+  {
+    "portal_name": "Punjab Municipal Development Fund",
+    "tenders_url": "https://pmdfc.punjab.gov.pk/tenders",
+    "base_url": "https://pmdfc.punjab.gov.pk",
+    "category": "Regulatory",
+    "tier": "http",
+    "access_mode": "public"
+  }
+  ```
+- **Response**: `201 Created` (`{"success": true, "portal": {...}}`).
+
+### `DELETE /api/portals/:portalId`
+Deletes a procurement portal from active monitoring and records it in `deleted_portals` so it is not re-seeded.
+- **Response**: `200 OK` (`{"success": true, "portal_id": "...", "message": "..."}`).
+
+### `PUT /api/portals/:portalId`
+Updates portal settings (name, website URL, base URL, tier, access mode). Enforces strict origin normalization on `base_url`.
+- **Request Body**:
+  ```json
+  {
+    "portal_name": "Updated Portal Name",
+    "tenders_url": "https://example.gov.pk/tenders",
+    "base_url": "https://example.gov.pk"
+  }
+  ```
+- **Response**: `200 OK` (`{"success": true, "message": "Portal updated successfully"}`).
+
+### `POST /api/portals/:portalId/reset-default`
+Resets a modified portal's URL, access mode, and tier back to canonical baseline values in `PORTAL_DEFINITIONS`.
+- **Response**: `200 OK` (`{"success": true, "message": "Reset ... to official default URL"}`).
+
+### `POST /api/portals/:portalId/heal`
+Triggers operator-requested autonomous URL healing (`healPortalConnection`) on a portal to rediscover its tenders page.
+- **Response**: `200 OK` (`{"success": true, "baseUrl": "...", "tendersUrl": "...", "itemsFound": n}`).
 
 ### `GET /api/portals/:id/credentials`
 Retrieves saved credentials metadata for a portal (e.g., `tender_services`).
@@ -246,7 +292,9 @@ Returns immediate snapshot of crawler status.
     "totalPortals": 18,
     "newTendersFound": 12,
     "corrigendaFound": 2,
-    "lastScanTimestamp": "2026-11-04T09:00:00+05:00"
+    "heldForScope": 3,
+    "lastScanTimestamp": "2026-11-04T09:00:00+05:00",
+    "lastFullScanTimestamp": "2026-11-04T08:00:00+05:00"
   }
   ```
 
@@ -281,16 +329,25 @@ Deletes a domain track.
 ## 7. Storage, Dossiers & Backups
 
 ### `GET /api/storage`
-Reports disk usage for dossiers, databases, passed tenders, and Gemini AI status.
+Reports disk usage for dossiers, databases, passed tenders, Gemini AI status, session logs, automated retention status, and current document ingest budgets (`ingest_budgets`).
 
-### `POST /api/dossiers/prune-passed`
-Deletes downloaded documents for tenders marked `Passed`, freeing local disk storage.
+### `GET /api/system/ingest-budgets` & `POST /api/system/ingest-budgets`
+Reads or updates the document ingestion and Gemini Vision / text cost caps (`upfrontTimeBudgetSec`, `maxFileMb`, `visionCallsPerScan`, `visionCallsPerDay`, `aiTextCallsPerDay`) persisted in `app_settings`. Responses also include today's usage counters (`dailyVisionUsed`, `dailyAiTextUsed`).
+
+### `GET /api/system/retention`, `POST /api/system/retention/run`, & `POST /api/system/retention/settings`
+Inspects retention status, triggers an immediate retention and cleanup sweep (`?dryRun=true` optional), or updates `autoClean`, `graceDays`, and `passedDays`.
+
+### `POST /api/dossiers/prune-passed` & `POST /api/system/dossiers/reconcile`
+`prune-passed` deletes downloaded documents for tenders marked `Passed`. `reconcile` audits `data/dossiers/` against `cached_dossiers` in SQLite, removing orphan folders and pruning missing file references.
 
 ### `GET /api/dossiers/:tenderId/:filename`
-Serves a cached local bidding document with path-traversal protection.
+Serves a cached local bidding document from `src/server/routes/system.routes.ts` with strict path-traversal protection (`!filePath.startsWith(resolvedRoot + path.sep)`). Pass `?download=true` to force an attachment download.
 
-### `GET /api/backups`
-Lists all available SQLite backups with filenames, creation timestamps, and byte sizes.
+### `GET /api/system/embedding-status`
+Returns the local `all-MiniLM-L6-v2` semantic embedding engine status and counts of total, indexed, and model-space-indexed tenders.
 
-### `POST /api/backups`
-Generates an immediate SQLite vacuum backup into `data/backups/`.
+### `GET /api/system/logs` & `GET /api/system/logs/:filename`
+Lists the last 3 retained session execution logs or retrieves/downloads (`?download=true`) a specific log file.
+
+### `GET /api/backups` & `POST /api/backups`
+Lists all available SQLite backups with filenames, creation timestamps, and byte sizes, or generates an immediate SQLite online backup (`db.backup()`) in `data/backups/`.

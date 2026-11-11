@@ -11,11 +11,15 @@ import {
   getTenderById,
   getJobsForTender,
   getExpiredUnreviewedTenderIds,
-  setAppSetting
+  setAppSetting,
+  backfillExistingTenderDocumentJobs,
+  requeueFailedJobs,
+  pruneOldDailyVisionCounters
 } from '../../src/server/db.js';
 import { processAndSaveTender, crawlerDeps, currentScanStatus, orderDocumentCandidates } from '../../src/server/scrapers/crawlerEngine.js';
 import { processDocumentQueue } from '../../src/server/ingestWorker.js';
 import { beginScanBudget, endScanBudget } from '../../src/server/ingestBudget.js';
+import { findSubmissionDeadlines } from '../../src/server/documentExtractor.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { createApp } from '../../server.js';
 import { makePdf, FILLER } from '../fixtures/documents/buildFixtures.js';
@@ -288,6 +292,325 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(res.body.requeued).toBe(1);
       expect(res.body.tender.doc_fetch_status).toBe('pending');
       expect(getJobsForTender(id)[0].attempts).toBe(0);
+    });
+
+    it('P1-1: backfills existing direct-document and attachment_urls tenders and queues attachments on duplicate re-scan', async () => {
+      db.prepare(`
+        INSERT INTO tenders (
+          id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
+          closing_date, closing_date_formatted, pipeline_status, doc_fetch_status, cached_dossiers, attachment_urls
+        ) VALUES
+          ('t-legacy-pdf', 't-legacy-pdf', 'REF-LEG-1', 'Supply of Rack Servers Legacy', 'PSEB', 'pseb', 'PSEB', 'https://x.pk/uploads/2026/11/legacy.pdf', ?, '25 Nov 2026', 'New Opportunity', 'none', '[]', '[]'),
+          ('t-legacy-html', 't-legacy-html', 'REF-LEG-2', 'Supply of Solar Panels Legacy', 'PSEB', 'pseb', 'PSEB', 'https://x.pk/tenders/2', ?, '25 Nov 2026', 'New Opportunity', 'none', '[]', '[]')
+      `).run(
+        new Date(Date.now() + 10 * DAY).toISOString(),
+        new Date(Date.now() + 10 * DAY).toISOString()
+      );
+
+      // 1. Backfill catches the direct-document row
+      const backfilled = backfillExistingTenderDocumentJobs();
+      expect(backfilled).toBe(1);
+      expect(getJobsForTender('t-legacy-pdf')).toHaveLength(1);
+      expect(getTenderById('t-legacy-pdf')?.doc_fetch_status).toBe('pending');
+
+      // 2. Re-scanning the HTML-listing duplicate with attachments attaches & queues them
+      const attUrl = 'https://x.pk/uploads/2026/11/solar-rfp.pdf';
+      await processAndSaveTender({
+        referenceNo: 'REF-LEG-2',
+        title: 'Supply of Solar Panels Legacy',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/2',
+        attachmentUrls: [attUrl],
+        closingDate: new Date(Date.now() + 10 * DAY).toISOString()
+      }, portal(), tracks);
+
+      const updatedHtml = getTenderById('t-legacy-html')!;
+      expect(updatedHtml.attachment_urls).toEqual([attUrl]);
+      expect(updatedHtml.doc_fetch_status).toBe('pending');
+      expect(getJobsForTender('t-legacy-html').map(j => j.url)).toEqual([attUrl]);
+
+      // 3. requeueFailedJobs also enqueues unqueued attachment_urls
+      db.prepare(`DELETE FROM document_ingest_jobs WHERE tender_id = 't-legacy-html'`).run();
+      db.prepare(`UPDATE tenders SET doc_fetch_status = 'none' WHERE id = 't-legacy-html'`).run();
+      expect(requeueFailedJobs('t-legacy-html')).toBe(1);
+      expect(getJobsForTender('t-legacy-html')).toHaveLength(1);
+    });
+
+    it('P1-4: flags needs_review when a duplicate re-scan reports an earlier calendar-day deadline', async () => {
+      const initialClose = new Date(Date.now() + 12 * DAY).toISOString();
+      const earlierClose = new Date(Date.now() + 6 * DAY).toISOString();
+
+      await processAndSaveTender({
+        referenceNo: 'REF-EARLIER-01',
+        title: 'Supply of Enterprise Laptops',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/earlier',
+        closingDate: initialClose
+      }, portal(), tracks);
+
+      const saved = getAllTenders()[0];
+      expect(saved.needs_review).toBe(0);
+
+      // Re-scan with an earlier calendar day
+      const dupRes = await processAndSaveTender({
+        referenceNo: 'REF-EARLIER-01',
+        title: 'Supply of Enterprise Laptops',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/earlier',
+        closingDate: earlierClose
+      }, portal(), tracks);
+
+      expect(dupRes.isNew).toBe(false);
+      const after = getTenderById(saved.id)!;
+      expect(after.closing_date).toBe(initialClose); // does not drag deadline backwards silently
+      expect(after.needs_review).toBe(1);
+      expect(after.review_reason).toMatch(/^deadline_moved_earlier:/);
+    });
+
+    it('P2-4: stages tender during upfront fetch and deletes staging row when B6 rejects', async () => {
+      const url = 'https://x.pk/uploads/2026/10/expired-staging.pdf';
+      let observedStatusDuringFetch: string | undefined;
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId: string) => {
+        const row = db.prepare('SELECT ingestion_status FROM tenders WHERE id = ?').get(tenderId) as { ingestion_status: string } | undefined;
+        observedStatusDuringFetch = row?.ingestion_status;
+        // Also verify Inbox getAllTenders() hides the staging row while fetch is in flight
+        expect(getAllTenders()).toHaveLength(0);
+        const dir = path.resolve(DOSSIERS_DIR, tenderId);
+        fs.mkdirSync(dir, { recursive: true });
+        const buf = noticePdf(-5);
+        fs.writeFileSync(path.join(dir, 'expired.pdf'), buf);
+        return {
+          label: 'Notice',
+          localPath: `/api/dossiers/${tenderId}/expired.pdf`,
+          originalUrl: url,
+          mimeType: 'application/pdf',
+          sha256: 'abc',
+          sizeBytes: buf.length
+        };
+      });
+
+      const res = await processAndSaveTender(
+        { title: 'Supply of Rack Servers', organization: 'PSEB', directUrl: url },
+        portal(),
+        tracks
+      );
+      expect(observedStatusDuringFetch).toBe('staging');
+      expect(res.isNew).toBe(false);
+      const remaining = (db.prepare('SELECT count(*) as c FROM tenders').get() as { c: number }).c;
+      expect(remaining).toBe(0);
+    });
+
+    it('P2-6, P2-7, P2-8: extracts new submission phrasings, prunes old daily vision counters, and updates ingest budgets via API', async () => {
+      // P2-6
+      const d1 = findSubmissionDeadlines('Date of bid submission: 28-11-2026 at 02:30 PM');
+      const d2 = findSubmissionDeadlines('Submission of bids: 29-11-2026 by 11:00 AM');
+      const d3 = findSubmissionDeadlines('Dropped in the tender box on or before 30-11-2026');
+      expect(d1).toHaveLength(1);
+      expect(d2).toHaveLength(1);
+      expect(d3).toHaveLength(1);
+
+      // P2-7
+      setAppSetting('ingest_vision_calls_2025-01-01', '42');
+      setAppSetting('ingest_vision_calls_2099-12-31', '5');
+      expect(pruneOldDailyVisionCounters(7)).toBeGreaterThanOrEqual(1);
+      const oldRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'ingest_vision_calls_2025-01-01'`).get();
+      const futureRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'ingest_vision_calls_2099-12-31'`).get();
+      expect(oldRow).toBeUndefined();
+      expect(futureRow).toBeDefined();
+
+      // P2-8
+      const postRes = await request(app).post('/api/system/ingest-budgets').send({
+        upfrontTimeBudgetSec: 180,
+        maxFileMb: 30,
+        visionCallsPerScan: 15,
+        visionCallsPerDay: 80
+      });
+      expect(postRes.status).toBe(200);
+      expect(postRes.body.budgets).toMatchObject({
+        upfrontTimeBudgetSec: 180,
+        maxFileMb: 30,
+        visionCallsPerScan: 15,
+        visionCallsPerDay: 80
+      });
+
+      const getRes = await request(app).get('/api/system/ingest-budgets');
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.upfrontTimeBudgetSec).toBe(180);
+    });
+  });
+
+  describe('Audit Fixes: A1, A5, F4, F2, B8', () => {
+    it('A1: undated tender older than 14 days re-scanned keeps stage, notes and dossiers', async () => {
+      const url = 'https://x.pk/tenders/undated-laptop-tender';
+      const item = { title: 'Procurement of Core Laptops', organization: 'PSEB', directUrl: url };
+      const res1 = await processAndSaveTender(item, portal(), tracks);
+      expect(res1.isNew).toBe(true);
+
+      const tender = getAllTenders()[0];
+      // Simulate age > 14 days, pipeline stage Under Review, custom notes, and a cached dossier
+      db.prepare(`
+        UPDATE tenders
+        SET pipeline_status = 'Under Review',
+            status_notes = 'Important evaluation notes',
+            created_at = datetime('now', '-20 days'),
+            cached_dossiers = ?
+        WHERE id = ?
+      `).run(JSON.stringify([{ label: 'Original Doc', localPath: '/api/dossiers/1/doc.pdf', originalUrl: url, mimeType: 'application/pdf', sha256: 'abc', sizeBytes: 100 }]), tender.id);
+
+      // Re-scan of the same item
+      const res2 = await processAndSaveTender(item, portal(), tracks);
+      expect(res2.isNew).toBe(false);
+
+      const after = getTenderById(tender.id)!;
+      expect(after.pipeline_status).toBe('Under Review');
+      expect(after.status_notes).toBe('Important evaluation notes');
+      expect(after.cached_dossiers).toHaveLength(1);
+      expect(after.cached_dossiers[0].label).toBe('Original Doc');
+    });
+
+    it('A5: earlier date flags for review, later date logs corrigendum', async () => {
+      const url = 'https://x.pk/tenders/dated-server-tender';
+      const res1 = await processAndSaveTender({
+        title: 'Procurement of Edge Servers',
+        organization: 'PSEB',
+        directUrl: url,
+        closingDate: '2026-12-15T10:00:00.000Z'
+      }, portal(), tracks);
+      expect(res1.isNew).toBe(true);
+      const tenderId = getAllTenders()[0].id;
+
+      // Re-scan with later date (extension)
+      const res2 = await processAndSaveTender({
+        title: 'Procurement of Edge Servers',
+        organization: 'PSEB',
+        directUrl: url,
+        closingDate: '2026-12-25T10:00:00.000Z'
+      }, portal(), tracks);
+      expect(res2.isNew).toBe(false);
+      expect(res2.hasCorrigendum).toBe(true);
+      const extended = getTenderById(tenderId)!;
+      expect(extended.closing_date).toBe('2026-12-25T10:00:00.000Z');
+      expect(extended.has_corrigendum).toBe(1);
+      const logs = db.prepare('SELECT * FROM corrigendum_logs WHERE tender_id = ?').all(tenderId) as any[];
+      expect(logs.length).toBeGreaterThanOrEqual(1);
+      expect(logs.some(l => l.change_type === 'deadline_extension')).toBe(true);
+
+      // Re-scan with earlier date
+      const res3 = await processAndSaveTender({
+        title: 'Procurement of Edge Servers',
+        organization: 'PSEB',
+        directUrl: url,
+        closingDate: '2026-12-10T10:00:00.000Z'
+      }, portal(), tracks);
+      expect(res3.isNew).toBe(false);
+      const flagged = getTenderById(tenderId)!;
+      // Stored date should remain unchanged
+      expect(flagged.closing_date).toBe('2026-12-25T10:00:00.000Z');
+      expect(flagged.needs_review).toBe(1);
+      expect(flagged.review_reason).toContain('earlier');
+    });
+
+    it('F4: suppressed tender returns with later future deadline', async () => {
+      const url = 'https://x.pk/tenders/suppressed-tender';
+      // First scan with past date
+      const res1 = await processAndSaveTender({
+        title: 'Old Servers RFP 2026',
+        organization: 'PSEB',
+        directUrl: url,
+        closingDate: '2026-10-15T10:00:00.000Z'
+      }, portal(), tracks);
+      expect(res1.isNew).toBe(false);
+
+      // Verify it was suppressed in deleted_tenders
+      const deleted = db.prepare('SELECT * FROM deleted_tenders WHERE id LIKE ?').all('%pseb%') as any[];
+      expect(deleted.length).toBeGreaterThanOrEqual(1);
+
+      // Now tender returns with an extended future deadline
+      const res2 = await processAndSaveTender({
+        title: 'Old Servers RFP 2026',
+        organization: 'PSEB',
+        directUrl: url,
+        closingDate: '2026-12-30T10:00:00.000Z'
+      }, portal(), tracks);
+      expect(res2.isNew).toBe(true);
+      const unsuppressed = getAllTenders().find(t => t.title.includes('Old Servers'));
+      expect(unsuppressed).toBeDefined();
+      expect(unsuppressed?.closing_date).toBe('2026-12-30T10:00:00.000Z');
+    });
+
+    it('F2: generic title held as awaiting_scope; worker releases on matching PDF and drops on non-matching', async () => {
+      // Ensure only IT & Software track is active
+      db.prepare(`DELETE FROM domain_tracks`).run();
+      db.prepare(`
+        INSERT INTO domain_tracks (id, name, positive_keywords, negative_keywords, is_active)
+        VALUES ('track-it', 'IT & Software', '["servers", "laptops"]', '["cctv"]', 1)
+      `).run();
+
+      const matchDocUrl = 'https://x.pk/uploads/2026/11/Notice-Generic-1.pdf';
+      const noMatchDocUrl = 'https://x.pk/uploads/2026/11/Notice-Generic-2.pdf';
+
+      serveDocuments({
+        [matchDocUrl]: noticePdf(10, ['Scope of Work: Supply of enterprise rack servers']),
+        [noMatchDocUrl]: noticePdf(10, ['Scope of Work: Agricultural livestock feed and cattle fodder'])
+      });
+
+      // Item 1: No track match from title, has attachment
+      const res1 = await processAndSaveTender({
+        title: 'Tender Notice No 101',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/101',
+        attachmentUrls: [matchDocUrl]
+      }, portal(), tracks);
+      expect(res1.isNew).toBe(false);
+      expect(res1.awaitingScope).toBe(true);
+
+      // Tender is stored as awaiting_scope
+      const held = db.prepare(`SELECT * FROM tenders WHERE ingestion_status = 'awaiting_scope'`).all() as any[];
+      expect(held.length).toBe(1);
+      const heldId = held[0].id;
+
+      // Item 2: No track match from title, has non-matching attachment
+      const res2 = await processAndSaveTender({
+        title: 'Tender Notice No 102',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/102',
+        attachmentUrls: [noMatchDocUrl]
+      }, portal(), tracks);
+      expect(res2.awaitingScope).toBe(true);
+
+      // Run document queue worker
+      await processDocumentQueue(5);
+
+      // Item 1 should have been released to ready and assigned IT & Software track
+      const released = getTenderById(heldId);
+      expect(released).not.toBeNull();
+      expect(released?.ingestion_status).toBe('ready');
+      expect(released?.domain_tracks).toContain('IT & Software');
+
+      // Item 2 should have been purged and suppressed
+      const held2 = db.prepare(`SELECT * FROM tenders WHERE title = 'Tender Notice No 102'`).get();
+      expect(held2).toBeUndefined();
+    });
+
+    it('B8: timed-out download on old folder does not suppress', async () => {
+      // CMS upload folder from 6 months ago in 2026 (older than 90 days, but current calendar year)
+      const url = 'https://x.pk/wp-content/uploads/2026/05/rfp.pdf';
+      serveDocuments({ [url]: new Error('ETIMEDOUT: Connection timed out') });
+
+      const res = await processAndSaveTender({
+        title: 'Procurement of High-End Workstations and Servers',
+        organization: 'PSEB',
+        directUrl: url
+      }, portal(), tracks);
+
+      // Because download timed out, nothing is known about content, so it should NOT be suppressed
+      expect(res.isNew).toBe(true);
+      const tender = getAllTenders().find(t => t.direct_url === url);
+      expect(tender).toBeDefined();
+      expect(tender?.doc_fetch_status).toBe('pending');
+      expect(getJobsForTender(tender!.id).length).toBe(1);
+      const suppressed = db.prepare('SELECT 1 FROM deleted_tenders WHERE id = ?').get(tender?.id);
+      expect(suppressed).toBeUndefined();
     });
   });
 });

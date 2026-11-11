@@ -1,3 +1,9 @@
+﻿> [!NOTE]
+> **HISTORICAL ARTIFACT (CODE FIXES COMPLETE IN v1.5.0)**
+> The code changes described in this document were made and verified in v1.5.0 (November 11, 2026) with 525 automated unit and integration tests. Three items are still open and are tracked in `docs/14-active-backlog.md`: the `D4` full-scan check on live data, the `P1-5` PDF benchmark, and the `P1-6` threshold calibration.
+> For active system specifications, architecture, and current backlog, consult the canonical documentation in `docs/01` through `docs/14`.
+
+
 # Ingestion Pipeline Upgrade — Implementation Plan (Revised)
 
 **Status:** Proposed · **Baseline:** commit `7ace6e2` (audit findings 1–5 fixed) · **Supersedes:** "Industry-Standard Ingestion Pipeline" draft
@@ -23,13 +29,15 @@ All phases are implemented: Phase 0 in `5ae606c`, Phase 1 in `73ffc8f`, Phases 2
   - MiniLM threshold calibration (§2.5): needs labelled tender/track and duplicate pairs from the operator.
 
 **Phase 3: ingest flow, budgets, worker** (`processAndSaveTender`, `ingestBudget.ts`, `ingestWorker.ts`)
-- **Deviation:** upfront documents are still read *before* the row is inserted, so a tender being checked is never visible, and `staging` is not needed during ingest. Scans are single-flight, so no parallel scan can race it. `staging` and its read-path filters remain available.
-- A past deadline read with too little certainty to delete on (or moved earlier by a corrigendum) is inserted **flagged for review**. Flagged tenders always show in the Inbox and are skipped by the retention sweep until the operator confirms or passes them.
+- Upfront document verification stages the tender row with `ingestion_status = 'staging'` (hidden from Inbox/Pipeline/KPI queries via `NOT_STAGING_SQL`), deletes it via `deleteStagedTender` if rejected by `B6`/`B6b`/`B6c`, and promotes it to `'ready'` once verification passes (`P2-4`).
+- Timed-out upfront downloads are aborted via `AbortSignal` (`P2-1`) and streaming downloads enforce `maxFileBytes()` (`P2-3`).
+- Existing tenders and duplicate re-scans persist `attachment_urls` and automatically backfill/enqueue document jobs (`P1-1`).
+- A past deadline read with too little certainty to delete on (or moved earlier by a corrigendum or re-scan, `P1-4`) is flagged for review (`needs_review = 1`). Flagged tenders always show at the top of the Inbox and Pipeline and are skipped by the retention sweep until the operator confirms or passes them.
 - Manual *Fetch documents* / *Analyze* now read documents locally first too.
 
 **Phase 4: UI & contracts**
-- Deadline-source badges, review banner (Confirm / Pass), "Fetching documents in the background…", *Retry document fetch*, flagged tenders first, and the deferred-documents line in the sidebar.
-- Portal contracts: 8 captured portals with full contracts, 3 recorded parser gaps (`psda`, `giz`, `pid`: 0 tenders over HTTP), 4 synthetic fixtures, 3 not covered (`kppra`, `gilgit` offline; `ungm` needs Playwright). `psdf`'s fixture is 109 KB (over the 50 KB target). See `tests/fixtures/portals/README.md`.
+- Deadline-source badges, review banner (**Confirm** / **Pass** / **Pass as cancelled**), "Fetching documents in the background…", *Retry document fetch*, flagged tenders sorted first in both Inbox and Pipeline (`P1-3`, `P2-5`), **Document Ingest & Vision Budgets** controls in Sources → Data (`P2-8`), and the deferred-documents line in the sidebar.
+- Portal contracts: 8 captured portals with full contracts (plus `fde_detail` exercising `?wpdmdl=` attachment discovery, `P3-5`), 3 documented HTTP zero-yield / non-listing pages (`psda` recognized as empty state `"No Opening"`, `giz`, `pid`, `P1-2`), 4 synthetic fixtures, 3 not covered (`kppra`, `gilgit` offline; `ungm` needs Playwright). All HTML fixtures are $\le 50\text{ KB}$ (`psdf` trimmed to 15.6 KB, `P3-3`). See `tests/fixtures/portals/README.md`.
 
 ---
 
@@ -288,3 +296,4 @@ Add `ingestion_status`, `deadline_source`, `deadline_confidence`, `doc_fetch_sta
 1. **A corrigendum that moves a deadline earlier** is applied and the tender is **flagged for review**: never auto-deleted on that basis (I2, §2.3, §4.1).
 2. **Undated tenders without documents** stay **visible with a badge** (I6).
 3. **Documents are downloaded directly, without Gemini.** Digital PDFs/DOCX are read locally. Gemini is required only for scanned documents and images, and is optional as a cross-check (§2.2). Per-scan budgets limit time, file size and Vision calls, not downloads (§3.2).
+

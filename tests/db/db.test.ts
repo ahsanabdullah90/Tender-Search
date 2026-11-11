@@ -35,6 +35,13 @@ import {
   BACKUPS_DIR
 } from '../../src/server/db.js';
 import { findCanonicalMatch } from '../../src/server/deduplicator.js';
+import {
+  appendSecondarySource,
+  slimPassedTenders,
+  recordTenderSuppression,
+  isTenderSuppressed
+} from '../../src/server/db/repositories/tendersRepo.js';
+import { runAuditCleanup } from '../../src/server/db/schema.js';
 
 describe('Database and Repository Layer', () => {
   beforeEach(() => {
@@ -618,6 +625,24 @@ describe('Database and Repository Layer', () => {
       expect(match.canonicalId).toBe('canon-4');
     });
 
+    it('matches tenders inserted via direct SQL without reference_norm via on-the-fly normalization fallback (G6)', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, closing_date, reference_norm)
+        VALUES ('legacy-sql-1', 'legacy-sql-1', 'ppra_federal', 'PPRA Federal', 'TS-554433-E', 'Hardware Delivery for Data Center', 'Ministry of IT', 'http://test', '2026-12-01T10:00:00.000Z', NULL)
+      `).run();
+
+      const match = findCanonicalMatch({
+        referenceNo: 'TS 554433 E',
+        title: 'Hardware Delivery for Data Center IT',
+        organization: 'Ministry of IT',
+        portalId: 'other_portal'
+      });
+
+      expect(match.isDuplicate).toBe(true);
+      expect(match.canonicalId).toBe('legacy-sql-1');
+      expect(match.tier).toBe('reference');
+    });
+
     it('heals legacy offline_broken portals with TLS errors to public during initDatabase', () => {
       db.prepare(`
         UPDATE portal_health
@@ -678,6 +703,115 @@ describe('Database and Repository Layer', () => {
       // Re-run initDatabase to simulate server restart; ensure it does not revive deleted portal
       initDatabase();
       expect(getPortalById('portal_to_delete')).toBeNull();
+    });
+  });
+
+  describe('Audit Fixes: B1, B2, Suppressions, Reference Normalization & Migration', () => {
+    it('B1: own portal is never recorded as a secondary source, and entries are unique by link', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, closing_date)
+        VALUES ('tender-b1', 'tender-b1', 'pseb', 'Pakistan Software Export Board', 'REF-B1', 'Cloud Infrastructure Services', 'PSEB', 'https://pseb.org.pk/t1', '2026-12-30T10:00:00.000Z')
+      `).run();
+
+      // 1. Same portal should be ignored
+      const resSame = appendSecondarySource('tender-b1', {
+        portalName: 'Pakistan Software Export Board',
+        directUrl: 'https://pseb.org.pk/t1-duplicate',
+        discoveredAt: new Date().toISOString()
+      });
+      expect(resSame).toBe(false);
+
+      // 2. Different portal should be added
+      const resDiff = appendSecondarySource('tender-b1', {
+        portalName: 'PPRA Federal',
+        directUrl: 'https://ppra.org.pk/t1',
+        discoveredAt: new Date().toISOString()
+      });
+      expect(resDiff).toBe(true);
+
+      // 3. Duplicate link from different portal should not duplicate
+      const resDup = appendSecondarySource('tender-b1', {
+        portalName: 'PPRA Federal',
+        directUrl: 'https://ppra.org.pk/t1',
+        discoveredAt: new Date().toISOString()
+      });
+      expect(resDup).toBe(false);
+
+      const t = getTenderById('tender-b1')!;
+      expect(t.secondary_sources).toHaveLength(1);
+      expect(t.secondary_sources[0].portalName).toBe('PPRA Federal');
+    });
+
+    it('B2: slimming a Passed tender preserves status_notes, and keeps description if ever in Pipeline', () => {
+      // 1. Inbox tender passed straight: keeps status_notes, slims description
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, pipeline_status, status_notes, description, passed_at)
+        VALUES ('tender-b2-inbox', 'tender-b2-inbox', 'pseb', 'PSEB', 'REF-B2-A', 'Hardware Supply', 'PSEB', 'http://t2a', 'Passed', 'Inbox review note', 'Original Inbox Description', datetime('now', '-5 days'))
+      `).run();
+
+      slimPassedTenders(['tender-b2-inbox']);
+      const afterInbox = getTenderById('tender-b2-inbox')!;
+      expect(afterInbox.status_notes).toBe('Inbox review note');
+      expect(afterInbox.description).toBe('');
+      expect(afterInbox.slimmed_at).not.toBeNull();
+
+      // 2. Tender that was in Pipeline (recorded in pipeline_audit_logs): keeps both notes and description
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, pipeline_status, status_notes, description, passed_at)
+        VALUES ('tender-b2-pipe', 'tender-b2-pipe', 'pseb', 'PSEB', 'REF-B2-B', 'Cloud Migration', 'PSEB', 'http://t2b', 'Passed', 'Pipeline evaluation note', 'Full Engineering Description', datetime('now', '-5 days'))
+      `).run();
+      db.prepare(`
+        INSERT INTO pipeline_audit_logs (id, tender_id, previous_status, new_status, notes, created_at)
+        VALUES ('audit-log-b2', 'tender-b2-pipe', 'New Opportunity', 'Under Review', 'Moved to review', datetime('now', '-6 days'))
+      `).run();
+
+      slimPassedTenders(['tender-b2-pipe']);
+      const afterPipe = getTenderById('tender-b2-pipe')!;
+      expect(afterPipe.status_notes).toBe('Pipeline evaluation note');
+      expect(afterPipe.description).toBe('Full Engineering Description');
+      expect(afterPipe.slimmed_at).not.toBeNull();
+    });
+
+    it('suppression reasons and 120-day expiry for undated suppressions', () => {
+      // Record suppression with reason
+      recordTenderSuppression('suppress-test-1', 'suppress-test-1', null, 'stale');
+      const rec = db.prepare('SELECT * FROM deleted_tenders WHERE id = ?').get('suppress-test-1') as any;
+      expect(rec).toBeDefined();
+      expect(rec.reason).toBe('stale');
+
+      // Still suppressed within 120 days
+      expect(isTenderSuppressed('suppress-test-1', 'suppress-test-1', null)).toBe(true);
+
+      // Backdate deleted_at to 125 days ago
+      db.prepare(`UPDATE deleted_tenders SET deleted_at = datetime('now', '-125 days') WHERE id = ?`).run('suppress-test-1');
+
+      // 120-day expiry: should no longer be suppressed!
+      expect(isTenderSuppressed('suppress-test-1', 'suppress-test-1', null)).toBe(false);
+    });
+
+    it('runAuditCleanup normalizes references, cleans self secondary sources, and writes migration log', () => {
+      // 1. Insert row with unnormalized reference
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, reference_norm, title, organization, direct_url, secondary_sources)
+        VALUES (
+          'audit-clean-1', 'audit-clean-1', 'pseb', 'Pakistan Software Export Board',
+          'PSDF / PROC / 2026-99', NULL,
+          'Test Tender Clean', 'PSEB', 'http://clean',
+          '[{"portalName":"Pakistan Software Export Board","directUrl":"http://self"}]'
+        )
+      `).run();
+
+      const report = runAuditCleanup();
+      expect(report.referencesNormalized).toBeGreaterThanOrEqual(1);
+      expect(report.selfSecondarySourcesRemoved).toBeGreaterThanOrEqual(1);
+
+      const cleaned = getTenderById('audit-clean-1')!;
+      expect(cleaned.reference_norm).toBe('psdfproc202699');
+      expect(cleaned.secondary_sources).toHaveLength(0);
+
+      // Migration log recorded in app_settings
+      const log = db.prepare(`SELECT value FROM app_settings WHERE key = 'migration_audit_fixes_2026_11'`).get() as any;
+      expect(log).toBeDefined();
     });
   });
 });

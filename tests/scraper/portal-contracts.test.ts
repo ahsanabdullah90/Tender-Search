@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { db, initDatabase, getAllTenders, setAppSetting } from '../../src/server/db.js';
-import { parsePortalHtml, processAndSaveTender, crawlerDeps, orderDocumentCandidates } from '../../src/server/scrapers/crawlerEngine.js';
+import { parsePortalHtml, processAndSaveTender, crawlerDeps, orderDocumentCandidates, fetchDocumentsForTender, hasEmptyTenderTableState } from '../../src/server/scrapers/crawlerEngine.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { getPortalFileCode } from '../../src/server/dossierStore.js';
 
@@ -131,4 +131,54 @@ describe('Portal contract tests', () => {
       expect(result.items.length > 0 || result.hitlRequired).toBe(true);
     });
   }
+
+  it('keeps every portal HTML fixture at or below the 50 KB size cap (P3-3)', () => {
+    const allDirs = fs.readdirSync(FIXTURES).filter(d => fs.existsSync(path.join(FIXTURES, d, 'page.html')));
+    for (const d of allDirs) {
+      const size = fs.statSync(path.join(FIXTURES, d, 'page.html')).size;
+      expect(size, `${d}/page.html size`).toBeLessThanOrEqual(50 * 1024);
+    }
+  });
+
+  it('recognizes PSDA "No Opening" page as a valid empty tender table state (P1-2)', () => {
+    const psdaHtml = fs.readFileSync(path.join(FIXTURES, 'psda', 'page.html'), 'utf8');
+    expect(hasEmptyTenderTableState(psdaHtml)).toBe(true);
+  });
+
+  it('discovers ?wpdmdl= attachments from an FDE detail page fixture (P3-5)', async () => {
+    const fdePortal = PORTAL_DEFINITIONS.find(p => p.id === 'fde')!;
+    const fdeListingHtml = fs.readFileSync(path.join(FIXTURES, 'fde', 'page.html'), 'utf8');
+    const detailHtml = fs.readFileSync(path.join(FIXTURES, 'fde_detail', 'page.html'), 'utf8');
+    const firstItem = parsePortalHtml(fdeListingHtml, fdePortal).items[0];
+    expect(firstItem).toBeDefined();
+
+    const catchAll = [{
+      id: 'track-fde',
+      name: 'Education',
+      positive_keywords: [firstItem.title.toLowerCase().slice(0, 15)],
+      negative_keywords: [],
+      is_active: 1
+    }];
+    await processAndSaveTender({ ...firstItem, closingDate: '2026-12-15T09:00:00.000Z' }, fdePortal, catchAll);
+    const saved = getAllTenders()[0];
+    expect(saved).toBeDefined();
+
+    const fetchHtmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml').mockResolvedValue(detailHtml);
+    const fetchBufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockImplementation(async (url: string) =>
+      Buffer.from(`%PDF-1.4 synthetic FDE attachment from ${url}`)
+    );
+    try {
+      const res = await fetchDocumentsForTender(saved.id);
+      expect(fetchHtmlSpy).toHaveBeenCalledWith(saved.direct_url);
+      expect(fetchBufSpy).toHaveBeenCalledTimes(2);
+      expect(res.newlyFetched).toBe(2);
+      expect(res.dossiers.map(d => d.originalUrl)).toEqual([
+        'https://fde.gov.pk/download/printing-and-supply-of-textbooks/?wpdmdl=13892&refresh=6730a1b2c3d4e',
+        'https://fde.gov.pk/download/printing-and-supply-of-textbooks/?wpdmdl=13893'
+      ]);
+    } finally {
+      fetchHtmlSpy.mockRestore();
+      fetchBufSpy.mockRestore();
+    }
+  });
 });

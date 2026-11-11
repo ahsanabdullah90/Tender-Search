@@ -151,11 +151,13 @@ export function getStorageStats() {
   const passed = db.prepare(`SELECT id FROM tenders WHERE pipeline_status = 'Passed'`).all() as { id: string }[];
   const passedBytes = passed.reduce((sum, t) => sum + folderSize(path.resolve(DOSSIERS_DIR, t.id)), 0);
   const withDocs = db.prepare(`SELECT COUNT(*) AS n FROM tenders WHERE cached_dossiers IS NOT NULL AND cached_dossiers != '[]'`).get() as { n: number };
+  const awaitingScope = db.prepare(`SELECT COUNT(*) AS n FROM tenders WHERE ingestion_status = 'awaiting_scope'`).get() as { n: number };
   return {
     total_bytes: folderSize(DOSSIERS_DIR),
     passed_bytes: passedBytes,
     passed_tenders: passed.length,
-    tenders_with_documents: withDocs.n
+    tenders_with_documents: withDocs.n,
+    awaiting_scope_count: awaitingScope ? awaitingScope.n : 0
   };
 }
 
@@ -196,3 +198,58 @@ export function clearAllTenders(unreviewedOnly: boolean = false) {
   deleteTenders(ids, 'user');
   return true;
 }
+
+/**
+ * Deletes daily Gemini Vision call counter rows in app_settings (`ingest_vision_calls_YYYY-MM-DD`)
+ * older than `keepDays` days (docs/14 P2-7).
+ */
+export function pruneOldDailyVisionCounters(keepDays: number = 7): number {
+  try {
+    const cutoffMs = Date.now() + 5 * 3600000 - Math.max(1, keepDays) * 86400000;
+    const cutoffDay = new Date(cutoffMs).toISOString().slice(0, 10);
+    // Vision counters: ingest_vision_calls_YYYY-MM-DD; AI text counters: ingest_ai_text_calls_YYYY-MM-DD.
+    return db.prepare(`
+      DELETE FROM app_settings
+      WHERE (key LIKE 'ingest_vision_calls_20%' OR key LIKE 'ingest_ai_text_calls_20%')
+        AND substr(key, -10) < ?
+    `).run(cutoffDay).changes;
+  } catch {
+    return 0;
+  }
+}
+
+export interface PendingFilePurgeRow {
+  id: string;
+  folder_path: string;
+  attempts: number;
+}
+
+export function enqueuePendingFilePurge(id: string, folderPath: string, errorMessage: string): void {
+  db.prepare(`
+    INSERT INTO pending_file_purges (id, folder_path, attempts, last_error)
+    VALUES (?, ?, 1, ?)
+    ON CONFLICT(id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error
+  `).run(id, folderPath, errorMessage);
+}
+
+export function getPendingFilePurges(maxAttempts: number = 10): PendingFilePurgeRow[] {
+  return db.prepare('SELECT id, folder_path, attempts FROM pending_file_purges WHERE attempts < ?').all(maxAttempts) as PendingFilePurgeRow[];
+}
+
+export function deletePendingFilePurge(id: string): void {
+  db.prepare('DELETE FROM pending_file_purges WHERE id = ?').run(id);
+}
+
+export function incrementPendingFilePurgeAttempt(id: string, errorMessage: string): void {
+  db.prepare('UPDATE pending_file_purges SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(errorMessage, id);
+}
+
+export function countPendingFilePurges(maxAttempts: number = 10): number {
+  try {
+    const row = db.prepare('SELECT COUNT(*) as c FROM pending_file_purges WHERE attempts < ?').get(maxAttempts) as { c: number } | undefined;
+    return row?.c || 0;
+  } catch {
+    return 0;
+  }
+}
+

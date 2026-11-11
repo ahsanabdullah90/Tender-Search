@@ -1,3 +1,11 @@
+export interface PaginationConfig {
+  kind: 'query' | 'path' | 'postback' | 'click';
+  param?: string;
+  pathPattern?: string;
+  maxPages: number;
+  nextSelector?: string;
+}
+
 export interface PortalDefinition {
   id: string;
   name: string;
@@ -11,6 +19,7 @@ export interface PortalDefinition {
   defaultKeywords: string[];
   accessMode: 'public' | 'login_required' | 'cloudflare' | 'offline_broken';
   verifiedStatus: string;
+  pagination?: PaginationConfig;
 }
 
 export const PORTAL_DEFINITIONS: PortalDefinition[] = [
@@ -40,7 +49,8 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     description: 'Punjab provincial e-Procurement portal (865+ live tenders, no login needed)',
     defaultKeywords: ['renovation', 'photovoltaic', 'stationery', 'consultancy', 'civil works'],
     accessMode: 'public',
-    verifiedStatus: 'Working — Top provincial source'
+    verifiedStatus: 'Working — Top provincial source',
+    pagination: { kind: 'query', param: 'page', maxPages: 3 }
   },
   {
     id: 'sppra',
@@ -53,7 +63,8 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     description: 'Sindh Public Procurement Authority (12,900+ live tenders with full filters)',
     defaultKeywords: ['masonry', 'solarization', 'curriculum', 'toner', 'infrastructure'],
     accessMode: 'public',
-    verifiedStatus: 'Working — Massive repository, public access'
+    verifiedStatus: 'Working — Massive repository, public access',
+    pagination: { kind: 'query', param: 'page', maxPages: 3 }
   },
   {
     id: 'kppra',
@@ -94,7 +105,8 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     description: 'Federal disaster management emergency procurement (34 pages of listings)',
     defaultKeywords: ['rehabilitation', 'solar', 'supplies', 'prefabricated', 'tents'],
     accessMode: 'public',
-    verifiedStatus: 'Working — 34 pages of tenders'
+    verifiedStatus: 'Working — 34 pages of tenders',
+    pagination: { kind: 'query', param: 'page', maxPages: 3 }
   },
   {
     id: 'fde',
@@ -215,7 +227,8 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     description: 'UN agencies global procurement with rich filters (1,700+ live notices)',
     defaultKeywords: ['education', 'clean energy', 'rehabilitation', 'advocacy campaign'],
     accessMode: 'public',
-    verifiedStatus: 'Working — 1,700+ live notices'
+    verifiedStatus: 'Working — 1,700+ live notices',
+    pagination: { kind: 'query', param: 'page', maxPages: 3 }
   },
   {
     id: 'giz',

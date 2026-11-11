@@ -1,5 +1,7 @@
 import { db } from './connection.js';
 import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
+import { backfillExistingTenderDocumentJobs } from './repositories/ingestJobsRepo.js';
+import { backfillReferenceNorms, removeSelfSecondarySources } from './repositories/tendersRepo.js';
 
 export function initDatabase() {
   // 1. Tenders Table
@@ -148,6 +150,102 @@ export function initDatabase() {
 
   seedDefaultDomainTracks();
   seedPortalHealth();
+  migrateAuditFixColumns();
+  runAuditCleanupOnce();
+}
+
+/**
+ * Columns added by the docs/16 audit fixes:
+ *   tenders.reference_norm         one normalisation of reference_no for exact matching (C1)
+ *   tenders.publish_date_source    'listing' | 'upload_folder' (an upload-folder date is never used for ageing, A2)
+ *   deleted_tenders.reason         'user' | 'auto-expired' | 'stale' | 'no-track-match' | 'legacy' (F4)
+ *   portal_health.last_success_at  last scan that completed without a connection error (B6)
+ *   portal_health.pages_scanned    listing pages read in the last scan (F1)
+ */
+function migrateAuditFixColumns() {
+  const addColumn = (table: string, ddl: string) => {
+    try { db.prepare(`ALTER TABLE ${table} ADD COLUMN ${ddl}`).run(); } catch {}
+  };
+  addColumn('tenders', 'reference_norm TEXT');
+  addColumn('tenders', 'publish_date_source TEXT');
+  addColumn('deleted_tenders', `reason TEXT DEFAULT 'legacy'`);
+  addColumn('portal_health', 'last_success_at TEXT');
+  addColumn('portal_health', 'pages_scanned INTEGER DEFAULT 0');
+  try { db.prepare('CREATE INDEX IF NOT EXISTS idx_tenders_reference_norm ON tenders(reference_norm)').run(); } catch {}
+}
+
+/**
+ * One-time data cleanup for the docs/16 audit (runs once per database, recorded in app_settings):
+ *  - references that fail the stricter validation are cleared, the rest normalised (F3, C1);
+ *  - "Also listed on" entries naming the tender's own portal are removed (B1);
+ *  - site images (stamps, logos under /img/) are removed as tender links and queued documents (B5);
+ *  - navigation rows ingested as tenders ("All Newspapers ...") are removed (C2);
+ *  - item counts of portals whose last scan failed are reset to 0 (B6).
+ */
+export function runAuditCleanupOnce(): void {
+  const KEY = 'migration_audit_fixes_2026_11';
+  try {
+    const done = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(KEY) as { value: string } | undefined;
+    if (done) return;
+    const report = runAuditCleanup();
+    db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(KEY, JSON.stringify({ ...report, at: new Date().toISOString() }));
+    if (Object.values(report).some(v => v > 0)) console.log('[Migration] docs/16 audit cleanup:', JSON.stringify(report));
+  } catch (err) {
+    console.warn('[Migration] docs/16 audit cleanup failed:', err);
+  }
+}
+
+export function runAuditCleanup(): Record<string, number> {
+  const refs = backfillReferenceNorms();
+  const selfSources = removeSelfSecondarySources();
+
+  // Site-chrome images used as a tender's link: fall back to the first real document link, or the portal listing.
+  const SITE_IMAGE = (u: string) => /\/(?:img|images|assets|static|theme|themes)\/[^?]*\.(?:png|jpe?g|gif|webp|svg)(?:\?|$)/i.test(u) || /stamp|seal|badge|watermark|logo/i.test(u.split('/').pop() || '');
+  const rows = db.prepare(`SELECT t.id, t.direct_url, t.attachment_urls, p.tenders_url FROM tenders t LEFT JOIN portal_health p ON p.portal_id = t.portal_id`).all() as { id: string; direct_url: string; attachment_urls: string | null; tenders_url: string | null }[];
+  let imageLinksFixed = 0;
+  for (const r of rows) {
+    if (!r.direct_url || !SITE_IMAGE(r.direct_url)) continue;
+    let attachments: string[] = [];
+    try { attachments = JSON.parse(r.attachment_urls || '[]'); } catch {}
+    const replacement = attachments.find(u => !SITE_IMAGE(u)) || r.tenders_url || r.direct_url;
+    db.prepare('UPDATE tenders SET direct_url = ?, attachment_urls = ? WHERE id = ?').run(replacement, JSON.stringify(attachments.filter(u => !SITE_IMAGE(u))), r.id);
+    imageLinksFixed++;
+  }
+  const jobs = db.prepare(`SELECT id, url FROM document_ingest_jobs WHERE status IN ('pending', 'failed')`).all() as { id: string; url: string }[];
+  let imageJobsRemoved = 0;
+  for (const j of jobs) {
+    if (SITE_IMAGE(j.url)) {
+      db.prepare('DELETE FROM document_ingest_jobs WHERE id = ?').run(j.id);
+      imageJobsRemoved++;
+    }
+  }
+
+  // Navigation rows: link is the portal's own home/listing page, and no date, reference or document.
+  const navRows = db.prepare(`
+    SELECT t.id FROM tenders t JOIN portal_health p ON p.portal_id = t.portal_id
+    WHERE t.pipeline_status = 'New Opportunity'
+      AND RTRIM(t.direct_url, '/') IN (RTRIM(p.base_url, '/'), RTRIM(p.tenders_url, '/'))
+      AND t.closing_date IS NULL AND t.reference_no IS NULL
+      AND (t.cached_dossiers IS NULL OR t.cached_dossiers = '[]')
+      AND (t.attachment_urls IS NULL OR t.attachment_urls = '[]')
+      AND (t.title LIKE 'All Newspapers%' OR t.title LIKE 'All Categories%' OR t.title LIKE 'Newspapers%')
+  `).all() as { id: string }[];
+  for (const n of navRows) {
+    db.prepare('DELETE FROM document_ingest_jobs WHERE tender_id = ?').run(n.id);
+    db.prepare('DELETE FROM tenders WHERE id = ?').run(n.id);
+  }
+
+  const staleCounts = db.prepare(`UPDATE portal_health SET last_items_found = 0 WHERE status = 'error' AND last_items_found > 0`).run().changes;
+
+  return {
+    referencesCleared: refs.cleared,
+    referencesNormalized: refs.normalized,
+    selfSecondarySourcesRemoved: selfSources,
+    imageLinksFixed,
+    imageJobsRemoved,
+    navigationRowsRemoved: navRows.length,
+    staleItemCountsReset: staleCounts
+  };
 }
 
 /**
@@ -189,8 +287,10 @@ function migrateIngestionProvenanceColumns() {
   }
   addColumn('needs_review INTEGER DEFAULT 0');
   addColumn('review_reason TEXT');
+  addColumn(`attachment_urls TEXT DEFAULT '[]'`);
 
   try { db.prepare('CREATE INDEX IF NOT EXISTS idx_tenders_ingestion ON tenders(ingestion_status)').run(); } catch {}
+  try { backfillExistingTenderDocumentJobs(); } catch {}
 }
 
 export function seedDefaultDomainTracks() {

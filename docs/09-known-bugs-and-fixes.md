@@ -7,7 +7,7 @@ This document catalogs the 13 architectural and operational defects identified i
 ### Bug B1: Playwright Headless Fallback in Scraper
 - **Symptom**: Portals designated as `tier: 'playwright'` (such as Sindh SPPRA) crashed if Playwright dependencies were uninstalled or headless browser contexts failed to launch.
 - **Root Cause**: Unhandled rejection when spawning browser processes in `scrapePortal()`.
-- **Solution**: Implemented a try/catch wrapper around the Playwright context in `crawlerEngine.ts`. If browser launch fails, it logs a warning and gracefully falls back to the tolerant HTTP agent with Cheerio, preventing scan termination.
+- **Solution**: Implemented a try/catch wrapper around the Playwright context in `crawlerEngine.ts` and `htmlFetcher.ts`. If browser launch fails, it logs a warning and gracefully falls back to the tolerant HTTP agent with Cheerio, preventing scan termination.
 - **Test File**: `tests/scraper/crawler.test.ts`.
 
 ---
@@ -57,7 +57,7 @@ This document catalogs the 13 architectural and operational defects identified i
 ### Bug B7: Ambiguous Date Extraction on Multi-Date Notices
 - **Symptom**: On notices displaying both "Publish Date", "Pre-Bid Meeting Date", and "Submission Deadline", the parser occasionally selected the earlier pre-bid meeting date as the closing date.
 - **Root Cause**: Regex greedily matched the first chronological date string found in the text.
-- **Solution**: Implemented `extractDatesFromText()` in `crawlerEngine.ts`. It prioritizes explicit label markers (e.g., `"Submission Deadline:"`, `"Closing Date:"`, `"Last Date:"`). If multiple unlabeled dates exist, it selects the latest chronological date for the deadline.
+- **Solution**: Implemented `extractDatesFromText()` in `src/server/scrapers/portalParsers.ts` (re-exported by `crawlerEngine.ts`). It prioritizes explicit label markers (e.g., `"Submission Deadline:"`, `"Closing Date:"`, `"Last Date:"`). If multiple unlabeled dates exist, it selects the latest chronological date for the deadline.
 - **Test File**: `tests/unit/crawler-date.test.ts` & `tests/scraper/crawler.test.ts`.
 
 ---
@@ -65,7 +65,7 @@ This document catalogs the 13 architectural and operational defects identified i
 ### Bug B8: Strict Tender Status Validation
 - **Symptom**: Invalid status values could be injected into `PATCH /api/tenders/:id/status`, corrupting pipeline metrics.
 - **Root Cause**: No whitelist validation against `TENDER_STATUSES`.
-- **Solution**: In `server.ts`, the endpoint strictly validates `req.body.status` against `TENDER_STATUSES`. Returns HTTP 400 Bad Request if an unrecognized status is received.
+- **Solution**: In `src/server/routes/tenders.routes.ts`, the endpoint strictly validates `req.body.status` against `TENDER_STATUSES`. Returns HTTP 400 Bad Request if an unrecognized status is received.
 - **Test File**: `tests/api/routes.test.ts`.
 
 ---
@@ -81,7 +81,7 @@ This document catalogs the 13 architectural and operational defects identified i
 ### Bug B10: SSL Verification Tolerant Agent Architecture
 - **Symptom**: Municipal portals with expired or incomplete SSL certificate chains failed with network exceptions.
 - **Root Cause**: Default Node `fetch` rejected unverified SSL certificates.
-- **Solution**: Encapsulated tolerant HTTPS agent (`rejectUnauthorized: false`) in `fetchHtmlWithTolerantAgent` inside `crawlerEngine.ts` with explicit masqueraded headers.
+- **Solution**: Encapsulated tolerant HTTPS agent (`rejectUnauthorized: false`) in `fetchHtmlWithTolerantAgent` inside `src/server/scrapers/htmlFetcher.ts` (re-exported by `crawlerEngine.ts`) with explicit masqueraded headers.
 - **Test File**: `tests/unit/base-scraper.test.ts`.
 
 ---
@@ -106,5 +106,32 @@ This document catalogs the 13 architectural and operational defects identified i
 ### Bug B13: Sub-Minute Time Synchronization
 - **Symptom**: In-memory countdown clocks on tender deadlines lagged or jumped when client timers drifted.
 - **Root Cause**: Inconsistent tick intervals in React state.
-- **Solution**: Unified time interval hook `useTick(60_000)` in `InboxScreen.tsx` and `PipelineScreen.tsx`, driving synchronized deadline rendering across all open cards.
+- **Solution**: Unified time interval hook `useTick(60_000)` in `src/components/inbox/Detail.tsx` (re-exported by `InboxScreen.tsx`) and `PipelineScreen.tsx`, driving synchronized deadline rendering across all open cards.
 - **Test File**: `tests/ui/inbox-screen.test.tsx`.
+
+---
+
+## Ingestion Pipeline & Backlog Fixes (2026-11-10 to 2026-11-11)
+
+Following the initial B1–B13 fixes, a comprehensive audit of the **Scrape $\rightarrow$ Document Ingest $\rightarrow$ Verification $\rightarrow$ Inbox** pipeline was completed (archived in [`docs/archive/13-ingestion-pipeline-plan.md`](./archive/13-ingestion-pipeline-plan.md)):
+
+- **B6b & B6c (Stale Undated Archive Notices)**: Undated notices with explicit publish dates older than 90 days, unreadable upload-folder dates older than 90 days, or titles/URLs referencing only prior calendar years are rejected at ingest and recorded in `deleted_tenders`.
+- **Canonical Deadline Reconciliation (`resolveCanonicalDeadline`)**: Later valid deadlines win; same-day document times beat a listing's default 14:00 PKT; corrigenda or re-scans that move a deadline to an earlier calendar day flag the tender (`needs_review = 1`) rather than silently overwriting or deleting it.
+- **Tagged Embedding Vector Spaces (`embeddingService.ts`)**: 384-D `all-MiniLM-L6-v2` embeddings (`model` tag) and fallback keyword vectors (`fast` tag) are never compared across spaces; `backfillModelEmbeddings()` upgrades legacy/fast vectors on startup.
+- **Abortable & Size-Capped Downloads (`dossierManager.ts`)**: Upfront downloads pass an `AbortSignal` on timeout, check `Content-Length` + streaming byte caps against `maxFileBytes()`, and defer directory creation until download succeeds so failed downloads never leave empty folders.
+- **Legacy Attachment Backfill (`ingestJobsRepo.ts`)**: Added `attachment_urls` persistence on `tenders` and `backfillExistingTenderDocumentJobs()` on startup so existing undated/direct-document tenders have their attachments queued automatically.
+
+---
+
+## Deep Ingest & Deduplication Flaws (2026-11-11, `docs/archive/15` & `docs/archive/16`)
+
+All 23 deep logic flaws (A1–A11, B1–B8, C1–C4) and 7 fundamental issues (F1–F7) were addressed in code, verified with unit and integration tests (525 tests in Vitest), and validated against the live database (details archived in [`docs/archive/15-fundamental-logic-issues.md`](./archive/15-fundamental-logic-issues.md) and [`docs/archive/16-deep-audit-logic-flaws.md`](./archive/16-deep-audit-logic-flaws.md)):
+- **A1, A5, A4 (Re-scan & Pipeline Safety)**: Isolated re-scan path preventing overwriting or staging existing rows. Pipeline rows retain stages, notes, and dossiers across re-scans. Deadlines update only via `applyRescannedDeadline`.
+- **A6–A11 (Date & Time Parsing)**: Lone dates partitioned correctly; query/pre-bid dates ignored; military hours ("1100 hrs") parsed accurately; table-of-contents corrigendum false-positives eliminated; year bounds strictly enforced (2010 to current+5).
+- **A3, B1, C1, F3, F7 (Deduplication & Matching)**: Strict `referenceNo.ts` normalisation and validation (`reference_norm`). Similarity dedup excludes tender's own portal. `titlesAreDistinguishable` prevents merging distinct tenders differing by 1-2 key words. Token-boundary matching via `containsKeyword` in `trackMatcher.ts`.
+- **A2, B8 (Retention & Suppression Safety)**: Unified 90-day undated ageing limit (`UNDATED_MAX_AGE_DAYS = 90`). Upload-folder dates tagged `publish_date_source = 'upload_folder'` and excluded from ageing. Undated suppressions expire after 120 days and lift if future deadline reappears. Failed downloads never trigger suppression.
+- **B2 (Slimming Safety)**: Slimming Passed tenders retains `status_notes`; tenders ever in the pipeline (`pipeline_audit_logs`) preserve description and history.
+- **B4, B5, C2, C4 (Scraping & Download Robustness)**: Downloads inspect magic bytes and Content-Type, rejecting HTML payloads. Navigation rows dropped. Image logos/stamps ignored in `collectRowAttachments`. HTML decoded from full Buffer chunks using declared/default UTF-8 charset.
+- **B6, B7, F1, F5 (Sources Reliability & Scheduler)**: Multi-page crawler pagination with safety bounds. Retry on transient timeouts with exponential backoff (no auto-heal). Catch-up scan waits for full completion before running daily advisement. `last_full_scan_at` tracked in `app_settings`.
+- **F2 (Hold for Scope)**: Generic/unmatched listings with documents held as `awaiting_scope` until worker reads documents; matching ones released to `ready`.
+- **C3 (AI Budget Guardrails)**: All Gemini text and Vision calls bounded by `ingest_ai_text_calls_per_day` (default 150) and daily Vision budget.

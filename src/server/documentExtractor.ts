@@ -3,6 +3,7 @@ import { getGeminiApiKey } from './db/repositories/systemRepo.js';
 import { inferDocType, DocType } from './dossierStore.js';
 import { DATE_CANDIDATE_PATTERN, parseDateString, normalizeExtractedDate, formatClosingDate } from './scrapers/dateParser.js';
 import { isValidReferenceNo } from './deduplicator.js';
+import { tryConsumeDailyAiText, tryConsumeDailyVision } from './ingestBudget.js';
 
 /**
  * Two-stage document extractor (docs/13-ingestion-pipeline-plan.md, Phase 2.2).
@@ -42,6 +43,8 @@ export interface ExtractOptions {
   allowVisionCall?: () => boolean;
   /** Allow a Gemini text cross-check when the local result is ambiguous. Default true. */
   allowAiCrossCheck?: boolean;
+  /** Called before each Gemini text call; defaults to the daily AI text budget. */
+  allowAiTextCall?: () => boolean;
 }
 
 export interface DocumentText {
@@ -142,10 +145,13 @@ const SUBMISSION_ANCHOR = new RegExp(
     'last\\s+date\\s+(?:and\\s+time\\s+)?(?:of|for)\\s+(?:the\\s+)?(?:submission|receipt|dropping)',
     'last\\s+date\\s+(?:and\\s+time\\s+)?(?:to|of)\\s+submit',
     '(?:closing|due|submission)\\s+date(?:\\s+and\\s+time)?',
+    'date\\s+of\\s+(?:bid\\s+|tender\\s+)?submission',
+    'submission\\s+of\\s+(?:bids?|tenders?|proposals?|quotations?|eois?)[\\s:–-]{1,15}',
     'deadline(?:\\s+for\\s+(?:the\\s+)?submission)?',
     '(?:bids?|tenders?|proposals?|quotations?|offers?|eois?|applications?)[^.\\n]{0,80}?\\b(?:shall|must|should|will|may|can)\\s+be\\s+(?:submitted|received|delivered|dropped|deposited|reach(?:ed)?)',
+    'tender\\s+box\\s+(?:on\\s+or\\s+before|up\\s*to|till|until|by)',
     '(?:should|must|shall)\\s+reach',
-    '(?:submitted|received|delivered|dropped)\\s+(?:on\\s+or\\s+before|before|by|latest\\s+by|not\\s+later\\s+than|till|up\\s*to)',
+    '(?:submitted|received|delivered|dropped)\\s+(?:on\\s+or\\s+before|before|by|latest\\s+by|not\\s+later\\s+than|till|until|up\\s*to)',
     'on\\s+or\\s+before'
   ].join('|'),
   'gi'
@@ -155,21 +161,39 @@ const SUBMISSION_ANCHOR = new RegExp(
 const NON_SUBMISSION_CONTEXT = /\b(issu(?:e|ance|ed)|pre[-\s]?bid|opening|opened|open\b|validity|valid|sale\s+of|purchase\s+of|published|dated|clarification)/i;
 
 const DATE_RE = new RegExp(DATE_CANDIDATE_PATTERN, 'gi');
-const TIME_RE = /(?:at\s+|by\s+|upto\s+|up\s+to\s+|till\s+|time\s*[:\-]?\s*)?(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?|hrs|hours)\b/i;
+// 24-hour "military" times common in Pakistani notices: "1100 hrs", "1430 hours", "11:00 hrs".
+// Checked first: the 12-hour pattern below used to match the "00 hrs" tail of "1100 hrs" as
+// midnight (docs/16 A8).
+const MILITARY_TIME_RE = /(?<![\d:.])([01]?\d|2[0-3])[:.]?([0-5]\d)\s*(?:hrs|hours|hr|h)\b/i;
+const TIME_RE = /(?:at\s+|by\s+|upto\s+|up\s+to\s+|till\s+|time\s*[:\-]?\s*)?(?<![\d:.])(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?|hrs|hours)(?![a-z])/i;
+
+/** Reads a time of day from text: 24-hour forms first, then 12-hour am/pm forms. */
+export function parseTimeOfDay(text: string): { hour: number; minute: number } | null {
+  const mil = text.match(MILITARY_TIME_RE);
+  if (mil) {
+    const hour = parseInt(mil[1], 10);
+    const minute = parseInt(mil[2], 10);
+    if (hour <= 23 && minute <= 59) return { hour, minute };
+  }
+  const tm = text.match(TIME_RE);
+  if (!tm) return null;
+  let hour = parseInt(tm[1], 10);
+  const minute = tm[2] ? parseInt(tm[2], 10) : 0;
+  const suffix = tm[3].toLowerCase().replace(/[\s.]/g, '');
+  if (suffix === 'pm' && hour < 12) hour += 12;
+  if (suffix === 'am' && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) return null;
+  return { hour, minute };
+}
 
 function combineDateAndTime(dateStr: string, after: string): string | null {
   const iso = parseDateString(dateStr);
   if (!iso) return null;
   // If the date already carried a time, keep it.
   if (/\d{1,2}:\d{2}/.test(dateStr)) return iso;
-  const tm = after.slice(0, 40).match(TIME_RE);
-  if (!tm) return iso; // date-only: parseDateString defaults to 14:00 PKT
-  let hour = parseInt(tm[1], 10);
-  const minute = tm[2] ? parseInt(tm[2], 10) : 0;
-  const suffix = tm[3].toLowerCase().replace(/[\s.]/g, '');
-  if (suffix === 'pm' && hour < 12) hour += 12;
-  if (suffix === 'am' && hour === 12) hour = 0;
-  if (hour > 23 || minute > 59) return iso;
+  const time = parseTimeOfDay(after.slice(0, 40));
+  if (!time) return iso; // date-only: parseDateString defaults to 14:00 PKT
+  const { hour, minute } = time;
   const day = new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10); // PKT calendar day
   const withTime = new Date(`${day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+05:00`);
   return isNaN(withTime.getTime()) ? iso : withTime.toISOString();
@@ -234,14 +258,40 @@ export function findScopeText(text: string, maxChars: number = 1500): string {
   return clean.slice(start, start + maxChars);
 }
 
-function detectCorrigendum(text: string): boolean {
-  return /\b(corrigendum|addendum|amendment|errat(?:um|a)|extension\s+(?:in|of)\s+(?:the\s+)?(?:closing|due|last)\s+date)\b/i.test(
-    text.slice(0, 800)
-  );
+/**
+ * The document's heading: its first lines up to ~300 characters, stopping at a table of contents
+ * and skipping table-of-contents style lines ("8. Amendment of Bidding Documents ..... 12").
+ */
+export function documentHeading(text: string, maxChars: number = 300): string {
+  const lines = text.split(/\r?\n/).map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const head: string[] = [];
+  for (const line of lines) {
+    if (/\btable\s+of\s+contents\b|^contents$/i.test(line)) break;
+    if (/(?:\.{3,}|…)\s*\d{1,3}$/.test(line) || /^\d{1,2}(?:\.\d+)*\.?\s+\S.*\s\d{1,3}$/.test(line)) continue;
+    head.push(line);
+    if (head.join(' ').length >= maxChars) break;
+  }
+  return head.join(' ').slice(0, maxChars);
 }
 
-function detectCancellation(text: string): boolean {
-  return /\b(?:tender|bid|procurement|notice|nit|rfp|process)\b[^.\n]{0,80}\b(?:is|has\s+been|stands|are|have\s+been)\s+(?:hereby\s+)?(?:cancel+ed|withdrawn|scrapped|annulled)\b/i.test(text);
+const CORRIGENDUM_HEADING = /\b(corrigend(?:um|a)|addend(?:um|a)|amendment\s*(?:no\.?|#|-?\s*\d)|errat(?:um|a)|(?:extension|change)\s+(?:in|of)\s+(?:the\s+)?(?:closing|due|last|submission|opening)\s+date|date\s+extension)\b/i;
+
+/**
+ * A corrigendum is recognised from the document's heading only. Searching the first 800
+ * characters matched every standard bidding document whose contents list "Amendment of Bidding
+ * Documents" (docs/16 A9).
+ */
+export function detectCorrigendum(text: string): boolean {
+  return CORRIGENDUM_HEADING.test(documentHeading(text));
+}
+
+/**
+ * A cancellation must name the tender itself ("the above tender is hereby cancelled") or be
+ * announced in the heading. Clauses such as "if the bid is withdrawn" are not cancellations.
+ */
+export function detectCancellation(text: string): boolean {
+  if (/\bcancel+(?:ation|ed)\b|\bwithdrawal\s+of\s+(?:tender|nit|rfp|advertisement)\b/i.test(documentHeading(text, 200))) return true;
+  return /\b(?:this|the\s+above|above|subject|captioned|said|aforementioned|referred|aforesaid)\s+(?:mentioned\s+|cited\s+)?(?:tender|bid(?:ding)?(?:\s+process)?|procurement(?:\s+process)?|nit|rfp|rfq|eoi|notice|advertisement)[^.\n]{0,60}?\b(?:is|has\s+been|stands|have\s+been|are)\s+(?:hereby\s+)?(?:cancel+ed|withdrawn|scrapped|annulled)\b/i.test(text);
 }
 
 function sameInstant(a: string, b: string, toleranceMs: number = 60 * 60 * 1000): boolean {
@@ -301,7 +351,8 @@ export async function extractFromDocument(
     if (!visual) return result;
     // extractTenderFromImage itself returns null when no Gemini key is configured, so only the
     // Vision budget is checked here.
-    const canCall = opts.allowVisionCall ? opts.allowVisionCall() : true;
+    // Callers without their own budget (on-demand Fetch/Analyze) spend the daily Vision budget.
+    const canCall = opts.allowVisionCall ? opts.allowVisionCall() : tryConsumeDailyVision();
     if (!canCall) return { ...result, needsVision: true };
 
     let ocr: OcrExtractedData | null = null;
@@ -334,7 +385,8 @@ export async function extractFromDocument(
   // ---- Stage 1: local text ----
   const text = docText.text;
   const anchored = findSubmissionDeadlines(text);
-  const docType: DocType = detectCorrigendum(text) ? 'corrigendum' : labelType;
+  const headingCancels = /\bcancel+(?:ation|ed)\b/i.test(documentHeading(text, 200));
+  const docType: DocType = detectCorrigendum(text) || headingCancels ? 'corrigendum' : labelType;
   const scopeText = findScopeText(text);
 
   let closing: string | null = anchored.length ? anchored[anchored.length - 1] : null; // latest wins
@@ -345,7 +397,9 @@ export async function extractFromDocument(
   let summaryScope = scopeText.slice(0, 400);
 
   // Optional Gemini text cross-check, only when the local reading is ambiguous or empty.
-  if (confidence !== 'high' && opts.allowAiCrossCheck !== false && getGeminiApiKey()) {
+  // Every Gemini text call counts against the daily AI budget (docs/16 C3).
+  const allowAiCall = opts.allowAiTextCall ?? tryConsumeDailyAiText;
+  if (confidence !== 'high' && opts.allowAiCrossCheck !== false && getGeminiApiKey() && allowAiCall()) {
     try {
       const digest = `${findScopeText(text, 2500)}\n\n${text.slice(0, 3500)}`.slice(0, 6000);
       const ai = await summarizeTenderTextWithAI({

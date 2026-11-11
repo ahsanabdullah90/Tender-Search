@@ -1,12 +1,10 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
-import fs from 'fs';
 import { fileURLToPath } from 'url';
 import {
   initDatabase,
   reScoreTendersAgainstTracks,
-  DOSSIERS_DIR,
   db
 } from './src/server/db.js';
 import { initStartupScheduler, stopStartupScheduler } from './src/server/scheduler.js';
@@ -25,26 +23,6 @@ export function createApp(): express.Express {
 
   // Mount modular API domain routers
   app.use('/api', apiRouter);
-
-  app.get('/api/dossiers/:tenderId/:filename', (req, res) => {
-    const { tenderId, filename } = req.params;
-    const resolvedRoot = path.resolve(DOSSIERS_DIR);
-    const filePath = path.resolve(DOSSIERS_DIR, tenderId, filename);
-
-    if (!filePath.startsWith(resolvedRoot + path.sep)) {
-      return res.status(400).send('Invalid dossier path');
-    }
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).send('Dossier file not found on disk');
-    }
-
-    if (req.query?.download === '1' || req.query?.download === 'true') {
-      return res.download(filePath, filename);
-    }
-
-    res.sendFile(filePath);
-  });
 
   return app;
 }

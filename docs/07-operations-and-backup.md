@@ -16,10 +16,10 @@ The production operational environment contains Ahsan Abdullah's private bids, h
 ## Automated & Manual Database Backups
 
 ### Backup Creation
-- **Automated**: The scheduler creates daily rolling backups (`tender_tracker_YYYYMMDD.db`) and automatically prunes backups older than 14 days.
+- **Automated**: The scheduler creates daily rolling backups (`tender_tracker_YYYYMMDD.db`) and automatically prunes backups older than 15 days.
 - **Manual**: Triggered on-demand via **Sources & Keywords > Data > Back up now** (`POST /api/backups`), creating snapshots named `tender_tracker_<timestamp>_manual.db`.
 - **Location**: Backups reside safely in `./data/backups/`.
-- **Mechanism**: Utilizes SQLite's atomic `VACUUM INTO` command, producing a zero-downtime, fully consistent point-in-time copy.
+- **Mechanism**: Uses the SQLite online backup API through `better-sqlite3` (`db.backup()` in `src/server/db/repositories/systemRepo.ts`). It copies the database while the app keeps running and produces a consistent copy.
 
 ### Manual Backup Restoration
 To restore from a backup:
@@ -45,10 +45,15 @@ To restore from a backup:
 
 Bidding dossiers (PDFs, Word documents, scanned notices) are cached in `data/dossiers/<tenderId>/`.
 
-### Storage Pruning
-Over months of operation, passed tenders can accumulate hundreds of megabytes of cached files.
-- The **Data** tab (`/api/storage`) displays total disk footprint and the storage used by passed bids.
-- Clicking **"Delete files for passed tenders"** (`POST /api/dossiers/prune-passed`) deletes physical files from `data/dossiers/` for tenders marked `Passed`. The metadata records in the SQLite database are retained so notes and historical pricing intelligence remain accessible.
+### Storage Pruning, Automated Retention & Dossier Reconciliation
+Over months of operation, passed and expired tenders can accumulate cached files.
+- **Automated Retention Cycle (`src/server/retention.ts`)**: Runs every 5 minutes in the background (when enabled in **Sources & Keywords > Data**):
+  1. **Passed Tender Slimming**: Purges cached dossier files from disk 2 minutes after a tender is marked `Passed`, while retaining the SQLite record for 10 days post-closing so Undo and historical notes keep working.
+  2. **Expired Unreviewed Cleanup**: Auto-expires unreviewed, unbookmarked, unflagged `New Opportunity` rows after the configurable grace period (default 2 days past closing) and records them in `deleted_tenders`.
+  3. **Aged-Out Undated Cleanup**: Retires undated, unreviewed notices 90 days after `COALESCE(publish_date, created_at)`.
+  4. **Pending File Purges & Counter Cleanup**: Retries locked Windows file deletions (`pending_file_purges`) and prunes `ingest_vision_calls_YYYY-MM-DD` counters older than 7 days.
+- **On-Demand Dossier Reconciliation (`POST /api/system/dossiers/reconcile`)**: Audits `data/dossiers/` against `cached_dossiers` in SQLite, removing orphan folders older than 60 minutes and pruning missing file references.
+- **Document Ingest & Vision Budgets (`Sources & Keywords > Data`)**: Allows the operator to view daily Gemini Vision usage and adjust `upfrontTimeBudgetSec` (default 300s), `maxFileMb` (default 25 MB), `visionCallsPerScan` (default 20), and `visionCallsPerDay` (default 100).
 
 ---
 

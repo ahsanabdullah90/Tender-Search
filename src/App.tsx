@@ -500,6 +500,7 @@ export default function App() {
         <InboxScreen
           tenders={tenders}
           tracks={tracks}
+          portals={portals}
           corrigenda={corrigenda}
           selectedTrack={selectedTrack}
           onSelectTrack={setSelectedTrack}

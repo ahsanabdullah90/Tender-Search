@@ -33,6 +33,7 @@ export interface Tender {
   id: string;
   canonical_id: string;
   reference_no: string | null;
+  reference_norm?: string | null;
   title: string;
   organization: string;
   portal_id: string;
@@ -61,12 +62,15 @@ export interface Tender {
   created_at: string;
   updated_at: string;
   // Ingestion provenance (docs/13-ingestion-pipeline-plan.md, Phase 1)
-  ingestion_status?: 'staging' | 'ready' | 'failed_verification';
+  ingestion_status?: 'staging' | 'ready' | 'failed_verification' | 'awaiting_scope';
+  /** 'listing' (stated by the portal) or 'upload_folder' (inferred upper bound, never used for ageing). */
+  publish_date_source?: 'listing' | 'upload_folder' | null;
   deadline_source?: 'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual' | null;
   deadline_confidence?: 'high' | 'medium' | 'low' | null;
   doc_fetch_status?: 'none' | 'pending' | 'partial' | 'complete' | 'failed';
   needs_review?: number;
   review_reason?: string | null;
+  attachment_urls?: string[];
 }
 
 export interface CorrigendumLog {
@@ -115,6 +119,8 @@ export interface PortalHealth {
   last_error_message: string | null;
   access_mode?: 'public' | 'login_required' | 'cloudflare' | 'offline_broken' | string;
   verified_status?: string;
+  last_success_at?: string | null;
+  pages_scanned?: number;
 }
 
 export interface ScanStatus {
@@ -126,10 +132,13 @@ export interface ScanStatus {
   newTendersFound: number;
   corrigendaFound: number;
   lastScanTimestamp: string | null;
+  lastFullScanTimestamp?: string | null;
   /** Documents moved to the background queue because the scan's time budget was spent. */
   documentsDeferred?: number;
   /** Scanned documents waiting for Gemini Vision because the scan's Vision budget was spent. */
   visionDeferred?: number;
+  /** Tenders held without immediate track match, pending document download/analysis (docs/15 F2). */
+  heldForScope?: number;
 }
 
 

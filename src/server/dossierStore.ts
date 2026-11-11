@@ -1,7 +1,17 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { db, DOSSIERS_DIR } from './db/connection.js';
+import { DOSSIERS_DIR } from './db/connection.js';
+import {
+  enqueuePendingFilePurge,
+  getPendingFilePurges,
+  deletePendingFilePurge,
+  incrementPendingFilePurgeAttempt
+} from './db/repositories/systemRepo.js';
+import {
+  getAllTenderDossierRows,
+  setTenderCachedDossiersRaw
+} from './db/repositories/tendersRepo.js';
 import { CachedDossier } from '../types.js';
 
 export const TRASH_DIR = path.resolve(DOSSIERS_DIR, '.trash');
@@ -236,20 +246,12 @@ export function purgeTenderFiles(tenderIds: string[]): { purged: string[]; queue
         purged.push(id);
       } catch (rmErr: any) {
         // Locked file in trash, enqueue for background purge
-        db.prepare(`
-          INSERT INTO pending_file_purges (id, folder_path, attempts, last_error)
-          VALUES (?, ?, 1, ?)
-          ON CONFLICT(id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error
-        `).run(`purge-${id}-${Date.now()}`, trashTarget, rmErr.message);
+        enqueuePendingFilePurge(`purge-${id}-${Date.now()}`, trashTarget, rmErr.message);
         queued.push(id);
       }
     } catch (renameErr: any) {
       // Failed to rename (e.g. process holding active handle)
-      db.prepare(`
-        INSERT INTO pending_file_purges (id, folder_path, attempts, last_error)
-        VALUES (?, ?, 1, ?)
-        ON CONFLICT(id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error
-      `).run(`purge-${id}-${Date.now()}`, dir, renameErr.message);
+      enqueuePendingFilePurge(`purge-${id}-${Date.now()}`, dir, renameErr.message);
       queued.push(id);
     }
   }
@@ -263,18 +265,18 @@ export function purgeTenderFiles(tenderIds: string[]): { purged: string[]; queue
 export function retryPendingFilePurges(): number {
   let cleared = 0;
   try {
-    const pending = db.prepare('SELECT id, folder_path, attempts FROM pending_file_purges WHERE attempts < 10').all() as any[];
+    const pending = getPendingFilePurges(10);
     for (const item of pending) {
       if (fs.existsSync(item.folder_path)) {
         try {
           fs.rmSync(item.folder_path, { recursive: true, force: true });
-          db.prepare('DELETE FROM pending_file_purges WHERE id = ?').run(item.id);
+          deletePendingFilePurge(item.id);
           cleared++;
         } catch (e: any) {
-          db.prepare('UPDATE pending_file_purges SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(e.message, item.id);
+          incrementPendingFilePurgeAttempt(item.id, e.message);
         }
       } else {
-        db.prepare('DELETE FROM pending_file_purges WHERE id = ?').run(item.id);
+        deletePendingFilePurge(item.id);
         cleared++;
       }
     }
@@ -307,7 +309,7 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
   if (!fs.existsSync(DOSSIERS_DIR)) return result;
 
   // 1. Find all active and passed tender IDs in SQLite
-  const existingRows = db.prepare('SELECT id, cached_dossiers FROM tenders').all() as { id: string; cached_dossiers: string }[];
+  const existingRows = getAllTenderDossierRows();
   const existingIdSet = new Set(existingRows.map(r => r.id));
 
   // 2. Scan dossiers folder on disk for orphan folders
@@ -357,7 +359,7 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
 
         if (validDossiers.length !== dossiers.length) {
           result.missingFilesRemovedFromTenders += (dossiers.length - validDossiers.length);
-          db.prepare('UPDATE tenders SET cached_dossiers = ? WHERE id = ?').run(JSON.stringify(validDossiers), row.id);
+          setTenderCachedDossiersRaw(row.id, JSON.stringify(validDossiers));
         }
       } catch {}
     }

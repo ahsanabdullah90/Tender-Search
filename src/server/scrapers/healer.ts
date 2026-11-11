@@ -161,7 +161,7 @@ export function isValidHealedTendersUrl(candidateUrl: string, portal: PortalDefi
     }
 
     // Block login, auth, or non-procurement pages
-    if (/\/(login|signin|sign-in|auth|register|about|contact|career|jobs?|faq|gallery|press|rules|regulations)(\/|$|\.)/i.test(pathname)) {
+    if (/\/(login|signin|sign-in|auth|register|about|contact|careers?|jobs?|faq|gallery|press|rules|regulations)(\/|$|\.)/i.test(pathname)) {
       return false;
     }
 

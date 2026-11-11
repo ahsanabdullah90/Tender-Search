@@ -718,7 +718,8 @@ describe('Server API Routes', () => {
       insertTestTender('t-undated-fresh', { closing_date: null, reference_no: 'U-1' });
       insertTestTender('t-undated-stale', { closing_date: null, reference_no: 'U-2' });
       db.prepare(`UPDATE tenders SET publish_date = NULL WHERE id IN ('t-undated-fresh', 't-undated-stale')`).run();
-      db.prepare(`UPDATE tenders SET created_at = datetime('now', '-75 days') WHERE id = 't-undated-stale'`).run();
+      // One ageing limit (90 days) for ingest, retention and the Inbox (docs/16 A2).
+      db.prepare(`UPDATE tenders SET created_at = datetime('now', '-100 days') WHERE id = 't-undated-stale'`).run();
 
       const res = await request(app).get('/api/tenders?status=New Opportunity&excludeExpired=true');
       const ids = res.body.map((t: any) => t.id);

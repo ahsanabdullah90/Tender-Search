@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Archive, ExternalLink, TriangleAlert } from 'lucide-react';
 import { Tender, CorrigendumLog, OpportunityStatus } from '../types';
 import { Button, Chip, DeadlineChip, EmptyState, Panel, SlideOver, Tabs } from '../ui';
-import { Detail, useTick } from './InboxScreen';
+import { Detail, deadlineProvenance, useTick } from './InboxScreen';
 import { PassConfirmModal } from './pipeline/PassConfirmModal';
 
 type View = 'board' | 'gantt';
@@ -41,6 +41,7 @@ function Card({ tender, onOpen }: { tender: Tender; onOpen: () => void }) {
   const share = elapsedShare(tender);
   const urgent = tender.closing_date ? new Date(tender.closing_date).getTime() - Date.now() < DAY : false;
   const open = tender.pipeline_status === 'Under Review' || tender.pipeline_status === 'Preparing Bid';
+  const provenance = deadlineProvenance(tender);
   return (
     <button onClick={onOpen} className="block w-full cursor-pointer rounded-lg border border-line bg-surface p-3 text-left hover:border-accent">
       <div className="line-clamp-2 text-sm font-semibold leading-snug">{tender.title}</div>
@@ -50,8 +51,16 @@ function Card({ tender, onOpen }: { tender: Tender; onOpen: () => void }) {
           <div className={`h-full rounded-full ${urgent ? 'bg-danger' : 'bg-accent'}`} style={{ width: `${Math.round(share * 100)}%` }} />
         </div>
       )}
-      <div className="mt-2 flex items-center justify-between gap-2">
-        {tender.pipeline_status === 'Won' ? <Chip tone="ok">Won</Chip> : <DeadlineChip closingDate={tender.closing_date} />}
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {tender.pipeline_status === 'Won' ? <Chip tone="ok">Won</Chip> : <DeadlineChip closingDate={tender.closing_date} />}
+          {Boolean(tender.needs_review) && <Chip tone="danger">Review</Chip>}
+          {provenance.tone !== 'neutral' && (
+            <span title={provenance.title}>
+              <Chip tone={provenance.tone}>{provenance.label}</Chip>
+            </span>
+          )}
+        </div>
         {Boolean(tender.has_corrigendum) && <TriangleAlert className="h-4 w-4 text-warn" aria-label="Amended" />}
       </div>
     </button>
@@ -64,7 +73,12 @@ function Board({ tenders, onOpen }: { tenders: Tender[]; onOpen: (t: Tender) => 
       {STAGES.map(stage => {
         const list = tenders
           .filter(t => t.pipeline_status === stage.status)
-          .sort((a, b) => (a.closing_date ? new Date(a.closing_date).getTime() : Infinity) - (b.closing_date ? new Date(b.closing_date).getTime() : Infinity));
+          .sort((a, b) => {
+            if (Boolean(a.needs_review) !== Boolean(b.needs_review)) {
+              return a.needs_review ? -1 : 1;
+            }
+            return (a.closing_date ? new Date(a.closing_date).getTime() : Infinity) - (b.closing_date ? new Date(b.closing_date).getTime() : Infinity);
+          });
         return (
           <div key={stage.status} className="flex flex-col gap-3 rounded-xl bg-surface-2 p-3">
             <div className="flex items-center gap-2 px-1">
@@ -288,6 +302,7 @@ export function PipelineScreen(props: PipelineScreenProps) {
               tender={open}
               corrigenda={corrigenda}
               stageActions={stageButtons}
+              onPass={() => setPassTarget(open)}
               onSetResultDate={date => props.onSetResultDate(open.id, date)}
               onAcknowledgeCorrigendum={props.onAcknowledgeCorrigendum}
               onSaveNotes={props.onSaveNotes}

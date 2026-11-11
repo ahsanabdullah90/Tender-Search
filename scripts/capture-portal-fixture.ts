@@ -35,6 +35,9 @@ function shrinkKeepingListings(html: string, keepUrls: string[]): string {
     return keep.some(k => h.includes(k) || h.includes(k.replace(/&/g, '&amp;')));
   };
   $('header, footer, nav, aside, form').each((_, el) => { if (!containsKeep(el)) $(el).remove(); });
+  $('.inner-advertisement-listing-box, .dropdown-content a, tr, li, section, .elementor-section').each((_, el) => {
+    if (!containsKeep(el)) $(el).remove();
+  });
 
   for (let guard = 0; guard < 400 && Buffer.byteLength($.html()) > MAX_BYTES; guard++) {
     let biggest: any = null;
@@ -49,7 +52,19 @@ function shrinkKeepingListings(html: string, keepUrls: string[]): string {
     if (!biggest || biggestSize < 200) break;
     $(biggest).remove();
   }
-  return $.html();
+  let out = $.html().replace(/\s{2,}/g, ' ');
+  if (Buffer.byteLength(out) > MAX_BYTES) {
+    $('*').each((_, el) => {
+      const cls = $(el).attr('class') || '';
+      const keepClasses = cls
+        .split(/\s+/)
+        .filter(c => /inner-advertisement-listing-box|listingadver-title1|dropdown-content|tender|package|card|wpdm/i.test(c));
+      if (keepClasses.length > 0) $(el).attr('class', keepClasses.join(' '));
+      else $(el).removeAttr('class');
+    });
+    out = $.html().replace(/\s{2,}/g, ' ');
+  }
+  return out;
 }
 
 export function sanitizeHtml(html: string, baseUrl: string, keepUrls: string[] = []): string {
@@ -80,7 +95,7 @@ export function sanitizeHtml(html: string, baseUrl: string, keepUrls: string[] =
     .replace(/\b\d{5}-\d{7}-\d\b/g, '00000-0000000-0')
     .replace(/(?:\+92[\s-]?|\b0)\d{2,4}[\s-]?\d{6,8}\b/g, '000-0000000')
     .replace(/\(\s*0\d{2,4}\s*\)\s*\d{6,8}/g, '(000) 0000000')
-    .replace(/\b(Mr|Mrs|Ms|Miss|Engr|Dr|Syed|Sardar|Malik|Ch)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}/g, '$1. [name]')
+    .replace(/\b(Mr|Mrs|Ms|Miss|Engr|Dr|Syed|Sardar|Malik|Ch|President|Prime\s+Minister|Federal\s+Minister(?:\s+for\s+[A-Za-z]+)?|Minister(?:\s+for\s+[A-Za-z]+|\s+of\s+State)?|Chairman|Director(?:\s+General)?|Secretary|Ambassador|Datuk\s+Seri)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,4}/g, '$1 [name]')
     .replace(/([?&](?:sid|session|sessionid|token|auth|key|jsessionid|phpsessid|ticket)=)[^&"'\s]+/gi, '$1REDACTED')
     .replace(/(__VIEWSTATE|__EVENTVALIDATION|__VIEWSTATEGENERATOR)[^>]*>/g, '');
 

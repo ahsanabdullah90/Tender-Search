@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { matchTracks } from '../../src/server/scrapers/crawlerEngine.js';
+import { matchTracks, containsKeyword } from '../../src/server/scrapers/crawlerEngine.js';
 import type { RawScrapedItem } from '../../src/server/scrapers/crawlerEngine.js';
 
 describe('matchTracks', () => {
@@ -214,5 +214,31 @@ describe('matchTracks', () => {
     const result = matchTracks(unrelatedItem, tracks);
     expect(result.matchedTracks).toEqual([]);
     expect(result.matchScore).toBe(0);
+  });
+
+  describe('F7 Whole-Word Keyword Matching (containsKeyword)', () => {
+    it('distinguishes sub-words like car vs care and it vs audit', () => {
+      expect(containsKeyword('Routine health care services', 'car')).toBe(false);
+      expect(containsKeyword('Official car rental services', 'car')).toBe(true);
+
+      expect(containsKeyword('Financial and technical audit of accounts', 'it')).toBe(false);
+      expect(containsKeyword('Procurement of IT equipment and services', 'it')).toBe(true);
+    });
+
+    it('matches singular and plural forms (s and es)', () => {
+      expect(containsKeyword('Supply and installation of solar panels', 'panel')).toBe(true);
+      expect(containsKeyword('Supply and installation of solar panel', 'panels')).toBe(false);
+      expect(containsKeyword('Enterprise network switches for data centers', 'switch')).toBe(true);
+    });
+
+    it('handles multi-word phrases and whitespace variations', () => {
+      expect(containsKeyword('Contract for civil   works in Swat district', 'civil works')).toBe(true);
+      expect(containsKeyword('Civil engineer for road works', 'civil works')).toBe(false);
+    });
+
+    it('recognizes punctuation and hyphen word boundaries', () => {
+      expect(containsKeyword('Solar-powered lighting units', 'solar')).toBe(true);
+      expect(containsKeyword('High-end laptops/desktops', 'laptop')).toBe(true);
+    });
   });
 });

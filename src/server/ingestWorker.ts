@@ -5,22 +5,22 @@ import {
   deferJob,
   releaseExpiredLeases,
   refreshTenderDocFetchStatus,
+  getJobSummaryForTender,
   IngestJob
 } from './db/repositories/ingestJobsRepo.js';
 import {
   getTenderById,
   updateTenderFields,
   deleteTenders,
-  setTenderProvenance,
-  updateTenderTracks,
-  recordDeadlineExtension
+  setTenderTracksAndRelease
 } from './db/repositories/tendersRepo.js';
 import { getAllDomainTracks } from './db/repositories/tracksRepo.js';
 import { deriveDossierLabel } from './dossierManager.js';
 import { extractFromDocument, DocumentExtractionResult } from './documentExtractor.js';
 import { maxFileBytes, tryConsumeDailyVision } from './ingestBudget.js';
-import { resolveCanonicalDeadline, formatClosingDate, DeadlineSourceKind, DeadlineConfidence } from './scrapers/dateParser.js';
-import { crawlerDeps, currentScanStatus, readCachedDossier, applyDocumentScopeToTracks } from './scrapers/crawlerEngine.js';
+import { crawlerDeps, currentScanStatus, readCachedDossier } from './scrapers/crawlerEngine.js';
+import { applyDocumentScopeToTracks, matchTracks } from './scrapers/trackMatcher.js';
+import { applyDocumentResultToTender } from './documentApply.js';
 import { Tender } from '../types.js';
 
 /**
@@ -126,6 +126,17 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
       return 'deferred';
     }
 
+    // A tender held because its listing matched no track (docs/15 F2): decide from the document.
+    if (current.ingestion_status === 'awaiting_scope') {
+      const decision = decideAwaitingScope(current, result, job.id);
+      if (decision === 'removed') return 'completed';
+      if (decision === 'waiting') {
+        completeJob(job.id);
+        refreshTenderDocFetchStatus(current.id);
+        return 'completed';
+      }
+    }
+
     const applied = applyDocumentResultToTender(getTenderById(current.id) || current, result);
     if (applied === 'expired') return 'expired'; // tender (and its jobs) deleted
 
@@ -140,87 +151,36 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
 }
 
 /**
- * Applies one document's extraction to an existing tender. Returns 'expired' if the tender was
- * auto-expired (deleted), otherwise 'updated'.
+ * Decides a tender held as 'awaiting_scope' (its listing matched no track) from one document:
+ *  - 'released': the document text matches a track; the tender becomes visible ('ready') and the
+ *    rest of the result is applied as for any tender;
+ *  - 'waiting': no match in this document, but other documents of the tender are still queued;
+ *  - 'removed': no match and no documents left; the row is deleted and suppressed so the next
+ *    scan does not download it again.
  */
-export function applyDocumentResultToTender(tender: Tender, result: DocumentExtractionResult): 'expired' | 'updated' {
-  const resolved = resolveCanonicalDeadline(
-    {
-      date: tender.closing_date,
-      source: (tender.deadline_source as DeadlineSourceKind) || 'html_row',
-      confidence: (tender.deadline_confidence as DeadlineConfidence) || null
-    },
-    [{
-      date: result.closingDateISO,
-      source: result.docType === 'corrigendum' ? 'corrigendum_doc' : 'primary_doc',
-      confidence: result.confidence,
-      canAutoExpire: result.canAutoExpire,
-      cancelled: result.isCancellation
-    }]
-  );
-
-  const autoExpirable = tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked && !tender.needs_review;
-  if (resolved.canAutoExpire && autoExpirable) {
-    console.log(`[IngestWorker] Tender ${tender.id} document deadline has passed (${resolved.closingDate}). Auto-expiring.`);
-    deleteTenders([tender.id], 'auto-expired');
-    return 'expired';
-  }
-
-  const updates: Parameters<typeof updateTenderFields>[1] = {};
-  let needsReview = resolved.needsReview;
-  let reviewReason = resolved.reviewReason;
-
-  if (resolved.closingDate && resolved.closingDate !== tender.closing_date) {
-    const formatted = result.closingDateISO === resolved.closingDate && result.closingDateFormatted && result.closingDateFormatted !== 'Not Available'
-      ? result.closingDateFormatted
-      : formatClosingDate(resolved.closingDate);
-    if (resolved.isExtension && tender.closing_date) {
-      recordDeadlineExtension(tender.id, tender.closing_date_formatted || formatClosingDate(tender.closing_date), formatted);
-    }
-    updates.closing_date = resolved.closingDate;
-    updates.closing_date_formatted = formatted;
-    if (resolved.isExpired && !resolved.canAutoExpire && !needsReview) {
-      needsReview = true;
-      reviewReason = `uncertain_past_deadline: a document suggests ${formatted}, but it could not be confirmed`;
+function decideAwaitingScope(tender: Tender, result: DocumentExtractionResult, jobId: string): 'released' | 'waiting' | 'removed' {
+  const activeTracks = getAllDomainTracks().filter(t => t.is_active === 1);
+  const scope = [result.scopeText, result.summaryScope].filter(Boolean).join(' ');
+  const listing = {
+    title: tender.title,
+    organization: tender.organization,
+    description: tender.description,
+    referenceNo: tender.reference_no || undefined,
+    directUrl: tender.direct_url
+  };
+  if (scope.trim()) {
+    const rescored = applyDocumentScopeToTracks({ matchedTracks: [], matchedKeywords: [] }, listing, scope, activeTracks);
+    if (rescored.tracks.length > 0) {
+      const { matchScore } = matchTracks({ ...listing, description: `${tender.description || ''} ${scope}` }, activeTracks);
+      setTenderTracksAndRelease(tender.id, rescored.tracks, rescored.keywords, matchScore);
+      return 'released';
     }
   }
-
-  if (result.referenceNo && !tender.reference_no) updates.reference_no = result.referenceNo;
-  if (result.estimatedValue && !tender.estimated_value) updates.estimated_value = result.estimatedValue;
-  if (result.summaryScope && (!tender.description || tender.description === tender.title)) updates.description = result.summaryScope;
-  if (Object.keys(updates).length) updateTenderFields(tender.id, updates);
-
-  // Re-score tracks with the document's scope of work (Phase 2.5) for tenders not yet triaged.
-  if (result.scopeText && tender.pipeline_status === 'New Opportunity') {
-    const activeTracks = getAllDomainTracks().filter(t => t.is_active === 1);
-    const rescored = applyDocumentScopeToTracks(
-      { matchedTracks: tender.domain_tracks || [], matchedKeywords: tender.matched_keywords || [] },
-      {
-        title: tender.title,
-        organization: tender.organization,
-        description: tender.description,
-        referenceNo: tender.reference_no || undefined,
-        directUrl: tender.direct_url
-      },
-      result.scopeText,
-      activeTracks
-    );
-    if (rescored.changed) updateTenderTracks(tender.id, rescored.tracks, rescored.keywords);
-    if (rescored.excludedBy.length && !rescored.changed && !needsReview) {
-      needsReview = true;
-      reviewReason = `excluded_terms_in_documents: ${rescored.excludedBy.join(', ')}`;
-    }
-  }
-
-  const provenance: Parameters<typeof setTenderProvenance>[1] = {};
-  if (updates.closing_date !== undefined || (!tender.deadline_source && resolved.closingDate)) {
-    provenance.deadline_source = resolved.source;
-    provenance.deadline_confidence = resolved.confidence;
-  }
-  if (needsReview && !tender.needs_review) {
-    provenance.needs_review = 1;
-    provenance.review_reason = reviewReason;
-  }
-  setTenderProvenance(tender.id, provenance);
-  return 'updated';
+  completeJob(jobId);
+  const summary = getJobSummaryForTender(tender.id);
+  if (summary.pending + summary.processing > 0) return 'waiting';
+  deleteTenders([tender.id], 'no-track-match');
+  return 'removed';
 }
+
+export { applyDocumentResultToTender };

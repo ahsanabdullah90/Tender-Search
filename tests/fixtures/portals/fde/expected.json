@@ -5,6 +5,6 @@
   "items": 12,
   "rawItems": 12,
   "hitlRequired": false,
-  "withClosingDate": 1,
+  "withClosingDate": 0,
   "withAttachments": 0
 }

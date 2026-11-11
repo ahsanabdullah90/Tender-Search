@@ -24,6 +24,51 @@ stateDiagram-v2
     Won --> [*]
 ```
 
+---
+
+## Ingestion Status Lifecycle (`ingestion_status`)
+
+Before a tender reaches the active pipeline, its intake is governed by `ingestion_status` (`src/server/db/schema.ts`):
+
+```mermaid
+stateDiagram-v2
+    [*] --> Discovery: Scraped from Portal Listing
+
+    Discovery --> Staging: Matches active track + has candidate documents
+    Discovery --> Ready: Matches active track + no documents to verify
+    Discovery --> AwaitingScope: Generic title + no track match + has candidate documents
+    Discovery --> [*]: No track match + no documents (discarded)
+
+    Staging --> Ready: Upfront verification passes (or 20s budget expires & queued)
+    Staging --> DeletedTenders: Extracted deadline in the past (Rule B6)
+
+    AwaitingScope --> Ready: Background worker reads documents & matches active track
+    AwaitingScope --> DeletedTenders: Background worker reads documents & no track matches
+    AwaitingScope --> DeletedTenders: Unresolved after 3 days (Retention sweep)
+
+    Ready --> FailedVerification: Permanent payload corruption or verification error
+    FailedVerification --> Ready: Operator manually edits/re-verifies details
+```
+
+### Ingestion Status Rules & Invariants
+1. **`staging`**:
+   - Temporary holding status during upfront document downloading and deadline verification (max 20-second budget per tender).
+   - Rows in `staging` are strictly hidden from the Inbox, Pipeline, and KPI banners.
+   - If upfront verification completes or times out, the row transitions to `ready` (with remaining documents deferred to `document_ingest_jobs`).
+   - If the server process terminates mid-fetch, the retention daemon (`retention.ts`) automatically auto-releases any `staging` row older than 60 minutes to `ready` (`RET-8`).
+2. **`awaiting_scope`**:
+   - Used for notices with generic non-informative titles (e.g., *"Tender Notice"*, *"Corrigendum"*, *"Notice Inviting Tender"*) whose listing text matches no active domain track, but which contain attached PDF/Word documents.
+   - Held invisibly while the background queue worker reads up to 2 documents via `applyDocumentScopeToTracks` (`MATCH-2`).
+   - If document text matches a track, the row transitions to `ready` and surfaces in the Inbox.
+   - If document text confirms no track match, the row is deleted with `reason = 'no-track-match'` and suppressed.
+   - Any `awaiting_scope` record unresolved after 3 days is permanently purged by retention (`MATCH-4`).
+3. **`ready`**:
+   - The canonical visible status for all verified opportunities. Only tenders with `ingestion_status = 'ready'` appear in the Inbox and Pipeline.
+4. **`failed_verification`**:
+   - Retained for rare unrecoverable document payload corruptions or operator-quarantined notices.
+5. **Re-scan Immutability**:
+   - When a crawler re-visits an already-stored tender, it takes the **Re-scan Path**. An existing tender **NEVER** transitions back to `staging` or `awaiting_scope` (`ID-2`, `ID-3`).
+
 ### Stage Definitions
 
 1. **`New Opportunity` (Inbox)**:
@@ -59,10 +104,49 @@ Plots tenders along a 5-week horizon starting from the current Monday in PKT:
 
 ---
 
-## Corrigenda Detection & Acknowledgment
+## Corrigenda Detection, Provenance Badges & Operator Review Flags
 
-When government agencies issue amendments:
-1. The crawler compares newly parsed closing dates and notice content with existing database entries.
-2. If the date extends or scope revisions appear, a new entry is written to `corrigendum_logs`, and `has_corrigendum` is set to `1` on the tender.
-3. The UI prominently displays an amber alert banner in the KPI header and on the tender card.
-4. The operator can click **"Acknowledge"** to mark the amendment as reviewed.
+When government agencies issue amendments or when documents are read during ingestion:
+1. **Deadline Provenance Badges (`deadlineProvenance` in `src/components/inbox/Detail.tsx`)**:
+   - Every tender card and detail panel in both the **Inbox** and **Pipeline** surfaces where its closing deadline came from:
+     - `Verified from corrigendum` (`corrigendum_doc`)
+     - `Verified from tender document` (`primary_doc`)
+     - `Portal listing date` (`html_row` / `html_detail`)
+     - `No deadline · Portal HTML only` (undated listing with no documents)
+     - `Fetching documents in the background…` (`doc_fetch_status = 'pending'`)
+2. **Corrigenda Extension Logging**:
+   - When a later deadline is discovered on a re-scan or in a corrigendum document, a new entry is written to `corrigendum_logs` and `has_corrigendum` is set to `1`.
+3. **Operator Review Flags (`needs_review = 1`)**:
+   - When a corrigendum or re-scan moves a deadline to an earlier calendar day (`deadline_moved_earlier`), cancels a tender (`corrigendum_cancelled`), suggests an uncertain past deadline (`uncertain_past_deadline`), or introduces excluded terms in attachments (`excluded_terms_in_documents`), the tender is flagged with `needs_review = 1`.
+   - Flagged tenders sort to the top of both the **Inbox** and their **Pipeline** stage column, display a red `Review` chip, and are protected from automatic retention expiry until the operator clicks **Confirm** (`PATCH /api/tenders/:id/review`) or **Pass** / **Pass as cancelled**.
+
+---
+
+## Ingestion Order, Deduplication & Pipeline Safety Invariants
+
+### 1. Re-scan Identity Path First (`src/server/scrapers/ingestPipeline.ts`)
+Whenever a crawler visits a portal:
+1. It calculates the deterministic `tenderId`.
+2. It checks if the tender already exists in SQLite:
+   - If it exists: It takes the **Re-scan Path**. It NEVER switches the row to `staging`, NEVER deletes the row, and NEVER overwrites pipeline statuses (`Under Review`, `Preparing Bid`, `Submitted`, `Won`, `Passed`) or operator `status_notes`.
+   - Deadline updates are evaluated exclusively by `applyRescannedDeadline` (`src/server/scrapers/ingestPipeline.ts`):
+     - Extended deadline (later PKT day) → updates `closing_date`, sets `has_corrigendum = 1`, and logs a `deadline_extension` corrigendum.
+     - Earlier deadline (earlier PKT day) → preserves current deadline, sets `needs_review = 1` with reason `deadline_moved_earlier`.
+     - Same calendar day → no deadline change.
+   - Newly discovered document links are appended to `attachment_urls` and queued for download.
+
+### 2. "Hold for Scope" (`awaiting_scope` in `src/server/scrapers/ingestPipeline.ts`)
+- Listings whose listing title/text matches no active domain track, but which contain document candidates (e.g. generic titles like *"Tender Notice"* or *"Corrigendum"* with attached PDFs), are inserted as `ingestion_status = 'awaiting_scope'` (hidden from Inbox, Pipeline, and KPIs).
+- The background worker reads up to 2 documents using `applyDocumentScopeToTracks`.
+- If the document text matches a track, the status is promoted to `'ready'` (appearing in the Inbox).
+- If no track matches, the tender is deleted with `reason = 'no-track-match'` and suppressed. Unresolved `awaiting_scope` rows older than 3 days are cleaned up by retention.
+
+### 3. Deduplication & Provenance Rules (`src/server/deduplicator.ts`)
+- **Tier 1 (Strict Reference)**: Match on `reference_norm`. Requires corroborating signals (organization similarity $\ge 0.5$, title similarity $\ge 0.5$, or closing dates within 1.5 days) unless the reference is long and structured ($\ge 12$ chars with $\ge 2$ segments).
+- **Tier 2 (Title Dice Similarity)**: Evaluated only against different portals (own portal is strictly excluded from duplicate candidate search). The `titlesAreDistinguishable` check prevents merging distinct procurement packages that differ by 1–2 key nouns (e.g., "Laptops" vs "Printers").
+- **Secondary Sources**: The tender's own originating portal is never recorded under `secondary_sources`. Secondary source entries are unique by `direct_url`.
+
+### 4. Slimming, Suppression & Ageing Invariants (`src/server/retention.ts`)
+- **Slimming Passed Tenders**: Dossiers are purged from disk 2 minutes after a tender enters `Passed`. Tenders passed directly from Inbox have descriptions cleared while retaining `status_notes`. Tenders that have ever been in the Pipeline (`pipeline_audit_logs`) preserve their description, full history, and corrigenda permanently.
+- **Suppression Expiry**: Undated suppressions expire after 120 days. Auto-expired suppressions are automatically lifted if a subsequent scan finds a new future closing date. User suppressions (`reason = 'user'`) are permanent.
+- **Undated Ageing Limit**: Standardized to **90 days** (`UNDATED_MAX_AGE_DAYS = 90`) across ingest, retention, and Inbox UI. Publication dates inferred from upload folder paths (`publish_date_source = 'upload_folder'`) are never used for ageing; discovery timestamp `created_at` is used instead.

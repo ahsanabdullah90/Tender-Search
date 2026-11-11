@@ -69,6 +69,12 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, themePref
       ? `Synced ${lastSync}`
       : 'Not synced yet';
 
+  const fullScanTime = scanStatus.lastFullScanTimestamp || scanStatus.lastScanTimestamp;
+  const fullScanAgeHours = fullScanTime
+    ? (Date.now() - new Date(fullScanTime).getTime()) / (1000 * 60 * 60)
+    : null;
+  const isFullScanStale = fullScanAgeHours !== null && fullScanAgeHours >= 24;
+
   return (
     <div className="flex min-h-screen bg-bg text-ink">
       <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-6 border-r border-line bg-surface p-4">
@@ -98,14 +104,22 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, themePref
 
         <div className="mt-auto flex flex-col gap-3">
           <div className="flex items-center gap-2 px-2 text-xs text-ink-muted">
-            <span className={`h-2 w-2 shrink-0 rounded-full ${scanning ? 'animate-pulse bg-warn' : 'bg-ok'}`} />
+            <span className={`h-2 w-2 shrink-0 rounded-full ${scanning ? 'animate-pulse bg-warn' : isFullScanStale ? 'bg-danger' : 'bg-ok'}`} />
             <span>{syncText}</span>
           </div>
-          {((scanStatus.documentsDeferred ?? 0) > 0 || (scanStatus.visionDeferred ?? 0) > 0) && (
+          {fullScanAgeHours !== null && (
+            <div className={`px-2 text-[11px] leading-snug ${isFullScanStale ? 'font-semibold text-danger' : 'text-ink-muted'}`} data-testid="last-full-scan-indicator">
+              {isFullScanStale
+                ? `⚠️ Last full scan: ${Math.round(fullScanAgeHours)}h ago`
+                : `Last full scan: ${fullScanAgeHours < 1 ? 'just now' : `${Math.round(fullScanAgeHours)}h ago`}`}
+            </div>
+          )}
+          {((scanStatus.documentsDeferred ?? 0) > 0 || (scanStatus.visionDeferred ?? 0) > 0 || (scanStatus.heldForScope ?? 0) > 0) && (
             <div className="px-2 text-[11px] leading-snug text-ink-muted" data-testid="scan-deferred">
               {[
                 (scanStatus.documentsDeferred ?? 0) > 0 && `${scanStatus.documentsDeferred} document(s) moved to background`,
-                (scanStatus.visionDeferred ?? 0) > 0 && `${scanStatus.visionDeferred} scanned notice(s) waiting for Vision`
+                (scanStatus.visionDeferred ?? 0) > 0 && `${scanStatus.visionDeferred} scanned notice(s) waiting for Vision`,
+                (scanStatus.heldForScope ?? 0) > 0 && `${scanStatus.heldForScope} listing(s) held for document scope`
               ].filter(Boolean).join(' · ')}
             </div>
           )}

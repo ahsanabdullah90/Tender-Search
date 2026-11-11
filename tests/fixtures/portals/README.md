@@ -16,7 +16,7 @@ Sanitizing removes scripts, styles, hidden form state, emails, phone numbers, CN
 | `mofept` | 2026-11-10 | 16 | 16 | 16 | |
 | `pseb` | 2026-11-10 | 10 | 0 | 10 | Direct-PDF listings: deadlines come from the documents |
 | `ignite` | 2026-11-10 | 18 | 18 | 18 | |
-| `psdf` | 2026-11-10 | 19 (of 41) | 0 | 19 | 109 KB: listings spread across the page |
+| `psdf` | 2026-11-10 | 19 (of 41) | 0 | 19 | 15 KB: trimmed to active listings |
 | `peef` | 2026-11-10 | 25 | 25 | 25 | |
 | `psda` | 2026-11-10 | 0 | – | – | **Parser gap:** live page yields no tenders over HTTP |
 | `giz` | 2026-11-10 | 0 | – | – | **Parser gap:** live page yields no tenders over HTTP |

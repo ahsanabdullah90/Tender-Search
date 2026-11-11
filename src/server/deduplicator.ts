@@ -1,4 +1,4 @@
-import { db } from './db.js';
+import { findTendersByReferenceNorm, findDedupCandidates } from './db.js';
 import { computeTextSemanticSimilarity } from './embeddingService.js';
 
 /**
@@ -50,33 +50,60 @@ export interface DuplicateMatchResult {
   canonicalId?: string;
   matchedTenderId?: string;
   similarity: number;
+  /** How the match was made; only a 'reference' match may change the stored deadline (docs/16 A4). */
+  tier?: 'reference' | 'lexical' | 'semantic';
+}
+
+export { isValidReferenceNo, normalizeReferenceNo } from './referenceNo.js';
+import { normalizeReferenceNo } from './referenceNo.js';
+
+/** Words that never tell two tenders apart. */
+const TITLE_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'the', 'of', 'for', 'to', 'in', 'on', 'at', 'by', 'with', 'from', 'or', 'its', 'is',
+  'tender', 'tenders', 'notice', 'nit', 'rfp', 'rfq', 'eoi', 'ifb', 'request', 'proposal', 'proposals',
+  'invitation', 'bid', 'bids', 'bidding', 'procurement', 'supply', 'provision', 'hiring', 'purchase',
+  'services', 'service', 'firm', 'firms', 'document', 'documents', 'advertisement', 'quotation', 'quotations',
+  'corrigendum', 'addendum', 'extension', 'reg', 'regarding', 'govt', 'government', 'pakistan', 'pvt', 'ltd'
+]);
+
+function contentTokens(title: string): Set<string> {
+  return new Set(normalizeText(title).split(' ').filter(t => t && !TITLE_STOP_WORDS.has(t)));
 }
 
 /**
- * Validates whether a string has the structural characteristics of a genuine
- * procurement reference number (contains at least one digit and not generic dictionary words).
+ * True when two titles follow the same wording but each swaps in its own one or two content words
+ * ("Supply of Laptops" / "Supply of Printers", "... Lahore Office" / "... Multan Office"): such
+ * titles are different tenders however similar they score, lexically (0.86-0.93) or with the fast
+ * vectors (0.93). A title whose words are all contained in the other ("Supply of Laptops" vs
+ * "Supply of Laptops for PSDF") is not distinguished, nor is a full rewording, where each title has
+ * three or more words of its own and only the semantic tier can judge (docs/16 A3).
  */
-export function isValidReferenceNo(ref?: string | null): boolean {
-  if (!ref) return false;
-  const trimmed = ref.trim();
-  if (trimmed.length < 4 || trimmed.length > 40) return false;
+export function titlesAreDistinguishable(a: string, b: string): boolean {
+  const ta = contentTokens(a);
+  const tb = contentTokens(b);
+  const onlyA = [...ta].filter(t => !tb.has(t)).length;
+  const onlyB = [...tb].filter(t => !ta.has(t)).length;
+  return onlyA > 0 && onlyB > 0 && Math.max(onlyA, onlyB) <= 2;
+}
 
-  const lower = trimmed.toLowerCase();
-  const genericWords = ['tender', 'notice', 'procurement', 'tenders', 'quotation', 'corrigendum', 'advertisement', 'bidding'];
-  if (genericWords.includes(lower)) return false;
-
-  // Must contain at least one digit (genuine procurement references almost universally contain numbers)
-  if (!/\d/.test(trimmed)) return false;
-
-  return true;
+function closingWithin(a?: string | null, b?: string | null, days: number = 1.5): boolean {
+  if (!a || !b) return false;
+  const ma = new Date(a).getTime();
+  const mb = new Date(b).getTime();
+  return !isNaN(ma) && !isNaN(mb) && Math.abs(ma - mb) <= days * 86400000;
 }
 
 /**
- * Checks if a tender matches an existing active opportunity in the database.
- * Matches via 3 Tiers:
- * 1. Normalized Reference Numbers match exactly (if valid genuine ref with digits)
- * 2. Lexical Bigram similarity (Title + Organization) >= 0.85 AND closing dates within ±1.5 days (or both null)
- * 3. Semantic Vector similarity >= 0.88 with matching/related Organization (>= 0.50) AND closing dates within ±1.5 days
+ * Checks if a tender matches an existing opportunity from ANOTHER source. Within one portal a
+ * tender's identity is its id (portal + reference + title + link), checked by the caller before
+ * this function, so similarity is never used to merge two rows of the same portal (docs/16 A3).
+ *
+ * 1. Reference number: same normalised reference, plus one corroborating signal (organisation or
+ *    title similarity >= 0.5, or deadlines within 1.5 days), so a shared pseudo-reference alone
+ *    never merges (docs/15 F3).
+ * 2. Lexical: title Dice similarity >= 0.85, deadlines within 1.5 days (or both undated and recent),
+ *    and the titles are not distinguishable.
+ * 3. Semantic: title similarity >= 0.88 with related organisations, same date rule, not distinguishable.
  */
 export function findCanonicalMatch(candidate: {
   referenceNo?: string | null;
@@ -84,79 +111,45 @@ export function findCanonicalMatch(candidate: {
   organization: string;
   closingDate?: string | null;
   embedding?: Buffer | Uint8Array | null;
+  portalId?: string | null;
 }): DuplicateMatchResult {
-  // Tier 1: Exact Reference Number check (if valid genuine ref number with numbers)
-  if (isValidReferenceNo(candidate.referenceNo)) {
-    const rawRef = candidate.referenceNo!.trim();
-    const cleanRef = rawRef.replace(/[-/_\s]/g, '').toLowerCase();
+  const portalId = candidate.portalId ?? null;
 
-    const existingRef = db.prepare(`
-      SELECT id, canonical_id FROM tenders 
-      WHERE LOWER(REPLACE(REPLACE(REPLACE(reference_no, '-', ''), '/', ''), ' ', '')) = ?
-    `).get(cleanRef) as any;
-
-    if (existingRef) {
-      return {
-        isDuplicate: true,
-        canonicalId: existingRef.canonical_id,
-        matchedTenderId: existingRef.id,
-        similarity: 1.0
-      };
+  // Tier 1: reference number, corroborated
+  const norm = normalizeReferenceNo(candidate.referenceNo);
+  if (norm) {
+    // A long structured reference ("NUST/IT-2026/01", "TSE-2627111220673") identifies a tender on
+    // its own; a short one ("VR-4345S") needs a second signal before it may merge two tenders.
+    const strongReference = norm.length >= 8 && (norm.match(/\d/g) || []).length >= 2 && (norm.match(/\p{L}/gu) || []).length >= 2;
+    for (const existing of findTendersByReferenceNorm(norm, portalId)) {
+      const corroborated = strongReference ||
+        calculateStringSimilarity(candidate.organization, existing.organization) >= 0.5 ||
+        calculateStringSimilarity(candidate.title, existing.title) >= 0.5 ||
+        closingWithin(candidate.closingDate, existing.closing_date);
+      if (corroborated) {
+        return { isDuplicate: true, canonicalId: existing.canonical_id, matchedTenderId: existing.id, similarity: 1.0, tier: 'reference' };
+      }
     }
   }
 
-  // Query candidates by closing date proximity
-  let candidates: any[] = [];
-  if (candidate.closingDate) {
-    candidates = db.prepare(`
-      SELECT id, canonical_id, title, organization, closing_date, embedding
-      FROM tenders 
-      WHERE closing_date IS NOT NULL 
-      AND ABS(julianday(closing_date) - julianday(?)) <= 1.5
-    `).all(candidate.closingDate);
-  } else {
-    candidates = db.prepare(`
-      SELECT id, canonical_id, title, organization, closing_date, embedding
-      FROM tenders 
-      WHERE closing_date IS NULL
-      AND created_at >= datetime('now', '-14 days')
-    `).all();
-  }
-
-  const targetString = candidate.organization + ' ' + candidate.title;
+  // Tiers 2-3: candidates from other portals with a nearby deadline (or both undated and recent)
+  const candidates = findDedupCandidates(candidate.closingDate, portalId);
   let bestMatch: DuplicateMatchResult = { isDuplicate: false, similarity: 0 };
 
   for (const existing of candidates) {
-    // Tier 2: Lexical Bigram Similarity
-    const existingString = existing.organization + ' ' + existing.title;
-    const lexicalSim = calculateStringSimilarity(targetString, existingString);
+    if (titlesAreDistinguishable(candidate.title, existing.title)) continue;
 
+    const lexicalSim = calculateStringSimilarity(candidate.title, existing.title);
     if (lexicalSim >= 0.85 && lexicalSim > bestMatch.similarity) {
-      bestMatch = {
-        isDuplicate: true,
-        canonicalId: existing.canonical_id,
-        matchedTenderId: existing.id,
-        similarity: lexicalSim
-      };
+      bestMatch = { isDuplicate: true, canonicalId: existing.canonical_id, matchedTenderId: existing.id, similarity: lexicalSim, tier: 'lexical' };
       continue;
     }
 
-    // Tier 3: Semantic Vector Similarity for reworded cross-portal duplicates from the same organization
     const orgSim = calculateStringSimilarity(candidate.organization, existing.organization);
     if (orgSim >= 0.50) {
-      const semanticSim = computeTextSemanticSimilarity(
-        candidate.title,
-        existing.title,
-        candidate.embedding,
-        existing.embedding
-      );
+      const semanticSim = computeTextSemanticSimilarity(candidate.title, existing.title, candidate.embedding, existing.embedding);
       if (semanticSim >= 0.88 && semanticSim > bestMatch.similarity) {
-        bestMatch = {
-          isDuplicate: true,
-          canonicalId: existing.canonical_id,
-          matchedTenderId: existing.id,
-          similarity: semanticSim
-        };
+        bestMatch = { isDuplicate: true, canonicalId: existing.canonical_id, matchedTenderId: existing.id, similarity: semanticSim, tier: 'semantic' };
       }
     }
   }

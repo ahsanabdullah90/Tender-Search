@@ -18,3 +18,6 @@ data/models/
 
 # Sample data for redesign work
 data-sample/
+
+docs/archive/claude-outputs/
+docs/archive/mocks/

@@ -5,7 +5,8 @@
 - **Brand Assets**: All branding logos live strictly under `public/brand/` (`logo-square.png`, `logo-landscape.png`). Favicons live in `public/`.
 - **Server Routes**: All REST endpoints and SSE streams belong in domain route controllers under `src/server/routes/` (`tenders.routes.ts`, `portals.routes.ts`, `tracks.routes.ts`, `scan.routes.ts`, `system.routes.ts`) and must be registered via `src/server/routes/index.ts`. Never put route handlers directly into `server.ts`.
 - **Database Layer**: Database connection belongs in `src/server/db/connection.ts`, schema DDL in `src/server/db/schema.ts`, and domain queries in `src/server/db/repositories/` (`tendersRepo.ts`, `portalsRepo.ts`, `tracksRepo.ts`, `systemRepo.ts`, `ingestJobsRepo.ts`). Never write ad-hoc SQL queries outside these repositories.
-- **Scrapers & Parsers**: Strict Pakistani date parsing belongs in `src/server/scrapers/dateParser.ts`. Self-healing discovery belongs in `src/server/scrapers/healer.ts`.
+- **Scrapers & Parsers**: Scraper functionality must be modularized into single-responsibility submodules: strict Pakistani date parsing in `src/server/scrapers/dateParser.ts`; transport & charset decoding in `src/server/scrapers/htmlFetcher.ts`; deterministic DOM extraction in `src/server/scrapers/portalParsers.ts`; self-healing discovery in `src/server/scrapers/healer.ts`; tender detail analysis in `src/server/scrapers/tenderAnalysis.ts`; ingestion, deduplication & rescan pipelining in `src/server/scrapers/ingestPipeline.ts`; and orchestrator/public facade in `src/server/scrapers/crawlerEngine.ts`.
+- **Frontend Components**: Decompose large screens into focused submodules under `src/components/<domain>/` (e.g. `src/components/inbox/Detail.tsx`, `AddTenderModal.tsx`, `TenderRow.tsx`, `index.ts`), keeping top-level screens clean while preserving re-export compatibility.
 - **Tests**: Every new backend endpoint, database function, or scraper parser must have corresponding tests under `tests/` mirroring the `src/` directory layout.
 
 ## 2. Self-Healing Scraper Governance (The 7 Anti-Corruption Rules)
@@ -18,6 +19,11 @@ When modifying or interacting with scrapers, strictly adhere to the 7 Anti-Corru
 6. **Strict `base_url` Normalization**: Store only clean URL origins in `base_url` (never file paths or query strings).
 7. **Canonical Baseline Immutability**: Always retain canonical defaults from `PORTAL_DEFINITIONS`.
 
-## 3. Mandatory Skill Activation
+## 3. Mandatory Skill Activation & North-Star Quality Standard
 For comprehensive instructions, decision trees, and checklists, consult the workspace skill:
 [`.agents/skills/file-creation-and-management/SKILL.md`](.agents/skills/file-creation-and-management/SKILL.md)
+
+For the numbered requirements register (every rule the app must obey, with its enforcing file, proving test and status), the measured baselines, and the pre-completion checklist, consult:
+[`docs/13-north-star-quality-standard.md`](docs/13-north-star-quality-standard.md)
+
+That register is the single source of rules. When a change affects a requirement, update its status there in the same change. Open work is tracked by requirement ID in [`docs/14-active-backlog.md`](docs/14-active-backlog.md).

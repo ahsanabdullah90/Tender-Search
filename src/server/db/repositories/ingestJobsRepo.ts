@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { db } from '../connection.js';
+import { db, safeJsonParse } from '../connection.js';
 
 /**
  * Durable document-ingest queue (docs/13-ingestion-pipeline-plan.md, Phase 1.2).
@@ -187,11 +187,65 @@ export function deferJob(jobId: string, minutes: number, reason: string): boolea
 
 /** Puts a tender's failed jobs back in the queue with fresh attempts (operator "Retry" action). */
 export function requeueFailedJobs(tenderId: string): number {
-  return db.prepare(`
+  const requeued = db.prepare(`
     UPDATE document_ingest_jobs
     SET status = 'pending', attempts = 0, lease_until = NULL, next_retry_at = CURRENT_TIMESTAMP
     WHERE tender_id = ? AND status = 'failed'
   `).run(tenderId).changes;
+
+  // Also enqueue any stored attachment_urls or direct-document direct_url not yet in the queue.
+  let newlyQueued = 0;
+  try {
+    const row = db.prepare('SELECT direct_url, attachment_urls FROM tenders WHERE id = ?').get(tenderId) as
+      | { direct_url: string | null; attachment_urls?: string | null }
+      | undefined;
+    if (row) {
+      const urls = collectRowDocumentUrls(row.direct_url, row.attachment_urls);
+      if (urls.length > 0) {
+        newlyQueued = enqueueDocumentJobs(tenderId, urls.map(url => ({ url })));
+      }
+    }
+  } catch {}
+  return requeued + newlyQueued;
+}
+
+function isDirectDocLink(url?: string | null): boolean {
+  return Boolean(url && (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url)));
+}
+
+function collectRowDocumentUrls(directUrl?: string | null, attachmentUrlsRaw?: string | null): string[] {
+  const urls: string[] = [];
+  if (isDirectDocLink(directUrl)) urls.push(directUrl!);
+  for (const u of safeJsonParse<string[]>(attachmentUrlsRaw || '[]', [])) {
+    if (u && !urls.includes(u)) urls.push(u);
+  }
+  return urls.slice(0, 5);
+}
+
+/**
+ * One-time / idempotent backfill (docs/14 P1-1): queues document jobs for existing New Opportunity
+ * tenders that have a direct document URL or stored attachment_urls, no cached dossiers yet, and
+ * doc_fetch_status = 'none'. Returns how many tenders had jobs queued.
+ */
+export function backfillExistingTenderDocumentJobs(): number {
+  const rows = db.prepare(`
+    SELECT id, direct_url, attachment_urls FROM tenders
+    WHERE pipeline_status = 'New Opportunity'
+      AND COALESCE(doc_fetch_status, 'none') = 'none'
+      AND (cached_dossiers IS NULL OR cached_dossiers = '[]')
+  `).all() as { id: string; direct_url: string | null; attachment_urls?: string | null }[];
+
+  let tendersQueued = 0;
+  for (const row of rows) {
+    const urls = collectRowDocumentUrls(row.direct_url, row.attachment_urls);
+    if (urls.length === 0) continue;
+    const added = enqueueDocumentJobs(row.id, urls.map(url => ({ url })));
+    if (added > 0) {
+      refreshTenderDocFetchStatus(row.id);
+      tendersQueued++;
+    }
+  }
+  return tendersQueued;
 }
 
 export interface JobSummary {

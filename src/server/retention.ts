@@ -1,6 +1,8 @@
 import {
   getAppSetting,
-  setAppSetting
+  setAppSetting,
+  countPendingFilePurges,
+  pruneOldDailyVisionCounters
 } from './db/repositories/systemRepo.js';
 import {
   getPassedTendersPendingSlim,
@@ -9,7 +11,9 @@ import {
   cleanExpiredDeletedTenderRecords,
   slimPassedTenders,
   deleteTenders,
-  releaseStaleStagingTenders
+  releaseStaleStagingTenders,
+  getStaleAwaitingScopeTenderIds,
+  countAwaitingScopeTenders
 } from './db/repositories/tendersRepo.js';
 import { releaseExpiredLeases } from './db/repositories/ingestJobsRepo.js';
 import {
@@ -17,13 +21,13 @@ import {
   reconcileDossiers,
   ReconcileResult
 } from './dossierStore.js';
-import { db } from './db/connection.js';
 
 export interface RetentionReport {
   slimmedCount: number;
   expiredDeletedCount: number;
   passedRetiredCount: number;
   purgesRetriedCount: number;
+  staleAwaitingScopeDeletedCount?: number;
   reconcileResult: ReconcileResult;
   timestamp: string;
   dryRun: boolean;
@@ -38,6 +42,7 @@ export interface RetentionStatus {
   expiredUnreviewedCount: number;
   agedOutPassedCount: number;
   pendingPurgesCount: number;
+  awaitingScopeCount?: number;
   lastRun: RetentionReport | null;
 }
 
@@ -102,6 +107,17 @@ export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolea
     }
   }
 
+  // 2b. Clean up stale awaiting_scope tenders older than 3 days (held for documents that never arrived or matched)
+  const staleAwaitingScope = getStaleAwaitingScopeTenderIds(3, batchCap);
+  if (staleAwaitingScope.length > 0) {
+    if (!isDryRun) {
+      const deleteResult = deleteTenders(staleAwaitingScope, 'no-track-match');
+      report.staleAwaitingScopeDeletedCount = deleteResult.deletedCount;
+    } else {
+      report.staleAwaitingScopeDeletedCount = staleAwaitingScope.length;
+    }
+  }
+
   // 3. Retire aged-out slim Passed records (closing_date / passed_at + 10 days is past)
   const agedOutPassed = getAgedOutPassedTenderIds(passedRetentionDays, batchCap);
   if (agedOutPassed.length > 0) {
@@ -113,9 +129,10 @@ export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolea
     }
   }
 
-  // 4. Clean expired suppression records
+  // 4. Clean expired suppression records & old daily Vision counters
   if (!isDryRun) {
     cleanExpiredDeletedTenderRecords();
+    pruneOldDailyVisionCounters(7);
   }
 
   // 5. Retry pending locked-file purges
@@ -154,11 +171,7 @@ export function getRetentionStatus(): RetentionStatus {
   const expiredUnreviewed = getExpiredUnreviewedTenderIds(graceDays, 500);
   const agedOutPassed = getAgedOutPassedTenderIds(passedRetentionDays, 500);
 
-  let pendingPurgesCount = 0;
-  try {
-    const row = db.prepare('SELECT COUNT(*) as c FROM pending_file_purges WHERE attempts < 10').get() as { c: number };
-    pendingPurgesCount = row?.c || 0;
-  } catch {}
+  const pendingPurgesCount = countPendingFilePurges(10);
 
   let lastRun: RetentionReport | null = null;
   const lastRunRaw = getAppSetting('last_retention_run');
@@ -176,6 +189,7 @@ export function getRetentionStatus(): RetentionStatus {
     expiredUnreviewedCount: expiredUnreviewed.length,
     agedOutPassedCount: agedOutPassed.length,
     pendingPurgesCount,
+    awaitingScopeCount: countAwaitingScopeTenders(),
     lastRun
   };
 }

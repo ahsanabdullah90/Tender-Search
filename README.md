@@ -31,16 +31,20 @@ Sample data is kept in `./data-sample/`, separate from `./data/`.
 
 ## Architecture & Features
 
-- **Local-First & ISP Trust**: Operates locally on your machine to bypass government datacenter IP blocks.
-- **SQLite WAL**: Zero-config persistence in `./data/tender_tracker.db` with daily rolling backups in `./data/backups/`.
-- **Deduplication Engine**: Uses Dice bigram similarity and closing-date proximity to detect duplicate notices across provincial boards, PPRA, and newspapers.
+- **Local-First & ISP Trust**: Operates locally on your machine (`C:\Tender_Tracker`) to bypass government datacenter IP blocks.
+- **SQLite WAL & Repository Governance**: Zero-config persistence in `./data/tender_tracker.db` with daily rolling backups in `./data/backups/` and strict domain repository encapsulation (`src/server/db/repositories/`).
+- **Local-First Document Ingestion & Durable Queue**: Reads digital PDFs (`pdfjs-dist`) and Word `.docx` files (`mammoth`) locally in milliseconds at zero API cost, routes only scanned notices/images to Gemini Vision within configurable per-scan and daily budgets, and retries deferred downloads via `document_ingest_jobs`.
+- **3-Tier Hybrid Deduplication & Semantic Matching**: Combines normalized reference numbers, Dice bigram similarity, and 384-dimensional `all-MiniLM-L6-v2` semantic embeddings (with tagged vector spaces) across provincial boards, PPRA, and newspapers.
+- **Deadline Provenance & Operator Review Workflow**: Tracks where every closing date came from (`corrigendum_doc`, `primary_doc`, `html_row`, `manual`) and flags ambiguous, earlier-shifted, or cancelled notices (`needs_review`) across both Inbox and Pipeline with one-click **Confirm** and **Pass as cancelled** actions.
 - **Human-in-the-Loop (HITL)**: When a portal presents a CAPTCHA or Cloudflare challenge, Tender Tracker prompts you to launch a local browser session to resolve it.
-- **Corrigenda Tracking**: Automatically monitors deadline changes and attachment updates.
 - **UTF-8 BOM CSV Export**: Filter-aware export rendered cleanly for Microsoft Excel on Windows.
 
 ## Testing & Quality Assurance
 
 ```powershell
+# Run full quality gate (TypeScript type-check + all 525 tests across 34 suites)
+npm run verify
+
 # Run all unit, scraper, API, and UI tests
 npm test
 
@@ -52,6 +56,9 @@ npm run test:coverage
 
 # Probe live connectivity for all 18 procurement portals
 npm run probe:portals
+
+# Refresh Windows Desktop shortcut pointing to C:\Tender_Tracker
+npm run shortcut
 
 # Type-check TypeScript
 npm run lint
@@ -76,5 +83,6 @@ Full architectural and operational documentation is available in the [`docs/`](.
 - [10. Operator Guide for Daily Use](./docs/10-operator-guide.md)
 - [11. Configuration & Environment Variables](./docs/11-configuration-and-env.md)
 - [12. Architectural Decisions & Changelog](./docs/12-decisions-and-changelog.md)
-- [13. Ingestion Pipeline Plan & Status](./docs/13-ingestion-pipeline-plan.md)
-- [14. Pending Issues & Next-Run Backlog](./docs/14-pending-issues.md)
+- [13. Quality Standard & Requirements Register](./docs/13-north-star-quality-standard.md)
+- [14. Active Backlog & Next Steps](./docs/14-active-backlog.md)
+- [Historical Audits & Completed Plans](./docs/archive/) (Archived investigation logs, audit snapshots, and implementation plans)
