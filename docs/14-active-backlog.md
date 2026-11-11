@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-11 · **System Baseline:** v1.6.0 (583 passing tests across 39 suites, 84.62% line coverage, all re-scan and governance rules mirrored with unit tests).
+**Last updated:** 2026-11-11 · **System Baseline:** v1.6.0 (573 passing tests across 36 streamlined suites, 84.45% line coverage, 0 redundant scaffold tests).
 
 This document tracks **only active, unresolved items** requiring operator input, live data accumulation, or portal-specific maintenance. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 

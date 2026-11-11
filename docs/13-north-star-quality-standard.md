@@ -104,7 +104,7 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| MATCH-1 | Positive and negative keywords match on word boundaries, never as substrings, at every call site. (F7) | `trackMatcher.ts` `containsKeyword` | `tests/unit/crawler-match.test.ts` | Tested |
+| MATCH-1 | Positive and negative keywords match on word boundaries, never as substrings, at every call site. (F7) | `trackMatcher.ts` `containsKeyword` | `tests/unit/trackMatcher.test.ts` | Tested |
 | MATCH-2 | A listing that matches no track but has documents is held as `awaiting_scope`, hidden from Inbox, Pipeline and KPIs, until its documents are read. (F2) | `crawlerEngine.ts`, `tendersRepo.ts` | `tests/scraper/ingest-queue.test.ts` | Tested |
 | MATCH-3 | A held listing is released to `ready` if its document text matches a track; otherwise it is deleted with `reason = 'no-track-match'`. (F2) | `ingestWorker.ts` | `tests/scraper/ingest-queue.test.ts` | Untested by name (`no-track-match` appears in no test) |
 | MATCH-4 | An `awaiting_scope` row older than 3 days is purged by retention. | `retention.ts` | `tests/scraper/retention.test.ts` | Untested by name |
@@ -183,7 +183,7 @@ Every requirement below exists to protect one of these.
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
 | SEC-1 | The server binds to `127.0.0.1` by default. | `server.ts` | None by name | Untested |
-| SEC-2 | Tests never open the production `data/` folder; the setup throws before any connection if they try. | `tests/setup/node-setup.ts` | `tests/unit/smoke.test.ts` | Tested |
+| SEC-2 | Tests never open the production `data/` folder; the setup throws before any connection if they try. | `tests/setup/node-setup.ts` | `tests/api/routes.test.ts` | Tested |
 | SEC-3 | The sample-data seeder refuses to run against any folder other than `data-sample/`. | `scripts/seed-sample.ts` | `tests/unit/seed-sample.test.ts` | Tested |
 | SEC-4 | Portal passwords and the Gemini key are never returned by an API response or written to a log. | `portalsRepo.ts`, `logger.ts` | `tests/unit/logger.test.ts`, `tests/api/routes.test.ts` | Untested by name |
 
@@ -209,8 +209,8 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested (582 passing, 24 s) |
-| QA-2 | Line coverage across `src/` is ≥ 80% (measured: 84.62% overall, 93.5% repositories, 90.5% deduplicator, 86.7% scrapers, 98.6% dateParser). | `vitest.config.ts` | `npm run test:coverage` | Tested |
+| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested (573 passing, 22 s) |
+| QA-2 | Line coverage across `src/` is ≥ 80% (measured: 84.45% overall, 93.5% repositories, 90.5% deduplicator, 86.6% scrapers, 98.6% dateParser). | `vitest.config.ts` | `npm run test:coverage` | Tested |
 | QA-3 | No automated test needs a live internet connection. | `tests/fixtures/` | `npm run verify` | Tested |
 | QA-4 | Every file path, test count and portal count written in `docs/` matches the repository. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
 
@@ -223,7 +223,7 @@ These are measured by a command. Re-run the command and replace the value; never
 | Measure | Value on 2026-11-11 | Command |
 |---|---|---|
 | TypeScript errors | 0 | `npm run lint` |
-| Tests passing | 582 of 582, 39 files, 24 s | `npm run verify` |
+| Tests passing | 573 of 573, 36 files, 22 s | `npm run verify` |
 | Production build | Builds | `npm run build` |
 | `db.prepare` outside `src/server/db/` | 0 | `Get-ChildItem src/server -Recurse -Filter *.ts \| Where-Object { $_.FullName -notmatch '\\db\\' } \| Select-String 'db\.prepare'` |
 | Unparseable `closing_date` rows | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND julianday(closing_date) IS NULL;` |
@@ -234,7 +234,7 @@ These are measured by a command. Re-run the command and replace the value; never
 | Portals shown as "checked successfully" (`HLT-4`; includes one that returned 0 items) | 9 of 13 | `SELECT COUNT(*) FROM portal_health WHERE status='online';` |
 | Completed full scans | 0 | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` (no row) |
 | Tenders stored | 63 (57 `ready`, 6 `awaiting_scope`) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
-| Line coverage | 84.62% lines (82.84% statements, 81.67% functions, 73.59% branches) | `npm run test:coverage` |
+| Line coverage | 84.45% lines (82.68% statements, 81.09% functions, 73.49% branches) | `npm run test:coverage` |
 
 ---
 
