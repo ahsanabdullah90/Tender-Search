@@ -1485,13 +1485,22 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         attachmentUrls: ['https://techdestination.com/wp-content/uploads/2026/11/annexure.pdf']
       }, psebPortal(), itTracks);
 
-      // Tender has no reference_no, so the background path runs OCR on the attachment
-      await vi.waitFor(() => expect(ocrSpy).toHaveBeenCalled());
-      await new Promise(r => setTimeout(r, 20));
+      // Dated tender: the attachment is queued, not read before insert
+      expect(ocrSpy).not.toHaveBeenCalled();
+      const queued = getAllTenders()[0];
+      expect(queued.doc_fetch_status).toBe('pending');
+
+      // The background worker reads it; the older, past date must not delete the tender
+      const { processDocumentQueue } = await import('../../src/server/ingestWorker.js');
+      const report = await processDocumentQueue(5);
+      expect(report.claimed).toBe(1);
+      expect(ocrSpy).toHaveBeenCalled();
 
       const saved = getAllTenders();
       expect(saved.length).toBe(1);
       expect(saved[0].closing_date).toBe(listingDeadline);
+      expect(saved[0].doc_fetch_status).toBe('complete');
+      expect(saved[0].cached_dossiers).toHaveLength(1);
     });
 
     it('fetch-documents does not expire a tender with a future deadline because an attachment is older', async () => {

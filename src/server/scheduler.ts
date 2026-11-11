@@ -2,16 +2,19 @@ import { db, backupDatabase, getPortalHealthList, updatePortalHealth } from './d
 import { startCrawlerScan, getActivePortalsList } from './scrapers/crawlerEngine.js';
 import { runRetentionCycle } from './retention.js';
 import { backfillModelEmbeddings } from './embeddingBackfill.js';
+import { processDocumentQueue } from './ingestWorker.js';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 let retentionInterval: NodeJS.Timeout | null = null;
+let documentQueueInterval: NodeJS.Timeout | null = null;
 let lastDailyHealthCheck: number = 0;
 
 export const schedulerDeps = {
   startCrawlerScan: (portalId?: string, awaitCompletion?: boolean) => startCrawlerScan(portalId, awaitCompletion),
   backupDatabase: () => backupDatabase(),
   runRetentionCycle: (opts?: any) => runRetentionCycle(opts),
-  backfillModelEmbeddings: (limit?: number) => backfillModelEmbeddings(limit)
+  backfillModelEmbeddings: (limit?: number) => backfillModelEmbeddings(limit),
+  processDocumentQueue: (limit?: number) => processDocumentQueue(limit)
 };
 
 export function initStartupScheduler() {
@@ -50,6 +53,15 @@ export function initStartupScheduler() {
     );
   }, 5 * 60 * 1000);
 
+  // 2b. Background document worker: downloads and reads queued tender documents every 2 minutes
+  // (skips itself while a scan is running).
+  if (documentQueueInterval) clearInterval(documentQueueInterval);
+  documentQueueInterval = setInterval(() => {
+    schedulerDeps.processDocumentQueue(5).catch(err =>
+      console.warn('[Tender Tracker Scheduler] Document queue error:', err)
+    );
+  }, 2 * 60 * 1000);
+
   // 2. Check if a catch-up scan is required
   checkAndTriggerCatchUpScan();
 
@@ -78,6 +90,10 @@ export function stopStartupScheduler() {
   if (retentionInterval) {
     clearInterval(retentionInterval);
     retentionInterval = null;
+  }
+  if (documentQueueInterval) {
+    clearInterval(documentQueueInterval);
+    documentQueueInterval = null;
   }
 }
 

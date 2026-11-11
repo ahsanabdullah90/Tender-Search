@@ -6,6 +6,33 @@ Goal: move the **Scrape → Document Ingest → Verification → Inbox** pipelin
 
 ---
 
+## Implementation status (2026-11-11)
+
+All phases are implemented. Phase 0 is in `5ae606c` and Phase 1 in `73ffc8f`; Phases 2–4 are listed below.
+
+**Phase 2: document extractor & deadline rules** (`src/server/documentExtractor.ts`, `dateParser.ts`)
+- Local text via `pdfjs-dist@4.10.38` / `mammoth@1.13.0`; text chunks are joined by their position on the page, because naive joining split "202 6" and "SC HOOL".
+- **Deviations:**
+  - A document with text but no submission-anchored date returns **no** deadline. The plan said "low confidence fills a missing date", but taking an arbitrary date from a document is unsafe.
+  - The "is Gemini configured" check is left to `extractTenderFromImage` itself, which already returns nothing without a key. The extractor only checks the Vision budget.
+- **Extra resolver rules found while testing on real data:**
+  - On the same calendar day, a document's time beats a listing's default 14:00.
+  - Once a corrigendum sets the deadline, the original RFP cannot restore its older date.
+- **Not done:**
+  - The 20-document Vision-vs-local agreement check: only 4 real documents exist locally. Local reading is the default.
+  - MiniLM threshold calibration (§2.5): needs labelled tender/track and duplicate pairs from the operator.
+
+**Phase 3: ingest flow, budgets, worker** (`processAndSaveTender`, `ingestBudget.ts`, `ingestWorker.ts`)
+- **Deviation:** upfront documents are still read *before* the row is inserted, so a tender being checked is never visible, and `staging` is not needed during ingest. Scans are single-flight, so no parallel scan can race it. `staging` and its read-path filters remain available.
+- A past deadline read with too little certainty to delete on (or moved earlier by a corrigendum) is inserted **flagged for review**. Flagged tenders always show in the Inbox and are skipped by the retention sweep until the operator confirms or passes them.
+- Manual *Fetch documents* / *Analyze* now read documents locally first too.
+
+**Phase 4: UI & contracts**
+- Deadline-source badges, review banner (Confirm / Pass), "Fetching documents in the background…", *Retry document fetch*, flagged tenders first, and the deferred-documents line in the sidebar.
+- Portal contracts: 8 captured portals with full contracts, 3 recorded parser gaps (`psda`, `giz`, `pid`: 0 tenders over HTTP), 4 synthetic fixtures, 3 not covered (`kppra`, `gilgit` offline; `ungm` needs Playwright). `psdf`'s fixture is 109 KB (over the 50 KB target). See `tests/fixtures/portals/README.md`.
+
+---
+
 ## 0. Invariants (every phase must preserve these)
 
 | # | Invariant | Enforced by |

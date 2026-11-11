@@ -175,3 +175,121 @@ describe('Extracted date normalization & deadline reconciliation (audit findings
     expect(reconcileDeadline(null, 'garbage', NOW)).toEqual({ closingDate: null, isExtension: false, isExpired: false });
   });
 });
+
+import { resolveCanonicalDeadline, inferPublishDateFromUrl } from '../../src/server/scrapers/dateParser.js';
+
+describe('resolveCanonicalDeadline (Phase 2.3)', () => {
+  const NOW = Date.parse('2026-11-10T09:00:00.000Z');
+  const iso = (s: string) => new Date(s).toISOString();
+
+  it('later deadline wins: an old attachment cannot pull an extended listing date backwards', () => {
+    const r = resolveCanonicalDeadline(
+      { date: iso('2026-12-01T14:00:00+05:00'), source: 'html_row' },
+      [{ date: iso('2026-10-01T11:00:00+05:00'), source: 'primary_doc', confidence: 'high', canAutoExpire: true }],
+      NOW
+    );
+    expect(r.closingDate).toBe(iso('2026-12-01T14:00:00+05:00'));
+    expect(r.source).toBe('html_row');
+    expect(r.isExpired).toBe(false);
+    expect(r.canAutoExpire).toBe(false);
+  });
+
+  it('on the same day, the document time beats the listing default time', () => {
+    const r = resolveCanonicalDeadline(
+      { date: iso('2026-11-20T14:00:00+05:00'), source: 'html_row' },
+      [{ date: iso('2026-11-20T11:00:00+05:00'), source: 'primary_doc', confidence: 'high', canAutoExpire: true }],
+      NOW
+    );
+    expect(r.closingDate).toBe(iso('2026-11-20T11:00:00+05:00'));
+    expect(r.source).toBe('primary_doc');
+    expect(r.isExtension).toBe(false);
+    expect(r.needsReview).toBe(false);
+  });
+
+  it('a later document date is an extension', () => {
+    const r = resolveCanonicalDeadline(
+      { date: iso('2026-11-20T14:00:00+05:00'), source: 'html_row' },
+      [{ date: iso('2026-12-05T11:00:00+05:00'), source: 'primary_doc', confidence: 'high' }],
+      NOW
+    );
+    expect(r.isExtension).toBe(true);
+    expect(r.source).toBe('primary_doc');
+  });
+
+  it('a corrigendum moving the deadline earlier wins but is flagged for review, never auto-expired', () => {
+    const r = resolveCanonicalDeadline(
+      { date: iso('2026-12-15T14:00:00+05:00'), source: 'html_row' },
+      [{ date: iso('2026-11-05T11:00:00+05:00'), source: 'corrigendum_doc', confidence: 'high', canAutoExpire: true }],
+      NOW
+    );
+    expect(r.closingDate).toBe(iso('2026-11-05T11:00:00+05:00'));
+    expect(r.source).toBe('corrigendum_doc');
+    expect(r.isExpired).toBe(true);
+    expect(r.needsReview).toBe(true);
+    expect(r.reviewReason).toMatch(/^deadline_moved_earlier: 15 Dec 2026/);
+    expect(r.canAutoExpire).toBe(false);
+  });
+
+  it('a cancelling corrigendum is flagged for review', () => {
+    const r = resolveCanonicalDeadline(
+      { date: iso('2026-12-15T14:00:00+05:00'), source: 'html_row' },
+      [{ date: null, source: 'corrigendum_doc', cancelled: true }],
+      NOW
+    );
+    expect(r.cancelled).toBe(true);
+    expect(r.needsReview).toBe(true);
+    expect(r.closingDate).toBe(iso('2026-12-15T14:00:00+05:00'));
+  });
+
+  it('auto-expires only on a trustworthy document date, or a past listing date with no documents', () => {
+    const docOnlyMedium = resolveCanonicalDeadline(null, [{ date: iso('2026-10-01T11:00:00+05:00'), source: 'primary_doc', confidence: 'medium', canAutoExpire: false }], NOW);
+    expect(docOnlyMedium.isExpired).toBe(true);
+    expect(docOnlyMedium.canAutoExpire).toBe(false);
+
+    const docHigh = resolveCanonicalDeadline(null, [{ date: iso('2026-10-01T11:00:00+05:00'), source: 'primary_doc', confidence: 'high', canAutoExpire: true }], NOW);
+    expect(docHigh.canAutoExpire).toBe(true);
+
+    const rowOnly = resolveCanonicalDeadline({ date: iso('2026-10-01T14:00:00+05:00'), source: 'html_row' }, [], NOW);
+    expect(rowOnly.canAutoExpire).toBe(true);
+  });
+
+  it('drops unparseable signals and breaks ties by source rank', () => {
+    const same = iso('2026-12-01T11:00:00+05:00');
+    const r = resolveCanonicalDeadline(
+      null,
+      [
+        { date: 'garbage', source: 'corrigendum_doc' },
+        { date: same, source: 'html_detail' },
+        { date: same, source: 'primary_doc', confidence: 'high' }
+      ],
+      NOW
+    );
+    expect(r.source).toBe('primary_doc');
+    expect(r.closingDate).toBe(same);
+  });
+});
+
+describe('inferPublishDateFromUrl (Phase 2.4)', () => {
+  it('returns the last day of a CMS upload month and ignores coarse or dateless URLs', () => {
+    expect(inferPublishDateFromUrl('https://techdestination.com/wp-content/uploads/2025/10/RFP.pdf')).toBe('2025-10-31');
+    expect(inferPublishDateFromUrl('https://x.gov.pk/wp-content/uploads/2024/02/a.pdf')).toBe('2024-02-29');
+    expect(inferPublishDateFromUrl('https://x.gov.pk/tenders/2025/a.pdf')).toBeNull();
+    expect(inferPublishDateFromUrl('https://fde.gov.pk/download/rfp?wpdmdl=1234')).toBeNull();
+    expect(inferPublishDateFromUrl(undefined)).toBeNull();
+  });
+});
+
+describe('resolveCanonicalDeadline: corrigendum supersedes the original', () => {
+  it('a later date from the original RFP does not override a deadline set by a corrigendum', () => {
+    const NOW = Date.parse('2026-11-10T09:00:00.000Z');
+    const corrDate = new Date('2026-11-20T11:00:00+05:00').toISOString();
+    const r = resolveCanonicalDeadline(
+      { date: corrDate, source: 'corrigendum_doc', confidence: 'high' },
+      [{ date: new Date('2026-12-05T11:00:00+05:00').toISOString(), source: 'primary_doc', confidence: 'high', canAutoExpire: true }],
+      NOW
+    );
+    expect(r.closingDate).toBe(corrDate);
+    expect(r.source).toBe('corrigendum_doc');
+    expect(r.isExtension).toBe(false);
+  });
+});

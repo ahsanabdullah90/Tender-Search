@@ -35,6 +35,48 @@ export function releaseStaleStagingTenders(olderThanMinutes: number = 60): numbe
   `).run(olderThanMinutes).changes;
 }
 
+export interface TenderProvenanceUpdate {
+  deadline_source?: string | null;
+  deadline_confidence?: string | null;
+  doc_fetch_status?: string;
+  needs_review?: number;
+  review_reason?: string | null;
+}
+
+/** Updates only the provenance/review columns given (Phase 3/4). */
+export function setTenderProvenance(id: string, fields: TenderProvenanceUpdate): boolean {
+  const allowed = ['deadline_source', 'deadline_confidence', 'doc_fetch_status', 'needs_review', 'review_reason'] as const;
+  const keys = allowed.filter(k => fields[k] !== undefined);
+  if (keys.length === 0) return false;
+  const sql = `UPDATE tenders SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`;
+  return db.prepare(sql).run(...keys.map(k => fields[k] as any), id).changes > 0;
+}
+
+/** Operator confirmed a flagged tender (e.g. a deadline moved earlier): clears the review flag. */
+export function clearTenderReviewFlag(id: string): boolean {
+  return db.prepare(`
+    UPDATE tenders SET needs_review = 0, review_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+  `).run(id).changes > 0;
+}
+
+/** Replaces a tender's matched tracks and keywords (document-scope re-scoring, Phase 2.5). */
+export function updateTenderTracks(id: string, tracks: string[], keywords: string[]): boolean {
+  return db.prepare('UPDATE tenders SET domain_tracks = ?, matched_keywords = ? WHERE id = ?')
+    .run(JSON.stringify(tracks), JSON.stringify(Array.from(new Set(keywords))), id).changes > 0;
+}
+
+/** Logs a deadline extension as an unacknowledged corrigendum and marks the tender amended. */
+export function recordDeadlineExtension(tenderId: string, previousFormatted: string, newFormatted: string): void {
+  const tx = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
+      VALUES (?, ?, 'deadline_extension', ?, ?, 0)
+    `).run(`corr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, tenderId, previousFormatted, newFormatted);
+    db.prepare('UPDATE tenders SET has_corrigendum = 1 WHERE id = ?').run(tenderId);
+  });
+  tx();
+}
+
 export interface EmbeddingBackfillRow {
   id: string;
   title: string;
@@ -300,6 +342,9 @@ export function getExpiredUnreviewedTenderIds(graceDays: number = 2, limit: numb
     WHERE pipeline_status = 'New Opportunity'
       AND is_bookmarked = 0
       AND ${NOT_STAGING_SQL}
+      -- Tenders flagged for operator review (e.g. a corrigendum moved the deadline earlier)
+      -- stay until the operator confirms or passes them.
+      AND COALESCE(needs_review, 0) = 0
       AND (
         (closing_date IS NOT NULL AND julianday(closing_date) <= julianday('now', '-' || ? || ' days'))
         OR

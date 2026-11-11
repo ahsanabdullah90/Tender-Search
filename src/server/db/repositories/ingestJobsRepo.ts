@@ -171,6 +171,20 @@ export function releaseExpiredLeases(): number {
   return tx();
 }
 
+/**
+ * Puts a claimed job back in the queue without using up an attempt, e.g. when the daily Gemini
+ * Vision budget is spent and a scanned document must wait.
+ */
+export function deferJob(jobId: string, minutes: number, reason: string): boolean {
+  return db.prepare(`
+    UPDATE document_ingest_jobs
+    SET status = 'pending', lease_until = NULL, last_error = ?,
+        attempts = MAX(attempts - 1, 0),
+        next_retry_at = datetime('now', '+' || ? || ' minutes')
+    WHERE id = ?
+  `).run(reason, minutes, jobId).changes > 0;
+}
+
 /** Puts a tender's failed jobs back in the queue with fresh attempts (operator "Retry" action). */
 export function requeueFailedJobs(tenderId: string): number {
   return db.prepare(`

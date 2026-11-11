@@ -238,6 +238,153 @@ export function reconcileDeadline(
   return { closingDate, isExtension, isExpired: !isNaN(resolvedMs) && resolvedMs < nowMs };
 }
 
+export type DeadlineSourceKind = 'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual';
+export type DeadlineConfidence = 'high' | 'medium' | 'low';
+
+/** Tie-break order (and badge priority) when two sources give the same deadline. */
+const SOURCE_RANK: Record<DeadlineSourceKind, number> = {
+  corrigendum_doc: 0,
+  primary_doc: 1,
+  html_detail: 2,
+  html_row: 3,
+  manual: 4
+};
+
+const isDocumentSource = (s: DeadlineSourceKind) => s === 'corrigendum_doc' || s === 'primary_doc';
+
+export interface DeadlineSignal {
+  date: string | null | undefined;
+  source: DeadlineSourceKind;
+  confidence?: DeadlineConfidence | null;
+  /** Set by the document extractor: strong enough to delete a tender on (rule I3). */
+  canAutoExpire?: boolean;
+  /** A corrigendum that cancels the tender. */
+  cancelled?: boolean;
+}
+
+export interface CanonicalDeadline {
+  closingDate: string | null;
+  source: DeadlineSourceKind | null;
+  confidence: DeadlineConfidence | null;
+  isExpired: boolean;
+  /** The deadline moved later than the known one (log a corrigendum). */
+  isExtension: boolean;
+  /** Safe to auto-expire (delete) the tender: past, not under review, and well-sourced. */
+  canAutoExpire: boolean;
+  /** The operator must confirm (decision 1): a corrigendum moved the deadline earlier, or cancelled the tender. */
+  needsReview: boolean;
+  reviewReason: string | null;
+  cancelled: boolean;
+}
+
+/** PKT calendar day (YYYY-MM-DD) of an ISO instant. */
+function pktDay(iso: string): string {
+  return new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10);
+}
+
+/**
+ * Resolves one deadline from the known value and all new signals (docs/13 §2.3):
+ *  1. Invalid/unparseable dates are dropped.
+ *  2. A corrigendum document's date wins, even if earlier. Earlier → flagged for review, never
+ *     auto-expired on that basis; a cancelling corrigendum is also flagged.
+ *  3. Otherwise the latest valid date wins (I2). Exception: on the same PKT calendar day a
+ *     document's time beats a listing's, because listing dates carry no real time (they default
+ *     to 14:00).
+ *  4. Ties go to the higher-ranked source (corrigendum > primary doc > detail page > row > manual).
+ *  5. Auto-expire only when the winning date is past and came from a document the extractor
+ *     marked trustworthy, or when there are no document signals at all (existing Rule B6).
+ */
+export function resolveCanonicalDeadline(
+  known: { date: string | null | undefined; source?: DeadlineSourceKind | null; confidence?: DeadlineConfidence | null } | null,
+  signals: DeadlineSignal[],
+  nowMs: number = Date.now()
+): CanonicalDeadline {
+  type Valid = { date: string; ms: number; source: DeadlineSourceKind; confidence: DeadlineConfidence | null; canAutoExpire: boolean; cancelled: boolean };
+  const toValid = (s: DeadlineSignal): Valid | null => {
+    const date = normalizeExtractedDate(s.date ?? null);
+    return date
+      ? { date, ms: new Date(date).getTime(), source: s.source, confidence: s.confidence ?? null, canAutoExpire: Boolean(s.canAutoExpire), cancelled: Boolean(s.cancelled) }
+      : null;
+  };
+
+  const knownValid = known?.date
+    ? toValid({ date: known.date, source: known.source || 'html_row', confidence: known.confidence ?? null, canAutoExpire: false })
+    : null;
+  const valid = signals.map(toValid).filter((v): v is Valid => v !== null);
+  const cancelled = signals.some(s => s.source === 'corrigendum_doc' && s.cancelled);
+  const hasDocSignal = signals.some(s => isDocumentSource(s.source));
+
+  const result: CanonicalDeadline = {
+    closingDate: knownValid ? known!.date! : null,
+    source: knownValid ? knownValid.source : null,
+    confidence: knownValid ? knownValid.confidence : null,
+    isExpired: false,
+    isExtension: false,
+    canAutoExpire: false,
+    needsReview: false,
+    reviewReason: null,
+    cancelled
+  };
+
+  const corrigenda = valid.filter(v => v.source === 'corrigendum_doc').sort((a, b) => b.ms - a.ms);
+  let winner: Valid | null = knownValid;
+
+  if (!corrigenda.length && knownValid?.source === 'corrigendum_doc') {
+    // A deadline already set by a corrigendum supersedes the original documents: reading the
+    // original RFP afterwards must not restore its (now outdated) date. Only a newer corrigendum
+    // can change it.
+  } else if (corrigenda.length) {
+    winner = corrigenda[0];
+    if (knownValid && winner.ms < knownValid.ms && pktDay(winner.date) !== pktDay(knownValid.date)) {
+      result.needsReview = true;
+      result.reviewReason = `deadline_moved_earlier: ${formatClosingDate(knownValid.date)} → ${formatClosingDate(winner.date)}`;
+    }
+  } else {
+    for (const cand of valid) {
+      if (!winner) { winner = cand; continue; }
+      const sameDay = pktDay(cand.date) === pktDay(winner.date);
+      if (sameDay && isDocumentSource(cand.source) !== isDocumentSource(winner.source)) {
+        if (isDocumentSource(cand.source)) winner = cand; // document time beats listing time
+        continue;
+      }
+      if (cand.ms > winner.ms || (cand.ms === winner.ms && SOURCE_RANK[cand.source] < SOURCE_RANK[winner.source])) {
+        winner = cand;
+      }
+    }
+  }
+
+  if (cancelled) {
+    result.needsReview = true;
+    result.reviewReason = 'corrigendum_cancelled: a corrigendum says this tender was cancelled or withdrawn';
+  }
+
+  if (winner) {
+    result.closingDate = winner === knownValid ? known!.date! : winner.date;
+    result.source = winner.source;
+    result.confidence = winner.confidence;
+    result.isExpired = winner.ms < nowMs;
+    result.isExtension = Boolean(knownValid && winner !== knownValid && winner.ms > knownValid.ms && pktDay(winner.date) !== pktDay(knownValid.date));
+    const wellSourced = isDocumentSource(winner.source) ? winner.canAutoExpire : !hasDocSignal;
+    result.canAutoExpire = result.isExpired && !result.needsReview && wellSourced;
+  }
+  return result;
+}
+
+/**
+ * Upper-bound publish date from a CMS upload path (docs/13 §2.4): `/wp-content/uploads/2025/10/x.pdf`
+ * → `2025-10-31`. Year-only paths and Download-Manager links (`?wpdmdl=`) give no date. Used only
+ * as a publish-date fallback, never as a deadline.
+ */
+export function inferPublishDateFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const m = url.match(/\/uploads\/(20\d{2})\/(0[1-9]|1[0-2])\//);
+  if (!m) return null;
+  const year = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${m[1]}-${m[2]}-${String(lastDay).padStart(2, '0')}`;
+}
+
 export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:st|nd|rd|th)?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
 
 /**

@@ -62,6 +62,50 @@ export interface InboxScreenProps {
   portalSummary?: PortalSummaryItem[];
 }
 
+/** Where a tender's deadline came from, as a badge (docs/13 §4.1). */
+export function deadlineProvenance(t: Pick<Tender, 'closing_date' | 'deadline_source' | 'deadline_confidence'>): {
+  label: string;
+  tone: 'ok' | 'warn' | 'neutral';
+  title: string;
+} {
+  if (!t.closing_date) {
+    return { label: 'No deadline · Portal HTML only', tone: 'neutral', title: 'The portal gave no deadline and none was found in the documents.' };
+  }
+  const fromDocument = t.deadline_source === 'corrigendum_doc' || t.deadline_source === 'primary_doc';
+  if (fromDocument && t.deadline_confidence === 'high') {
+    return t.deadline_source === 'corrigendum_doc'
+      ? { label: 'Verified from corrigendum', tone: 'ok', title: 'Deadline read from the corrigendum document.' }
+      : { label: 'Document verified', tone: 'ok', title: 'Deadline read from the official tender document.' };
+  }
+  if (fromDocument) {
+    return { label: 'From document · check', tone: 'warn', title: 'Deadline read from a document, but the reading was not certain. Check before bidding.' };
+  }
+  if (t.deadline_source === 'manual') {
+    return { label: 'Entered manually', tone: 'neutral', title: 'Deadline entered by hand.' };
+  }
+  return { label: 'Portal listing', tone: 'neutral', title: 'Deadline taken from the portal listing; the documents have not confirmed it.' };
+}
+
+/** Turns a stored review_reason ("kind: detail") into a sentence for the operator. */
+export function humanReviewReason(reason?: string | null): string {
+  if (!reason) return 'Please check this tender.';
+  const sep = reason.indexOf(':');
+  const kind = sep > 0 ? reason.slice(0, sep) : reason;
+  const detail = sep > 0 ? reason.slice(sep + 1).trim() : '';
+  switch (kind) {
+    case 'deadline_moved_earlier':
+      return `A corrigendum moved the deadline earlier (${detail}).`;
+    case 'corrigendum_cancelled':
+      return 'A corrigendum says this tender was cancelled or withdrawn.';
+    case 'uncertain_past_deadline':
+      return `${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
+    case 'excluded_terms_in_documents':
+      return `The documents mention excluded terms: ${detail}.`;
+    default:
+      return detail || reason;
+  }
+}
+
 /** Older rows may hold these fields as JSON text. */
 export function asList<T>(value: unknown): T[] {
   if (typeof value === 'string') {
@@ -170,6 +214,7 @@ function TenderRow({
               aria-label="Unread tender"
             />
           )}
+          {Boolean(tender.needs_review) && <Chip tone="danger">Review</Chip>}
           <DeadlineChip closingDate={tender.closing_date} />
           {tender.match_score > 0 && (
             <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-ink-muted">
@@ -485,6 +530,53 @@ export function Detail({
     }
   };
 
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [retryingDocs, setRetryingDocs] = useState(false);
+
+  const handleConfirmReview = async () => {
+    setReviewBusy(true);
+    try {
+      const res = await fetch(`/api/tenders/${currentTender.id}/review`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'confirm' })
+      });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        setCurrentTender(data.tender);
+        onTenderUpdated?.(data.tender);
+        setAiStatusMessage({ text: 'Review confirmed.' });
+      } else {
+        setAiStatusMessage({ text: data.error || 'Could not confirm review.', isError: true });
+      }
+    } catch {
+      setAiStatusMessage({ text: 'Could not confirm review.', isError: true });
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const handleRetryDocuments = async () => {
+    setRetryingDocs(true);
+    try {
+      const res = await fetch(`/api/tenders/${currentTender.id}/retry-documents`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.tender) {
+        setCurrentTender(data.tender);
+        onTenderUpdated?.(data.tender);
+        setAiStatusMessage({ text: data.message || 'Retrying document download.' });
+      } else {
+        setAiStatusMessage({ text: data.error || 'Could not retry documents.', isError: true });
+      }
+    } catch {
+      setAiStatusMessage({ text: 'Could not retry documents.', isError: true });
+    } finally {
+      setRetryingDocs(false);
+    }
+  };
+
+  const provenance = deadlineProvenance(currentTender);
+
   const confirmDeleteTender = async (tenderId: string) => {
     const res = await fetch(`/api/tenders/${tenderId}`, { method: 'DELETE' });
     if (!res.ok) {
@@ -497,6 +589,21 @@ export function Detail({
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-line p-6">
+        {Boolean(currentTender.needs_review) && (
+          <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">
+            <span className="font-semibold">Review: {humanReviewReason(currentTender.review_reason)}</span>
+            <span className="flex gap-2">
+              <Button variant="secondary" size="sm" onClick={() => void handleConfirmReview()} disabled={reviewBusy}>
+                {reviewBusy ? 'Confirming…' : 'Confirm'}
+              </Button>
+              {onPass && (
+                <Button variant="ghost" size="sm" onClick={handlePassClick}>
+                  Pass
+                </Button>
+              )}
+            </span>
+          </div>
+        )}
         <div className="text-[13px] text-ink-muted">
           {currentTender.portal_name} · <span className="font-mono">{currentTender.reference_no || 'No reference'}</span>
           {currentTender.location && <> · {currentTender.location}</>}
@@ -507,7 +614,18 @@ export function Detail({
         <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2">
           <div>
             <div className="text-xs text-ink-muted">Closes</div>
-            <div className="text-sm font-semibold">{currentTender.closing_date_formatted || 'No deadline stated'}</div>
+            <div className="text-sm font-semibold">
+              {currentTender.closing_date
+                ? currentTender.closing_date_formatted && currentTender.closing_date_formatted !== 'Not Available'
+                  ? currentTender.closing_date_formatted
+                  : new Date(currentTender.closing_date).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+                : 'No deadline stated'}
+            </div>
+            <div className="mt-1">
+              <span title={provenance.title} data-testid="deadline-provenance">
+                <Chip tone={provenance.tone}>{provenance.label}</Chip>
+              </span>
+            </div>
           </div>
           <LiveCountdown closingDate={currentTender.closing_date} />
           {onSetResultDate && (
@@ -551,6 +669,24 @@ export function Detail({
             <Download className={`h-4 w-4 ${fetchingDocs ? 'animate-bounce text-accent' : ''}`} />
             {fetchingDocs ? 'Fetching docs…' : 'Fetch Documents'}
           </Button>
+
+          {currentTender.doc_fetch_status === 'pending' && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-ink-muted" role="status">
+              <RotateCw className="h-3.5 w-3.5 animate-spin" /> Fetching documents in the background…
+            </span>
+          )}
+          {(currentTender.doc_fetch_status === 'failed' || currentTender.doc_fetch_status === 'partial') && (
+            <Button
+              variant="ghost"
+              onClick={() => void handleRetryDocuments()}
+              disabled={retryingDocs}
+              className="text-warn"
+              title="Some documents could not be downloaded from the portal. Try again."
+            >
+              <RotateCw className={`h-4 w-4 ${retryingDocs ? 'animate-spin' : ''}`} />
+              {retryingDocs ? 'Retrying…' : 'Retry document fetch'}
+            </Button>
+          )}
 
           <Button
             variant="ghost"
@@ -984,7 +1120,8 @@ export function InboxScreen(props: InboxScreenProps) {
   // turns on "Show closed" (previously they were shown as normal whenever no open tender
   // remained, so an all-expired Inbox looked active).
   const isClosedUntracked = (t: Tender) => {
-    if (t.is_bookmarked) return false;
+    // Flagged tenders stay visible until the operator confirms or passes them (decision 1).
+    if (t.is_bookmarked || t.needs_review) return false;
     if (t.closing_date && new Date(t.closing_date).getTime() < now) return true;
     const seenAt = t.publish_date || t.created_at;
     if (!t.closing_date && seenAt && now - new Date(seenAt).getTime() > 60 * 86400000) return true;
@@ -1076,7 +1213,9 @@ export function InboxScreen(props: InboxScreenProps) {
 
   const withDeadline = sorted.filter(t => t.closing_date);
   const noDeadline = sorted.filter(t => !t.closing_date);
-  const ordered = sortBy === 'urgency' ? [...withDeadline, ...noDeadline] : sorted;
+  const orderedBase = sortBy === 'urgency' ? [...withDeadline, ...noDeadline] : sorted;
+  // Tenders flagged for review (e.g. a corrigendum moved the deadline earlier) always come first.
+  const ordered = [...orderedBase.filter(t => t.needs_review), ...orderedBase.filter(t => !t.needs_review)];
 
   const expiredTenders = useMemo(() => {
     return ordered.filter(t => t.closing_date && new Date(t.closing_date).getTime() <= now);

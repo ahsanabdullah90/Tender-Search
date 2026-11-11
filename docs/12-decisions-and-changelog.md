@@ -39,6 +39,15 @@
   2. **Phase 3 (5-Step Autonomous URL Healer)**: When `tenders_url` fails or lands on a non-tender page, probe the organization's root domain (tracking cross-origin `finalUrl`), score homepage navigation links for "Tenders / Procurement / Bids" (with AI link discovery fallback), verify candidate pages, and persist the healed address to SQLite `portal_health`.
 - **Consequences**: Broken or migrated portal URLs and layout redesigns heal automatically during scan execution without operator intervention.
 
+### ADR 08: Local-First Document Reading, Deadline Resolution and Durable Document Queue (2026-11-10)
+- **Context**: Every tender PDF used to be sent to Gemini Vision (slow, quota-heavy), a single attachment could delete a tender whose listing showed an extended deadline, and background downloads were fire-and-forget (lost on timeouts or restarts). See `docs/13-ingestion-pipeline-plan.md`.
+- **Decision**:
+  1. **Local text first.** `pdfjs-dist@4.10.38` (first 5 pages) and `mammoth@1.13.0` (`.docx`) read the text layer locally; deadlines are found only next to submission phrases. Gemini Vision is used only for documents with no text layer (scans, clippings, images), within per-scan (20) and per-day (100) budgets. `mammoth@1.9.0` was rejected for a directory-traversal advisory (GHSA-rmjr-87wv-gf87).
+  2. **Deadline resolution** (`resolveCanonicalDeadline`): the later valid date wins; on the same day a document's time beats a listing's default 14:00; a corrigendum may move the deadline earlier but the tender is flagged for review (never auto-deleted on that basis); once a corrigendum sets the deadline, the original RFP cannot restore its date. Only an unambiguous document reading (one anchored date, AI agreement, or Vision) may auto-expire a tender.
+  3. **Durable queue** (`document_ingest_jobs`, `ingestWorker.ts`): documents not read before insert are retried every 2 minutes with backoff, lease-based crash recovery, and no worker activity during scans.
+- **Consequences**: Digital documents cost no Gemini quota; scans no longer block on slow portals; every deadline records where it came from (`deadline_source`, `deadline_confidence`) and the Inbox shows it.
+- **Measured on 2026-11-10**: local reading took 100–250 ms per digital PDF on 3 of the 4 real dossiers on disk; the 4th was a scan, correctly routed to Vision. On the Gilgit notice it read the exact time (11:00 a.m.) where the listing had only the date. The planned 20-document Vision-vs-local agreement check could not be run: only 4 documents exist locally.
+
 ---
 
 ## Changelog

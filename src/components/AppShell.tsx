@@ -101,6 +101,14 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, themePref
             <span className={`h-2 w-2 shrink-0 rounded-full ${scanning ? 'animate-pulse bg-warn' : 'bg-ok'}`} />
             <span>{syncText}</span>
           </div>
+          {((scanStatus.documentsDeferred ?? 0) > 0 || (scanStatus.visionDeferred ?? 0) > 0) && (
+            <div className="px-2 text-[11px] leading-snug text-ink-muted" data-testid="scan-deferred">
+              {[
+                (scanStatus.documentsDeferred ?? 0) > 0 && `${scanStatus.documentsDeferred} document(s) moved to background`,
+                (scanStatus.visionDeferred ?? 0) > 0 && `${scanStatus.visionDeferred} scanned notice(s) waiting for Vision`
+              ].filter(Boolean).join(' · ')}
+            </div>
+          )}
           <Button onClick={onRunScan} disabled={scanning} className="w-full">
             <RefreshCw className={`h-4 w-4 ${scanning ? 'animate-spin' : ''}`} />
             {scanning ? 'Scanning…' : 'Scan now'}

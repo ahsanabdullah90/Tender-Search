@@ -11,8 +11,12 @@ import {
   createManualTender,
   getAllDomainTracks,
   deleteTenders,
-  getPortalTenderSummary
+  getPortalTenderSummary,
+  clearTenderReviewFlag,
+  requeueFailedJobs,
+  refreshTenderDocFetchStatus
 } from '../db.js';
+import { processDocumentQueue } from '../ingestWorker.js';
 import { TENDER_STATUSES } from '../../types.js';
 import { analyzeTenderById, fetchDocumentsForTender, matchTracks, parseDateString, formatClosingDate } from '../scrapers/crawlerEngine.js';
 import { saveManualDossier } from '../dossierManager.js';
@@ -165,6 +169,33 @@ tendersRouter.post('/:id/fetch-documents', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Operator confirms a tender flagged for review (e.g. a corrigendum moved the deadline earlier).
+tendersRouter.patch('/:id/review', (req, res) => {
+  const existing = getTenderById(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Tender not found' });
+  const action = req.body?.action;
+  if (action !== 'confirm') return res.status(400).json({ error: 'Unsupported review action. Use { "action": "confirm" }.' });
+  clearTenderReviewFlag(existing.id);
+  res.json({ success: true, tender: getTenderById(existing.id) });
+});
+
+// Re-queue a tender's failed document downloads and run the worker now.
+tendersRouter.post('/:id/retry-documents', async (req, res) => {
+  const existing = getTenderById(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Tender not found' });
+  const requeued = requeueFailedJobs(existing.id);
+  refreshTenderDocFetchStatus(existing.id);
+  if (requeued > 0) {
+    void processDocumentQueue(5).catch(err => console.warn('[Tenders] Document retry worker error:', err));
+  }
+  res.json({
+    success: true,
+    requeued,
+    tender: getTenderById(existing.id),
+    message: requeued > 0 ? `Retrying ${requeued} document(s) in the background.` : 'No failed documents to retry.'
+  });
 });
 
 tendersRouter.post('/:id/attachments', async (req, res) => {

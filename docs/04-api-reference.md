@@ -95,11 +95,24 @@ Marks the tender as viewed/read.
 
 ### `POST /api/tenders/:id/refresh`
 Re-fetches the live portal page in real-time, extracts updated text, detects new attachments, and runs AI re-summarization if Gemini is configured.
-- **Response**: `200 OK` (`{"success": true, "tender": {...}, "message": "..."}`).
+- **Response**: `200 OK` (`{"success": true, "tender": {...}, "message": "..."}`). If the documents show the deadline has passed and the tender was auto-expired: `200 OK` (`{"success": true, "expired": true, "id": "...", "message": "..."}`); the Inbox removes the row. `404` only for an unknown tender.
 
 ### `POST /api/tenders/:id/analyze`
-Triggers on-demand Gemini AI analysis on the tender text or cached documents.
-- **Response**: `200 OK` (`{"success": true, "tender": {...}}`) or `400 Bad Request` if API key is not configured.
+Triggers on-demand analysis of the tender's cached documents (read locally first; Gemini Vision only for scans and images) or text.
+- **Response**: `200 OK` (`{"success": true, "tender": {...}}`), the same `expired: true` response as `/refresh`, or `400 Bad Request` if the API key is not configured.
+
+### `POST /api/tenders/:id/fetch-documents`
+Downloads the tender's documents from the portal now and reads them.
+- **Response**: `200 OK` (`{"success": true, "tender": {...}, "dossiers": [...], "newlyFetched": n}`) or `{"success": true, "expired": true, "id": "..."}` when the documents show the deadline has passed.
+
+### `PATCH /api/tenders/:id/review`
+Confirms a tender flagged for review (`needs_review = 1`, e.g. a corrigendum moved the deadline earlier). Clears the flag.
+- **Body**: `{"action": "confirm"}`.
+- **Response**: `200 OK` (`{"success": true, "tender": {...}}`), `400` for any other action, `404` for an unknown tender.
+
+### `POST /api/tenders/:id/retry-documents`
+Re-queues the tender's failed document downloads (fresh attempts) and runs the background worker.
+- **Response**: `200 OK` (`{"success": true, "requeued": n, "tender": {...}, "message": "..."}`).
 
 ### `POST /api/tenders/:id/attachments`
 Uploads a manual file attachment (PDF, image, document) to an existing tender and optionally runs AI OCR extraction.

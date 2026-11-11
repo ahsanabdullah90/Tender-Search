@@ -1,11 +1,11 @@
-import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields, getGeminiApiKey, deleteTenders, safeJsonParse, isTenderSuppressed, recordTenderSuppression } from '../db.js';
+import { db, DOSSIERS_DIR, getAllDomainTracks, updatePortalHealth, getPortalHealthList, getTenderById, updateTenderFields, getGeminiApiKey, deleteTenders, safeJsonParse, isTenderSuppressed, recordTenderSuppression, setTenderProvenance } from '../db.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { findCanonicalMatch, isValidReferenceNo, normalizeText } from '../deduplicator.js';
 import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, Tender, CachedDossier } from '../../types.js';
 import { downloadAndCacheDossier, deriveDossierLabel, fetchFileBuffer } from '../dossierManager.js';
 import { purgeTenderFiles, saveTenderDocument, getPortalFileCode } from '../dossierStore.js';
-import { extractTenderFromImage, summarizeTenderTextWithAI, extractTenderListFromHtmlWithAI, discoverTenderLinkWithAI } from '../ocrService.js';
+import { extractTenderFromImage, summarizeTenderTextWithAI, extractTenderListFromHtmlWithAI, discoverTenderLinkWithAI, OcrExtractedData } from '../ocrService.js';
 import {
   buildTrackEmbeddingText,
   buildTenderEmbeddingText,
@@ -16,6 +16,20 @@ import * as cheerio from 'cheerio';
 import https from 'https';
 import http from 'http';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { enqueueDocumentJobs, refreshTenderDocFetchStatus, documentJobPriority } from '../db/repositories/ingestJobsRepo.js';
+import { extractFromDocument, DocumentExtractionResult } from '../documentExtractor.js';
+import {
+  INGEST_DEFAULTS,
+  beginScanBudget,
+  endScanBudget,
+  getActiveScanBudget,
+  hasUpfrontTime,
+  maxFileBytes,
+  noteDeferredDocuments,
+  tryConsumeScanVision
+} from '../ingestBudget.js';
 
 // Global scan state for solo operator monitoring
 export let currentScanStatus: ScanStatus = {
@@ -114,6 +128,8 @@ export async function startCrawlerScan(targetPortalId?: string, awaitCompletion:
   broadcastProgress();
 
   const scanExecution = async () => {
+    // Per-scan document budget: time for upfront fetches and a Gemini Vision call cap (docs/13 §3.2).
+    beginScanBudget();
     try {
       const activeTracks = getAllDomainTracks().filter(t => t.is_active === 1);
 
@@ -140,6 +156,11 @@ export async function startCrawlerScan(targetPortalId?: string, awaitCompletion:
           } else {
             const rawItems = scrapeResult.items;
             let itemsMatched = 0;
+            const budgetNow = getActiveScanBudget();
+            if (budgetNow) {
+              currentScanStatus.documentsDeferred = budgetNow.documentsDeferred;
+              currentScanStatus.visionDeferred = budgetNow.visionDeferred;
+            }
 
             for (const item of rawItems) {
               try {
@@ -188,6 +209,9 @@ export async function startCrawlerScan(targetPortalId?: string, awaitCompletion:
         }
       }
     } finally {
+      const budget = endScanBudget();
+      currentScanStatus.documentsDeferred = budget?.documentsDeferred ?? 0;
+      currentScanStatus.visionDeferred = budget?.visionDeferred ?? 0;
       currentScanStatus.isScanning = false;
       currentScanStatus.currentPortal = null;
       currentScanStatus.lastScanTimestamp = new Date().toISOString();
@@ -246,6 +270,9 @@ import {
   formatClosingDate,
   normalizeExtractedDate,
   reconcileDeadline,
+  resolveCanonicalDeadline,
+  inferPublishDateFromUrl,
+  type DeadlineSignal,
   DATE_CANDIDATE_PATTERN,
   extractDatesFromText
 } from './dateParser.js';
@@ -1237,8 +1264,52 @@ export function matchTracks(
 }
 
 /**
- * Matches scraped tender against active domain tracks and handles deduplication
+ * Re-scores a tender's tracks using the scope of work read from its documents (docs/13 §2.5).
+ *  - A tender may GAIN tracks the document text matches.
+ *  - It never loses a track matched by an exact keyword in the listing; a semantic-only track is
+ *    dropped if it no longer matches once the document text is included.
+ *  - A track's negative keyword found in the document text removes that track.
+ * If every track would be removed, the original tracks are kept and `excludedBy` explains why,
+ * so the caller can flag the tender for review instead of silently dropping it.
  */
+export function applyDocumentScopeToTracks(
+  base: { matchedTracks: string[]; matchedKeywords: string[] },
+  item: Pick<RawScrapedItem, 'title' | 'organization' | 'description' | 'referenceNo' | 'directUrl'>,
+  scopeText: string,
+  activeTracks: any[]
+): { tracks: string[]; keywords: string[]; excludedBy: string[]; changed: boolean } {
+  const unchanged = { tracks: base.matchedTracks, keywords: base.matchedKeywords, excludedBy: [] as string[], changed: false };
+  if (!scopeText || !scopeText.trim()) return unchanged;
+
+  const withScope = matchTracks({ ...item, description: `${item.description || ''} ${scopeText}` } as RawScrapedItem, activeTracks);
+  const scopeLower = scopeText.toLowerCase();
+  const listingText = `${item.title} ${item.description || ''} ${item.organization || ''} ${item.referenceNo || ''}`.toLowerCase();
+
+  const tracks: string[] = [];
+  const excludedBy: string[] = [];
+  for (const track of activeTracks) {
+    const inBase = base.matchedTracks.includes(track.name);
+    const inScope = withScope.matchedTracks.includes(track.name);
+    if (!inBase && !inScope) continue;
+    const negative = (track.negative_keywords || []).find((n: string) => scopeLower.includes(String(n).toLowerCase()));
+    if (negative) {
+      excludedBy.push(`${track.name} ("${negative}")`);
+      continue;
+    }
+    const keywordMatchedInListing = inBase && (track.positive_keywords || []).some((k: string) => listingText.includes(String(k).toLowerCase()));
+    if (keywordMatchedInListing || inScope) tracks.push(track.name);
+  }
+  // Tracks from the listing that are no longer active are left as they were.
+  for (const name of base.matchedTracks) {
+    if (!activeTracks.some(t => t.name === name) && !tracks.includes(name)) tracks.push(name);
+  }
+
+  if (tracks.length === 0) return { ...unchanged, excludedBy };
+  const keywords = Array.from(new Set([...base.matchedKeywords, ...withScope.matchedKeywords]));
+  const changed = tracks.length !== base.matchedTracks.length || tracks.some(t => !base.matchedTracks.includes(t));
+  return { tracks, keywords, excludedBy, changed };
+}
+
 /**
  * Rule B6c helper: true when the text mentions at least one year from 2010 up to last calendar
  * year and no current or future year. The window moves with the clock (it used to be hard-coded
@@ -1353,90 +1424,95 @@ export async function processAndSaveTender(
     formattedDate = formatClosingDate(item.closingDate || null);
   }
 
-  // Collect all downloadable attachment candidates (including direct document URLs)
-  const isDirectDoc = Boolean(
-    item.directUrl &&
-    (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(item.directUrl) || /[?&]wpdmdl=\d+/i.test(item.directUrl))
-  );
-  const attachmentCandidates: string[] = [...(item.attachmentUrls || [])];
-  if (isDirectDoc && !attachmentCandidates.includes(item.directUrl)) {
-    attachmentCandidates.unshift(item.directUrl);
+  // ---- Document ingest (docs/13-ingestion-pipeline-plan.md, Phase 3) ----
+  const isDirectDoc = isDirectDocumentUrl(item.directUrl);
+  const candidates = orderDocumentCandidates(item);
+
+  // Upfront (blocking) fetch only when the documents are needed to decide Rule B6: the tender
+  // has no deadline yet, or its link IS the document. Dated tenders insert straight away and
+  // their documents are fetched by the background worker.
+  const needsUpfront = (!item.closingDate || isDirectDoc) && candidates.length > 0;
+  const upfront = needsUpfront && hasUpfrontTime()
+    ? await fetchAndReadDocumentsUpfront(tenderId, item, candidates.slice(0, UPFRONT_MAX_DOCS))
+    : { dossiers: [] as CachedDossier[], extractions: [] as UpfrontExtraction[], failedUrls: [] as string[], visionPendingUrls: [] as string[] };
+  const fetchedUrls = new Set(upfront.dossiers.map(d => d.originalUrl));
+  const toQueue = candidates.filter(u => !fetchedUrls.has(u) || upfront.visionPendingUrls.includes(u));
+  if (needsUpfront && !hasUpfrontTime()) noteDeferredDocuments(candidates.length);
+
+  // Resolve the deadline from the listing and every document read (later wins; corrigenda may
+  // move it earlier but are flagged; document time beats a listing's default time).
+  const signals: DeadlineSignal[] = upfront.extractions.map(({ result }) => ({
+    date: result.closingDateISO,
+    source: result.docType === 'corrigendum' ? 'corrigendum_doc' : 'primary_doc',
+    confidence: result.confidence,
+    canAutoExpire: result.canAutoExpire,
+    cancelled: result.isCancellation
+  }));
+  const resolved = resolveCanonicalDeadline(item.closingDate ? { date: item.closingDate, source: 'html_row' } : null, signals);
+  let needsReview = resolved.needsReview;
+  let reviewReason = resolved.reviewReason;
+  if (resolved.closingDate && resolved.closingDate !== item.closingDate) {
+    item.closingDate = resolved.closingDate;
+    const winning = upfront.extractions.find(e => e.result.closingDateISO === resolved.closingDate);
+    formattedDate = winning?.result.closingDateFormatted && winning.result.closingDateFormatted !== 'Not Available'
+      ? winning.result.closingDateFormatted
+      : formatClosingDate(resolved.closingDate);
   }
 
-  // Pre-save document fetch & metadata extraction:
-  // When tender lacks closing date, reference, or description and has documents,
-  // fetch primary document upfront so real deadlines and scopes are known before committing to DB.
-  let preCachedDossier: CachedDossier | null = null;
-  if ((!item.closingDate || isDirectDoc) && attachmentCandidates.length > 0) {
-    const primaryUrl = attachmentCandidates[0];
-    const isImage = /\.(jpe?g|png|webp)(\?|$)/i.test(primaryUrl);
-    const label = isImage ? 'Tender Notice Image' : deriveDossierLabel(primaryUrl, `${item.title.slice(0, 30)}_Doc`);
-    try {
-      const doc = await crawlerDeps.downloadAndCacheDossier(tenderId, primaryUrl, label);
-      if (doc) {
-        preCachedDossier = doc;
-        if (doc.mimeType.startsWith('image/') || doc.mimeType === 'application/pdf') {
-          try {
-            const fs = await import('fs');
-            const path = await import('path');
-            const filename = decodeURIComponent(path.basename(doc.localPath));
-            const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
-            if (fs.existsSync(diskPath)) {
-              const imgBuffer = fs.readFileSync(diskPath);
-              const ocrResult = await extractTenderFromImage(imgBuffer, doc.mimeType);
-              if (ocrResult) {
-                // Normalize the model's date and keep the later of listing vs document deadline,
-                // so a stale attachment cannot override an extended listing deadline.
-                const resolved = reconcileDeadline(item.closingDate, ocrResult.closingDateISO);
-                if (resolved.closingDate && resolved.closingDate !== item.closingDate) {
-                  item.closingDate = resolved.closingDate;
-                  formattedDate = ocrResult.closingDateFormatted || formatClosingDate(resolved.closingDate);
-                }
-                if (ocrResult.referenceNo && !item.referenceNo) {
-                  item.referenceNo = ocrResult.referenceNo;
-                }
-                if (ocrResult.summaryScope && (!item.description || item.description === item.title)) {
-                  item.description = ocrResult.summaryScope;
-                }
-                if (ocrResult.estimatedValue && !item.estimatedValue) {
-                  item.estimatedValue = ocrResult.estimatedValue;
-                }
-              }
-            }
-          } catch (ocrErr: any) {
-            console.warn(`[OCR] Ingest extraction error for ${tenderId}:`, ocrErr.message);
-          }
-        }
-      }
-    } catch (fetchErr: any) {
-      console.warn(`[CrawlIngest] Document pre-fetch warning for ${tenderId}:`, fetchErr.message);
+  // Fill missing fields from the documents (corrigenda first, then primary documents).
+  const descriptionBeforeDocs = item.description;
+  for (const { result } of [...upfront.extractions].sort((a, b) => Number(b.result.isCorrigendum) - Number(a.result.isCorrigendum))) {
+    if (result.referenceNo && !item.referenceNo) item.referenceNo = result.referenceNo;
+    if (result.estimatedValue && !item.estimatedValue) item.estimatedValue = result.estimatedValue;
+    if (result.summaryScope && (!item.description || item.description === item.title)) item.description = result.summaryScope;
+  }
+
+  // Re-score tracks with the documents' scope of work (Phase 2.5).
+  const scopeText = upfront.extractions.map(e => e.result.scopeText).filter(Boolean).join(' ').slice(0, 3000);
+  let finalTracks = matchedTracks;
+  let finalKeywords = matchedKeywords;
+  if (scopeText) {
+    const rescored = applyDocumentScopeToTracks({ matchedTracks, matchedKeywords }, item, scopeText, activeTracks);
+    finalTracks = rescored.tracks;
+    finalKeywords = rescored.keywords;
+    if (rescored.excludedBy.length && rescored.tracks === matchedTracks) {
+      needsReview = true;
+      reviewReason = reviewReason || `excluded_terms_in_documents: ${rescored.excludedBy.join(', ')}`;
     }
   }
 
-  // B6: Skip saving new opportunities if closing date is already in the past
+  // B6: past deadline.
   if (item.closingDate) {
     const closingTime = new Date(item.closingDate).getTime();
     if (!isNaN(closingTime) && closingTime < Date.now()) {
-      if (preCachedDossier) {
-        purgeTenderFiles([tenderId]);
+      if (resolved.canAutoExpire) {
+        if (upfront.dossiers.length) purgeTenderFiles([tenderId]);
+        try {
+          recordTenderSuppression(tenderId, canonicalId, item.closingDate);
+        } catch {}
+        return { isNew: false, hasCorrigendum: false, matched: true };
       }
-      try {
-        recordTenderSuppression(tenderId, canonicalId, item.closingDate);
-      } catch {}
-      return { isNew: false, hasCorrigendum: false, matched: true };
+      // Past, but either flagged by a corrigendum or read with too little certainty to delete on:
+      // keep it visible and flagged so the operator decides (I3, decision 1).
+      if (!needsReview) {
+        needsReview = true;
+        reviewReason = `uncertain_past_deadline: a document suggests ${formatClosingDate(item.closingDate)}, but it could not be confirmed`;
+      }
     }
   }
 
-  // B6b: Skip historical tenders published >90 days ago that have no known closing date.
-  // A tender with a valid future deadline (e.g. one extended by corrigendum) is always kept.
-  // Past deadlines were already rejected by B6 above.
-  if (!item.closingDate && item.publishDate) {
-    const pubTime = new Date(item.publishDate).getTime();
-    if (!isNaN(pubTime) && (Date.now() - pubTime > 90 * 86400000)) {
-      if (preCachedDossier) {
-        purgeTenderFiles([tenderId]);
-      }
-      // Suppress so the next scan does not re-download and re-OCR the same stale notice.
+  // B6b: old, undated notices. An explicit publish date over 90 days old rejects. A date only
+  // inferred from an upload folder rejects only if no document could be read (old uploads are
+  // often reused as templates for new notices).
+  const inferredPublishDate = item.publishDate ? null : inferPublishDateFromUrl(item.directUrl) || candidates.map(inferPublishDateFromUrl).find(Boolean) || null;
+  if (!item.closingDate) {
+    const explicitAge = item.publishDate ? Date.now() - new Date(item.publishDate).getTime() : NaN;
+    const inferredAge = inferredPublishDate ? Date.now() - new Date(`${inferredPublishDate}T23:59:59+05:00`).getTime() : NaN;
+    const stale = (!isNaN(explicitAge) && explicitAge > 90 * 86400000) ||
+      (!isNaN(inferredAge) && inferredAge > 90 * 86400000 && upfront.extractions.every(e => e.result.textChars === 0 && !e.result.closingDateISO));
+    if (stale) {
+      if (upfront.dossiers.length) purgeTenderFiles([tenderId]);
+      // Suppress so the next scan does not re-download and re-read the same stale notice.
       try { recordTenderSuppression(tenderId, canonicalId, null); } catch {}
       return { isNew: false, hasCorrigendum: false, matched: true };
     }
@@ -1444,12 +1520,18 @@ export async function processAndSaveTender(
 
   // B6c: Skip undated tenders that only reference previous calendar years (e.g. "Tender 2025")
   if (!item.closingDate && referencesOnlyPriorYears(`${item.title} ${item.directUrl}`)) {
-    if (preCachedDossier) {
-      purgeTenderFiles([tenderId]);
-    }
+    if (upfront.dossiers.length) purgeTenderFiles([tenderId]);
     try { recordTenderSuppression(tenderId, canonicalId, null); } catch {}
     return { isNew: false, hasCorrigendum: false, matched: true };
   }
+
+  // Re-embed only when the documents added text (scope of work or a filled-in description).
+  const embeddingBuf = scopeText || item.description !== descriptionBeforeDocs
+    ? (await embedTextToBlobAsync(buildTenderEmbeddingText({ ...item, description: `${item.description || ''} ${scopeText}`.trim() }))) || tenderEmbeddingBuf
+    : tenderEmbeddingBuf;
+  const deadlineSource = item.closingDate ? (resolved.source || 'html_row') : null;
+  const deadlineConfidence = item.closingDate ? (resolved.confidence || (deadlineSource === 'html_row' ? null : 'medium')) : null;
+  const docFetchStatus = toQueue.length > 0 ? 'pending' : upfront.dossiers.length > 0 ? 'complete' : upfront.failedUrls.length > 0 ? 'failed' : 'none';
 
   // Insert as new Tender wrapped in a transaction
   const insertTx = db.transaction(() => {
@@ -1457,17 +1539,18 @@ export async function processAndSaveTender(
       INSERT INTO tenders (
         id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
         domain_tracks, matched_keywords, match_score, semantic_score, embedding, publish_date, closing_date, closing_date_formatted,
-        estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity')
+        estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status,
+        ingestion_status, deadline_source, deadline_confidence, doc_fetch_status, needs_review, review_reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Opportunity', 'ready', ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         match_score = excluded.match_score,
         semantic_score = excluded.semantic_score,
         embedding = COALESCE(excluded.embedding, tenders.embedding),
         domain_tracks = excluded.domain_tracks,
         matched_keywords = excluded.matched_keywords,
-        cached_dossiers = CASE 
-          WHEN excluded.cached_dossiers != '[]' THEN excluded.cached_dossiers 
-          ELSE tenders.cached_dossiers 
+        cached_dossiers = CASE
+          WHEN excluded.cached_dossiers != '[]' THEN excluded.cached_dossiers
+          ELSE tenders.cached_dossiers
         END,
         updated_at = CURRENT_TIMESTAMP
     `);
@@ -1481,100 +1564,147 @@ export async function processAndSaveTender(
       portal.id,
       portal.name,
       item.directUrl,
-      JSON.stringify(matchedTracks),
-      JSON.stringify(Array.from(new Set(matchedKeywords))),
+      JSON.stringify(finalTracks),
+      JSON.stringify(Array.from(new Set(finalKeywords))),
       matchScore,
       semanticScore ?? 0,
-      tenderEmbeddingBuf,
-      // Unknown publish dates stay NULL: defaulting to today made old archive items look fresh
-      // and reset their age on every re-import. Ageing falls back to created_at instead.
-      item.publishDate || null,
+      embeddingBuf,
+      // Unknown publish dates are never defaulted to today (that made old archive items look
+      // fresh). A CMS upload-folder month is used as an upper-bound fallback; otherwise NULL and
+      // ageing falls back to created_at.
+      item.publishDate || inferredPublishDate || null,
       item.closingDate || null,
       formattedDate,
       item.estimatedValue || null,
       item.location || 'Pakistan',
       item.description ?? '',
-      preCachedDossier ? JSON.stringify([preCachedDossier]) : '[]',
-      item.isCorrigendum ? 1 : 0
+      JSON.stringify(upfront.dossiers),
+      item.isCorrigendum || resolved.isExtension ? 1 : 0,
+      deadlineSource,
+      deadlineConfidence,
+      docFetchStatus,
+      needsReview ? 1 : 0,
+      reviewReason
     );
   });
 
   insertTx();
 
-  // If there are secondary or remaining attachments, download in background
-  const remainingUrls = preCachedDossier
-    ? attachmentCandidates.filter(u => u !== attachmentCandidates[0])
-    : attachmentCandidates;
-
-  if (remainingUrls.length > 0) {
-    const firstUrl = remainingUrls[0];
-    const isImage = /\.(jpe?g|png|webp)(\?|$)/i.test(firstUrl);
-    const label = isImage ? 'Tender Notice Image' : deriveDossierLabel(firstUrl, `${item.title.slice(0, 30)}_Doc`);
-    crawlerDeps.downloadAndCacheDossier(tenderId, firstUrl, label).then(async (doc) => {
-      if (doc) {
-        // Late-download guard (Finding F5): check if tender was deleted or passed while download was in-flight
-        const currentTender = db.prepare('SELECT id, pipeline_status, is_bookmarked, cached_dossiers, closing_date, reference_no, description, estimated_value FROM tenders WHERE id = ?').get(tenderId) as any;
-        if (!currentTender || currentTender.pipeline_status === 'Passed') {
-          purgeTenderFiles([tenderId]);
-          return;
-        }
-
-        const existingDossiers: CachedDossier[] = safeJsonParse(currentTender.cached_dossiers, []);
-        if (!existingDossiers.some(d => d.sha256 === doc.sha256 || d.localPath === doc.localPath)) {
-          existingDossiers.push(doc);
-          db.prepare('UPDATE tenders SET cached_dossiers = ? WHERE id = ?').run(JSON.stringify(existingDossiers), tenderId);
-        }
-
-        // If document is an image or PDF and tender lacks date, reference, or summary, attempt Gemini extraction
-        if ((doc.mimeType.startsWith('image/') || doc.mimeType === 'application/pdf') && (!currentTender.closing_date || !currentTender.reference_no || !currentTender.description)) {
-          try {
-            const fs = await import('fs');
-            const path = await import('path');
-            const filename = decodeURIComponent(path.basename(doc.localPath));
-            const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
-            if (fs.existsSync(diskPath)) {
-              const imgBuffer = fs.readFileSync(diskPath);
-              const ocrResult = await extractTenderFromImage(imgBuffer, doc.mimeType);
-              if (ocrResult) {
-                if (ocrResult.closingDateISO) {
-                  // A past date in one attachment only expires the tender if no later deadline is
-                  // known, and never touches bookmarked or already-triaged tenders.
-                  const resolved = reconcileDeadline(currentTender.closing_date, ocrResult.closingDateISO);
-                  if (resolved.isExpired && currentTender.pipeline_status === 'New Opportunity' && !currentTender.is_bookmarked) {
-                    console.log(`[OCR] Tender ${tenderId} deadline is in the past (${resolved.closingDate}). Auto-expiring.`);
-                    deleteTenders([tenderId], 'auto-expired');
-                    return;
-                  }
-                  if (!currentTender.closing_date && resolved.closingDate) {
-                    db.prepare('UPDATE tenders SET closing_date = ?, closing_date_formatted = ? WHERE id = ?').run(
-                      resolved.closingDate,
-                      ocrResult.closingDateFormatted || formatClosingDate(resolved.closingDate),
-                      tenderId
-                    );
-                  }
-                }
-                if (ocrResult.referenceNo && !currentTender.reference_no) {
-                  db.prepare('UPDATE tenders SET reference_no = ? WHERE id = ?').run(ocrResult.referenceNo, tenderId);
-                }
-                if (ocrResult.summaryScope && (!currentTender.description || currentTender.description === item.title)) {
-                  // Clear the now-stale embedding; the background backfill re-embeds the new text.
-                  db.prepare('UPDATE tenders SET description = ?, embedding = NULL WHERE id = ?').run(ocrResult.summaryScope, tenderId);
-                }
-                if (ocrResult.estimatedValue && !currentTender.estimated_value) {
-                  db.prepare('UPDATE tenders SET estimated_value = ? WHERE id = ?').run(ocrResult.estimatedValue, tenderId);
-                }
-              }
-            }
-          } catch (ocrErr: any) {
-            console.warn('[OCR] Background extraction warning:', ocrErr.message);
-          }
-        }
-      }
-    }).catch(() => {});
+  // Everything not read upfront (dated tenders, remaining attachments, timeouts, scanned files
+  // waiting for Vision budget) goes to the durable retry queue for the background worker.
+  if (toQueue.length > 0) {
+    try {
+      enqueueDocumentJobs(tenderId, toQueue.map(url => ({ url, label: deriveDossierLabel(url, `${item.title.slice(0, 30)}_Doc`) })));
+      refreshTenderDocFetchStatus(tenderId);
+    } catch (err: any) {
+      console.warn(`[CrawlIngest] Could not queue documents for ${tenderId}:`, err.message);
+    }
   }
 
   return { isNew: true, hasCorrigendum: Boolean(item.isCorrigendum), matched: true };
 }
+
+// ---------------------------------------------------------------------------
+// Document ingest helpers
+// ---------------------------------------------------------------------------
+
+export const UPFRONT_MAX_DOCS = 2;
+export const MAX_DOCUMENTS_PER_TENDER = 5;
+
+export function isDirectDocumentUrl(url?: string | null): boolean {
+  return Boolean(url && (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url)));
+}
+
+/**
+ * Deduplicates a tender's document links (direct document first), sorts them so corrigenda are
+ * read before primary documents and those before everything else, and caps them at 5.
+ */
+export function orderDocumentCandidates(item: Pick<RawScrapedItem, 'directUrl' | 'attachmentUrls'>): string[] {
+  const urls: string[] = [];
+  if (isDirectDocumentUrl(item.directUrl)) urls.push(item.directUrl);
+  for (const u of item.attachmentUrls || []) if (u && !urls.includes(u)) urls.push(u);
+  return urls
+    .map((u, i) => ({ u, i, p: documentJobPriority(u) }))
+    .sort((a, b) => a.p - b.p || a.i - b.i)
+    .slice(0, MAX_DOCUMENTS_PER_TENDER)
+    .map(x => x.u);
+}
+
+export interface UpfrontExtraction {
+  dossier: CachedDossier;
+  result: DocumentExtractionResult;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  if (ms <= 0) return Promise.reject(new Error(`${label}: time budget exhausted`));
+  let timer: NodeJS.Timeout;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label}: timed out after ${Math.round(ms / 1000)}s`)), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** Reads a cached dossier's bytes from disk, or null if it is missing. */
+export function readCachedDossier(tenderId: string, dossier: CachedDossier): Buffer | null {
+  const filename = decodeURIComponent(path.basename(dossier.localPath || ''));
+  if (!filename) return null;
+  const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
+  if (!diskPath.startsWith(path.resolve(DOSSIERS_DIR) + path.sep) || !fs.existsSync(diskPath)) return null;
+  return fs.readFileSync(diskPath);
+}
+
+/**
+ * Downloads and reads up to UPFRONT_MAX_DOCS documents in parallel within a 20-second budget
+ * per tender. Downloads that fail or time out are returned for the queue; scanned documents the
+ * scan's Vision budget could not cover are returned so the worker reads them later.
+ */
+async function fetchAndReadDocumentsUpfront(
+  tenderId: string,
+  item: RawScrapedItem,
+  urls: string[]
+): Promise<{ dossiers: CachedDossier[]; extractions: UpfrontExtraction[]; failedUrls: string[]; visionPendingUrls: string[] }> {
+  const budgetEnd = Date.now() + INGEST_DEFAULTS.perTenderBudgetMs;
+  const maxBytes = getActiveScanBudget()?.maxFileBytes ?? maxFileBytes();
+  const dossiers: CachedDossier[] = [];
+  const extractions: UpfrontExtraction[] = [];
+  const failedUrls: string[] = [];
+  const visionPendingUrls: string[] = [];
+
+  await Promise.all(urls.map(async url => {
+    const isImage = /\.(jpe?g|png|webp)(\?|$)/i.test(url);
+    const label = isImage ? 'Tender Notice Image' : deriveDossierLabel(url, `${item.title.slice(0, 30)}_Doc`);
+    try {
+      const doc = await withTimeout(crawlerDeps.downloadAndCacheDossier(tenderId, url, label), budgetEnd - Date.now(), 'download');
+      if (!doc) {
+        failedUrls.push(url);
+        return;
+      }
+      dossiers.push(doc);
+      if ((doc.sizeBytes || 0) > maxBytes) return; // kept for the operator, too large to read
+      const buf = readCachedDossier(tenderId, doc);
+      if (!buf) return;
+      const result = await withTimeout(
+        extractFromDocument(buf, doc.mimeType, doc.label || label, {
+          title: item.title,
+          organization: item.organization,
+          allowVisionCall: tryConsumeScanVision
+        }),
+        budgetEnd - Date.now(),
+        'extract'
+      );
+      if (result.needsVision) visionPendingUrls.push(url);
+      extractions.push({ dossier: doc, result });
+    } catch (err: any) {
+      console.warn(`[CrawlIngest] Upfront document fetch for ${tenderId} deferred (${url}):`, err.message);
+      failedUrls.push(url);
+    }
+  }));
+
+  return { dossiers, extractions, failedUrls, visionPendingUrls };
+}
+
 
 /**
  * On-demand detail-page fetcher + Gemini AI analyzer for a single tender.
@@ -1715,8 +1845,12 @@ export async function fetchDocumentsForTender(
         if (fs.existsSync(diskPath)) {
           try {
             const buf = fs.readFileSync(diskPath);
-            const aiResult = await extractTenderFromImage(buf, doc.mimeType);
-            if (aiResult) {
+            // Local text first (digital PDFs/DOCX); Gemini Vision only for scans and images.
+            const aiResult = await extractFromDocument(buf, doc.mimeType, doc.label || '', {
+              title: tender.title,
+              organization: tender.organization
+            });
+            if (aiResult.closingDateISO || aiResult.referenceNo || aiResult.summaryScope) {
               if (aiResult.summaryScope && (!tender.description || tender.description === tender.title)) {
                 updates.description = aiResult.summaryScope;
               }
@@ -1724,7 +1858,16 @@ export async function fetchDocumentsForTender(
               if (aiResult.estimatedValue && !tender.estimated_value) updates.estimated_value = aiResult.estimatedValue;
               if (aiResult.closingDateISO) {
                 const resolved = reconcileDeadline(tender.closing_date, aiResult.closingDateISO);
-                if (resolved.isExpired && tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked) {
+                if (resolved.isExpired && !aiResult.canAutoExpire) {
+                  // Past, but read with too little certainty to delete on: leave the date alone and
+                  // let the operator decide.
+                  setTenderProvenance(tender.id, {
+                    needs_review: 1,
+                    review_reason: `uncertain_past_deadline: a document suggests ${formatClosingDate(resolved.closingDate)}, but it could not be confirmed`
+                  });
+                  break;
+                }
+                if (resolved.isExpired && tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked && !tender.needs_review) {
                   console.log(`[FetchDocs] Tender ${tender.id} extracted deadline is in the past (${resolved.closingDate}). Auto-expiring.`);
                   deleteTenders([tender.id], 'auto-expired');
                   // Signal the removal explicitly instead of returning a fake 'Deleted' tender,
@@ -1841,19 +1984,26 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
   }
 
   // 2. Run Gemini AI on the first cached image/PDF if available
-  let aiResult = null;
-  // Only a deadline read from the tender's own document may auto-expire it; a date inferred by the
-  // text summarizer from a title or snippet is too weak to delete an opportunity on.
+  let aiResult: OcrExtractedData | null = null;
+  // Only a deadline read from the tender's own document, with enough certainty, may auto-expire
+  // it; a date inferred by the text summarizer from a title or snippet is too weak to delete on.
   let aiResultFromDocument = false;
+  let documentCanAutoExpire = false;
   for (const doc of dossiers) {
     if (doc.mimeType?.startsWith('image/') || doc.mimeType === 'application/pdf') {
       const filename = decodeURIComponent(path.basename(doc.localPath));
       const diskPath = path.resolve(DOSSIERS_DIR, tender.id, filename);
       if (fs.existsSync(diskPath)) {
         const buf = fs.readFileSync(diskPath);
-        aiResult = await extractTenderFromImage(buf, doc.mimeType);
-        if (aiResult) {
+        // Local text first (digital PDFs/DOCX); Gemini Vision only for scans and images.
+        const docResult = await extractFromDocument(buf, doc.mimeType, doc.label || '', {
+          title: tender.title,
+          organization: tender.organization
+        });
+        if (docResult.closingDateISO || docResult.referenceNo || docResult.summaryScope) {
+          aiResult = docResult;
           aiResultFromDocument = true;
+          documentCanAutoExpire = docResult.canAutoExpire;
           break;
         }
       }
@@ -1888,7 +2038,7 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
         : (aiResult.closingDateFormatted || formatClosingDate(resolved.closingDate));
 
       // If the reconciled deadline is in the past and the opportunity is unreviewed & unbookmarked, auto-expire
-      if (resolved.isExpired && aiResultFromDocument && tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked) {
+      if (resolved.isExpired && aiResultFromDocument && documentCanAutoExpire && tender.pipeline_status === 'New Opportunity' && !tender.is_bookmarked && !tender.needs_review) {
         console.log(`[Analyze] Tender ${tender.id} extracted closing date is expired (${resolved.closingDate}). Auto-expiring.`);
         deleteTenders([tender.id], 'auto-expired');
         return null;

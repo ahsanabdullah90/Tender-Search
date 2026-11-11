@@ -893,4 +893,91 @@ describe('InboxScreen component', () => {
     expect(screen.queryByText('Solarization of District Headquarters Hospitals')).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
+
+  describe('Phase 4: provenance badges, review and document retry', () => {
+    const baseProps = {
+      tracks: sampleTracks,
+      corrigenda: [],
+      selectedTrack: 'All',
+      onSelectTrack: vi.fn(),
+      searchQuery: '',
+      onSearchChange: vi.fn(),
+      bookmarkedOnly: false,
+      onToggleBookmarked: vi.fn(),
+      corrigendumOnly: false,
+      onToggleCorrigendum: vi.fn(),
+      onStatusChange: vi.fn(),
+      onAcknowledgeCorrigendum: vi.fn(),
+      onSaveNotes: vi.fn(),
+      onToggleBookmark: vi.fn()
+    };
+
+    it('labels where each deadline came from', async () => {
+      const { deadlineProvenance } = await import('../../src/components/InboxScreen.js');
+      expect(deadlineProvenance({ closing_date: '2026-12-01T09:00:00Z', deadline_source: 'primary_doc', deadline_confidence: 'high' }).label).toBe('Document verified');
+      expect(deadlineProvenance({ closing_date: '2026-12-01T09:00:00Z', deadline_source: 'corrigendum_doc', deadline_confidence: 'high' }).label).toBe('Verified from corrigendum');
+      expect(deadlineProvenance({ closing_date: '2026-12-01T09:00:00Z', deadline_source: 'primary_doc', deadline_confidence: 'medium' }).tone).toBe('warn');
+      expect(deadlineProvenance({ closing_date: '2026-12-01T09:00:00Z', deadline_source: 'html_row', deadline_confidence: null }).label).toBe('Portal listing');
+      expect(deadlineProvenance({ closing_date: null, deadline_source: null, deadline_confidence: null }).label).toBe('No deadline · Portal HTML only');
+    });
+
+    it('turns review reasons into sentences', async () => {
+      const { humanReviewReason } = await import('../../src/components/InboxScreen.js');
+      expect(humanReviewReason('deadline_moved_earlier: 15 Dec 2026 → 05 Dec 2026')).toBe('A corrigendum moved the deadline earlier (15 Dec 2026 → 05 Dec 2026).');
+      expect(humanReviewReason('corrigendum_cancelled: x')).toMatch(/cancelled or withdrawn/);
+      expect(humanReviewReason(null)).toBe('Please check this tender.');
+    });
+
+    it('shows the provenance badge and "No deadline stated" in the detail pane', async () => {
+      const user = userEvent.setup();
+      const undated: Tender = { ...sampleTenders[0], closing_date: null, closing_date_formatted: 'Not Available', publish_date: new Date().toISOString().slice(0, 10) };
+      render(<InboxScreen {...baseProps} tenders={[undated]} />);
+      await user.click(screen.getAllByText(undated.title)[0]);
+      expect(screen.getAllByText('No deadline stated').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByTestId('deadline-provenance')).toHaveTextContent('No deadline · Portal HTML only');
+    });
+
+    it('flagged tenders come first, stay visible even when past, and can be confirmed', async () => {
+      const user = userEvent.setup();
+      const open: Tender = { ...sampleTenders[0], id: 't-open', title: 'Open Solar Tender' };
+      const flagged: Tender = {
+        ...sampleTenders[0],
+        id: 't-flag',
+        title: 'Flagged Solar Tender',
+        closing_date: new Date(Date.now() - 3600000).toISOString(),
+        needs_review: 1,
+        review_reason: 'deadline_moved_earlier: 15 Dec 2026 → 05 Nov 2026',
+        deadline_source: 'corrigendum_doc',
+        deadline_confidence: 'high'
+      };
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true, tender: { ...flagged, needs_review: 0, review_reason: null } }) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const { container } = render(<InboxScreen {...baseProps} tenders={[open, flagged]} />);
+      const rows = Array.from(container.querySelectorAll('[data-tender-id]')).map(el => el.getAttribute('data-tender-id'));
+      expect(rows[0]).toBe('t-flag');
+      expect(screen.getAllByText('Review').length).toBeGreaterThanOrEqual(1);
+
+      await user.click(screen.getAllByText('Flagged Solar Tender')[0]);
+      expect(screen.getByRole('alert')).toHaveTextContent('A corrigendum moved the deadline earlier');
+      await user.click(screen.getByRole('button', { name: 'Confirm' }));
+      expect(fetchMock).toHaveBeenCalledWith('/api/tenders/t-flag/review', expect.objectContaining({ method: 'PATCH' }));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      vi.unstubAllGlobals();
+    });
+
+    it('shows background fetching and a retry action for failed documents', async () => {
+      const user = userEvent.setup();
+      const failed: Tender = { ...sampleTenders[0], doc_fetch_status: 'failed' };
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true, requeued: 1, tender: { ...failed, doc_fetch_status: 'pending' }, message: 'Retrying 1 document(s) in the background.' }) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      render(<InboxScreen {...baseProps} tenders={[failed]} />);
+      await user.click(screen.getAllByText(failed.title)[0]);
+      await user.click(screen.getByRole('button', { name: /Retry document fetch/i }));
+      expect(fetchMock).toHaveBeenCalledWith('/api/tenders/tender-1/retry-documents', { method: 'POST' });
+      expect(screen.getByText(/Fetching documents in the background/)).toBeInTheDocument();
+      vi.unstubAllGlobals();
+    });
+  });
 });

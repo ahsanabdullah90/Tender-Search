@@ -126,6 +126,10 @@ export interface ScanStatus {
   newTendersFound: number;
   corrigendaFound: number;
   lastScanTimestamp: string | null;
+  /** Documents moved to the background queue because the scan's time budget was spent. */
+  documentsDeferred?: number;
+  /** Scanned documents waiting for Gemini Vision because the scan's Vision budget was spent. */
+  visionDeferred?: number;
 }
 
 
