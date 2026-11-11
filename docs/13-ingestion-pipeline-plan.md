@@ -8,7 +8,7 @@ Goal: move the **Scrape → Document Ingest → Verification → Inbox** pipelin
 
 ## Implementation status (2026-11-11)
 
-All phases are implemented. Phase 0 is in `5ae606c` and Phase 1 in `73ffc8f`; Phases 2–4 are listed below.
+All phases are implemented: Phase 0 in `5ae606c`, Phase 1 in `73ffc8f`, Phases 2–4 in `df1311a`. **Open items and follow-ups are tracked in [`docs/14-pending-issues.md`](14-pending-issues.md).**
 
 **Phase 2: document extractor & deadline rules** (`src/server/documentExtractor.ts`, `dateParser.ts`)
 - Local text via `pdfjs-dist@4.10.38` / `mammoth@1.13.0`; text chunks are joined by their position on the page, because naive joining split "202 6" and "SC HOOL".

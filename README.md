@@ -76,3 +76,5 @@ Full architectural and operational documentation is available in the [`docs/`](.
 - [10. Operator Guide for Daily Use](./docs/10-operator-guide.md)
 - [11. Configuration & Environment Variables](./docs/11-configuration-and-env.md)
 - [12. Architectural Decisions & Changelog](./docs/12-decisions-and-changelog.md)
+- [13. Ingestion Pipeline Plan & Status](./docs/13-ingestion-pipeline-plan.md)
+- [14. Pending Issues & Next-Run Backlog](./docs/14-pending-issues.md)
