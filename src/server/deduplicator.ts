@@ -79,6 +79,14 @@ function contentTokens(title: string): Set<string> {
  * three or more words of its own and only the semantic tier can judge (docs/16 A3).
  */
 export function titlesAreDistinguishable(a: string, b: string): boolean {
+  // Different lot, package, phase, or part identifiers are separate contracts and must stay distinct
+  const lotPattern = /\b(?:lot|package|pkg|phase|part)\s*[-:]?\s*([0-9a-z]+)\b/gi;
+  const lotsA = new Set([...a.matchAll(lotPattern)].map(m => m[1].toLowerCase()));
+  const lotsB = new Set([...b.matchAll(lotPattern)].map(m => m[1].toLowerCase()));
+  if (lotsA.size > 0 && lotsB.size > 0 && [...lotsA].some(l => !lotsB.has(l))) {
+    return true;
+  }
+
   const ta = contentTokens(a);
   const tb = contentTokens(b);
   const onlyA = [...ta].filter(t => !tb.has(t)).length;
