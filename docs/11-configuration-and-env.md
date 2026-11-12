@@ -57,7 +57,7 @@ C:\Tender_Tracker/
       routes/               # Modular Express domain routers (tenders, portals, tracks, scan, system)
       scrapers/             # Modular scrapers (htmlFetcher, crawlerDeps, portalParsers, tenderAnalysis, ingestPipeline, healer, crawlerEngine)
     ui/                     # Design system primitive UI components
-  tests/                    # Full test suite (34 test files, 525 tests across node & jsdom runners)
+  tests/                    # Full test suite (39 test files, 598 tests across node & jsdom runners)
   docs/                     # Comprehensive architecture and operational documentation
 ```
 

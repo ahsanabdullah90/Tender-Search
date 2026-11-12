@@ -2,7 +2,7 @@
 
 ## Test Tooling & Philosophy
 
-Tender Tracker uses **Vitest v4** with V8 code coverage. The test suite maintains **525 passing tests across 34 files** (~23 seconds total run time on `C:\Tender_Tracker`) organized into two isolated execution projects:
+Tender Tracker uses **Vitest v4** with V8 code coverage. The test suite maintains **598 passing tests across 39 files** (~24 seconds total run time on `C:\Tender_Tracker`) organized into two isolated execution projects:
 1. **`node` Project**: Tests pure TypeScript utilities, Pakistani date parsing & deadline reconciliation, local PDF/DOCX extraction (`documentExtractor.ts`), durable document queue & worker (`ingestJobsRepo.ts`, `ingestWorker.ts`), 3-tier deduplication & 384-D `all-MiniLM-L6-v2` tagged vector spaces, strict reference validation (`referenceNo.ts`), token-boundary matching (`trackMatcher.ts`), modular scrapers (`htmlFetcher.ts`, `portalParsers.ts`, `tenderAnalysis.ts`, `ingestPipeline.ts`, and orchestrator `crawlerEngine.ts`), portal contract tests (`portal-contracts.test.ts`), 7-rule guarded URL healer (`healer.ts`), 4-model Google Gemini failover & JSON repair logic, Express API routes, retention/reconciliation, and schedulers.
 2. **`jsdom` Project**: Tests React 19 UI components (`InboxScreen`, `Detail`, `AddTenderModal`, `TenderRow`, `PipelineScreen`, `SourcesScreen`, `App`), deadline provenance badges, review banners (`Confirm` / `Pass as cancelled`), ingest budget controls, modal dialogs, inline previews, and slide-overs using `@testing-library/react`.
 
@@ -24,6 +24,7 @@ tests/
   fixtures/
     portals/              # Sanitized static HTML fixtures (<= 50 KB each) + expected.json contracts
     documents/            # Programmatic synthetic PDF and .docx builders (buildFixtures.ts)
+    calibration/          # Labeled evaluation datasets (trackMatchPairs.ts, duplicatePairs.ts)
 ```
 
 ---
@@ -42,10 +43,10 @@ tests/
 ## Running Tests & Coverage
 
 ```powershell
-# Run full quality gate: TypeScript typecheck + all 525 tests across 34 suites
+# Run full quality gate: TypeScript typecheck + all 598 tests across 39 suites
 npm run verify
 
-# Run all unit, scraper, API, and UI tests (525 passing tests across 34 suites)
+# Run all unit, scraper, API, and UI tests (598 passing tests across 39 suites)
 npm test
 
 # Run tests in watch mode during development

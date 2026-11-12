@@ -42,7 +42,7 @@ Sample data is kept in `./data-sample/`, separate from `./data/`.
 ## Testing & Quality Assurance
 
 ```powershell
-# Run full quality gate (TypeScript type-check + all 525 tests across 34 suites)
+# Run full quality gate (TypeScript type-check + all 598 tests across 39 suites)
 npm run verify
 
 # Run all unit, scraper, API, and UI tests

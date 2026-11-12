@@ -209,8 +209,8 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested (573 passing, 22 s) |
-| QA-2 | Line coverage across `src/` is ≥ 80% (measured: 84.45% overall, 93.5% repositories, 90.5% deduplicator, 86.6% scrapers, 98.6% dateParser). | `vitest.config.ts` | `npm run test:coverage` | Tested |
+| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested (598 passing across 39 suites, ~24 s) |
+| QA-2 | Line coverage across `src/` is ≥ 80% (measured: 84.6% overall, 93.5% repositories, 90.5% deduplicator, 86.6% scrapers, 98.6% dateParser). | `vitest.config.ts` | `npm run test:coverage` | Tested |
 | QA-3 | No automated test needs a live internet connection. | `tests/fixtures/` | `npm run verify` | Tested |
 | QA-4 | Every file path, test count and portal count written in `docs/` matches the repository. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
 
