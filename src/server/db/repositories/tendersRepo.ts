@@ -582,6 +582,8 @@ export function updateTenderFields(
     location: string | null;
     cached_dossiers: any[];
     has_corrigendum: number;
+    deadline_source?: string | null;
+    deadline_confidence?: string | null;
   }>
 ): Tender | null {
   const existing = getTenderById(id);
@@ -590,6 +592,18 @@ export function updateTenderFields(
   const nextTitle = fields.title !== undefined ? fields.title : existing.title;
   const nextOrg = fields.organization !== undefined ? fields.organization : existing.organization;
   const nextDesc = fields.description !== undefined ? fields.description : existing.description;
+
+  const nextDeadlineSource = fields.deadline_source !== undefined
+    ? fields.deadline_source
+    : (fields.closing_date !== undefined && fields.closing_date !== existing.closing_date)
+      ? (fields.closing_date ? 'manual' : null)
+      : existing.deadline_source;
+
+  const nextDeadlineConfidence = fields.deadline_confidence !== undefined
+    ? fields.deadline_confidence
+    : (fields.closing_date !== undefined && fields.closing_date !== existing.closing_date)
+      ? (fields.closing_date ? 'high' : null)
+      : existing.deadline_confidence;
 
   // Only re-embed when the embedded text actually changed. Previously every update (including
   // fetch-documents and analyze, which only touch dossiers/dates) overwrote a MiniLM vector with
@@ -612,6 +626,8 @@ export function updateTenderFields(
         reference_no = ?,
         closing_date = ?,
         closing_date_formatted = ?,
+        deadline_source = ?,
+        deadline_confidence = ?,
         estimated_value = ?,
         description = ?,
         direct_url = ?,
@@ -627,6 +643,8 @@ export function updateTenderFields(
     fields.reference_no !== undefined ? fields.reference_no : existing.reference_no,
     fields.closing_date !== undefined ? fields.closing_date : existing.closing_date,
     fields.closing_date_formatted !== undefined ? fields.closing_date_formatted : existing.closing_date_formatted,
+    nextDeadlineSource,
+    nextDeadlineConfidence,
     fields.estimated_value !== undefined ? fields.estimated_value : existing.estimated_value,
     nextDesc,
     fields.direct_url !== undefined ? fields.direct_url : existing.direct_url,
@@ -700,8 +718,9 @@ export function createManualTender(input: {
     INSERT INTO tenders (
       id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
       domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
+      deadline_source, deadline_confidence,
       estimated_value, location, description, cached_dossiers, has_corrigendum, pipeline_status, embedding
-    ) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'New Opportunity', ?)
+    ) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'New Opportunity', ?)
   `).run(
     id,
     id,
@@ -716,6 +735,8 @@ export function createManualTender(input: {
     today,
     input.closing_date || null,
     input.closing_date_formatted || 'Not Available',
+    input.closing_date ? 'manual' : null,
+    input.closing_date ? 'high' : null,
     input.estimated_value || null,
     input.location || 'Pakistan',
     input.description ?? '',

@@ -121,7 +121,7 @@ Every requirement below exists to protect one of these.
 | DL-5 | All document-based deadline decisions go through `resolveCanonicalDeadline`; no other code path resolves a deadline. (B3) | `dateParser.ts`, `documentApply.ts` | `tests/unit/crawler-date.test.ts` | Tested |
 | DL-6 | A later valid date wins; on the same PKT day a document time beats the listing default of 14:00; an earlier date from a corrigendum flags the tender for review and does not overwrite silently. | `dateParser.ts` `resolveCanonicalDeadline` | `tests/unit/crawler-date.test.ts` | Tested |
 | DL-7 | Only a high- or medium-confidence deadline read from a document may auto-expire a tender (`canAutoExpire`). (G2) | `dateParser.ts`, `documentExtractor.ts` | `tests/unit/crawler-date.test.ts`, `document-extractor.test.ts` | Tested |
-| DL-8 | A lone unlabelled date, a query or pre-bid date, or a date elsewhere on a detail page is never used as the closing date. (A6, A7, A10) | `dateParser.ts` | `tests/unit/crawler-date.test.ts` | Tested |
+| DL-8 | A lone unlabelled date, a query or pre-bid date, or a date elsewhere on a detail page is never used as the closing date; pre-bid meeting notices are filtered before ingestion. (A6, A7, A10) | `dateParser.ts`, `portalParsers.ts` | `tests/unit/crawler-date.test.ts`, `tests/scraper/crawler.test.ts` | Tested |
 | DL-9 | Military time such as "1100 hrs" is parsed as 11:00, and years outside 2010 to current + 5 are rejected. (A8, A11) | `dateParser.ts` | `tests/unit/crawler-date.test.ts` | Tested |
 | DL-10 | A normal bidding document is not classified as a corrigendum or a cancellation. (A9) | `documentExtractor.ts` | `tests/unit/document-extractor.test.ts` | Tested |
 | DL-11 | No past-deadline tender sits in the Inbox unless it is bookmarked or flagged for review. (G2) | `retention.ts` | Query in §4 | Tested (0 rows) |
@@ -220,21 +220,21 @@ Every requirement below exists to protect one of these.
 
 These are measured by a command. Re-run the command and replace the value; never type in an estimate.
 
-| Measure | Value on 2026-11-11 | Command |
+| Measure | Value on 2026-11-12 | Command |
 |---|---|---|
 | TypeScript errors | 0 | `npm run lint` |
-| Tests passing | 573 of 573, 36 files, 22 s | `npm run verify` |
+| Tests passing | 601 of 601, 39 files, 38 s | `npm run verify` |
 | Production build | Builds | `npm run build` |
 | `db.prepare` outside `src/server/db/` | 0 | `Get-ChildItem src/server -Recurse -Filter *.ts \| Where-Object { $_.FullName -notmatch '\\db\\' } \| Select-String 'db\.prepare'` |
 | Unparseable `closing_date` rows | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND julianday(closing_date) IS NULL;` |
 | Deadlines with no `deadline_source` | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND deadline_source IS NULL;` |
 | Expired, unflagged Inbox rows | 0 | `SELECT COUNT(*) FROM tenders WHERE pipeline_status='New Opportunity' AND is_bookmarked=0 AND needs_review=0 AND ingestion_status='ready' AND closing_date IS NOT NULL AND julianday(closing_date) < julianday('now');` |
 | Portals tracked | 13 active (18 defined; 5 deleted by operator: `epads`, `giz`, `pid`, `tender_services`, `ungm`) | `SELECT COUNT(*) FROM portal_health;` |
-| Portals that returned items on their last scan | 8 of 13 | `SELECT COUNT(*) FROM portal_health WHERE last_items_found > 0;` |
-| Portals shown as "checked successfully" (`HLT-4`; includes one that returned 0 items) | 9 of 13 | `SELECT COUNT(*) FROM portal_health WHERE status='online';` |
-| Completed full scans | 0 | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` (no row) |
-| Tenders stored | 63 (57 `ready`, 6 `awaiting_scope`) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
-| Line coverage | 84.45% lines (82.68% statements, 81.09% functions, 73.49% branches) | `npm run test:coverage` |
+| Portals that returned items on their last scan | 9 of 13 | `SELECT COUNT(*) FROM portal_health WHERE last_items_found > 0;` |
+| Portals shown as "checked successfully" (`HLT-4`; includes one that returned 0 items) | 8 of 13 | `SELECT COUNT(*) FROM portal_health WHERE status='online';` |
+| Completed full scans | 1 (`2026-11-11T09:19:17.565Z`) | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` |
+| Tenders stored | 76 (75 `ready`, 1 `awaiting_scope`) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
+| Line coverage | 84.62% lines (82.84% statements, 81.67% functions, 73.59% branches) | `npm run test:coverage` |
 
 ---
 

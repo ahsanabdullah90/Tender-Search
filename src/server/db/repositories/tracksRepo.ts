@@ -1,5 +1,6 @@
 import { db, safeJsonParse } from '../connection.js';
 import { DomainTrack, CorrigendumLog } from '../../../types.js';
+import { containsKeyword } from '../../scrapers/trackMatcher.js';
 import {
   buildTrackEmbeddingText,
   buildTenderEmbeddingText,
@@ -119,11 +120,11 @@ export function reScoreTendersAgainstTracks() {
 
       for (const track of tracks) {
         // Stage 1: Hard Negative Keyword Gate (AI never overrides negative keywords)
-        const hasNegative = track.negative_keywords.some((neg: string) => combinedText.includes(neg.toLowerCase()));
+        const hasNegative = track.negative_keywords.some((neg: string) => containsKeyword(combinedText, neg));
         if (hasNegative) continue;
 
         // Stage 2: Exact Positive Keyword Check
-        const hitKeywords = track.positive_keywords.filter((pos: string) => combinedText.includes(pos.toLowerCase()));
+        const hitKeywords = track.positive_keywords.filter((pos: string) => containsKeyword(combinedText, pos));
 
         // Stage 3: Semantic Vector Similarity
         const sim = track.positive_keywords.length > 0

@@ -14,7 +14,6 @@ import { tryConsumeDailyAiText, tryConsumeDailyVision } from './ingestBudget.js'
  */
 
 export const MIN_TEXT_CHARS = 200;
-const MAX_PDF_PAGES = 5;
 
 export type ExtractionMethod = 'local_text_regex' | 'local_text_ai' | 'gemini_vision' | 'none';
 export type ExtractionConfidence = 'high' | 'medium' | 'low';
@@ -112,7 +111,7 @@ export async function extractDocumentText(buf: Buffer, mimeType: string = ''): P
     }).promise;
     try {
       const pages: string[] = [];
-      for (let p = 1; p <= Math.min(doc.numPages, MAX_PDF_PAGES); p++) {
+      for (let p = 1; p <= doc.numPages; p++) {
         const content = await (await doc.getPage(p)).getTextContent();
         pages.push(joinPdfTextItems(content.items as any[]));
       }
@@ -144,10 +143,10 @@ const SUBMISSION_ANCHOR = new RegExp(
   [
     'last\\s+date\\s+(?:and\\s+time\\s+)?(?:of|for)\\s+(?:the\\s+)?(?:submission|receipt|dropping)',
     'last\\s+date\\s+(?:and\\s+time\\s+)?(?:to|of)\\s+submit',
-    '(?:closing|due|submission)\\s+date(?:\\s+and\\s+time)?',
+    '(?:bid\\s+|tender\\s+)?(?:closing|due|submission)\\s+date(?:\\s+and\\s+time)?',
     'date\\s+of\\s+(?:bid\\s+|tender\\s+)?submission',
     'submission\\s+of\\s+(?:bids?|tenders?|proposals?|quotations?|eois?)[\\s:–-]{1,15}',
-    'deadline(?:\\s+for\\s+(?:the\\s+)?submission)?',
+    '(?:bid\\s+|tender\\s+)?deadline(?:\\s+for\\s+(?:the\\s+)?submission)?',
     '(?:bids?|tenders?|proposals?|quotations?|offers?|eois?|applications?)[^.\\n]{0,80}?\\b(?:shall|must|should|will|may|can)\\s+be\\s+(?:submitted|received|delivered|dropped|deposited|reach(?:ed)?)',
     'tender\\s+box\\s+(?:on\\s+or\\s+before|up\\s*to|till|until|by)',
     '(?:should|must|shall)\\s+reach',
@@ -228,6 +227,28 @@ export function findSubmissionDeadlines(rawText: string): string[] {
     const iso = combineDateAndTime(dm[0], window.slice(dm.index + dm[0].length));
     if (iso) found.add(iso);
   }
+
+  // Pre-anchor: date followed by "(by|on) or before [time]" (e.g. "October 28, 2026 by or before 03:00 PM")
+  const PRE_ANCHOR_TIME = /\b(?:by|on)\s+or\s+before\b/gi;
+  let pm: RegExpExecArray | null;
+  while ((pm = PRE_ANCHOR_TIME.exec(text))) {
+    const beforeWindow = text.slice(Math.max(0, pm.index - 60), pm.index);
+    DATE_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    let lastDateMatch: RegExpExecArray | null = null;
+    while ((match = DATE_RE.exec(beforeWindow))) {
+      lastDateMatch = match;
+    }
+    if (lastDateMatch) {
+      const between = beforeWindow.slice(lastDateMatch.index + lastDateMatch[0].length);
+      if (!NON_SUBMISSION_CONTEXT.test(between) && !NON_SUBMISSION_CONTEXT.test(beforeWindow.slice(0, lastDateMatch.index))) {
+        const afterAnchor = text.slice(pm.index + pm[0].length, pm.index + pm[0].length + 40);
+        const iso = combineDateAndTime(lastDateMatch[0], afterAnchor);
+        if (iso) found.add(iso);
+      }
+    }
+  }
+
   return Array.from(found).sort();
 }
 

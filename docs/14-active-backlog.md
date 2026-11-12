@@ -18,6 +18,13 @@ This document tracks **only active, unresolved items** requiring operator input,
 
 ## 2. Recently Completed Register Items (2026-11-11 / 2026-11-12)
 
+- **Item 10 (Full Multi-Page PDF Extraction & Tabular Pre-Anchor Deadlines `DL-7`, `DL-8`, `DOC-1`)**: Completed 2026-11-12.
+  - Removed the 5-page PDF truncation limit in `documentExtractor.ts` so all document pages are processed without skipping.
+  - Added pre-anchor deadline extraction for tabular notices (e.g. `<Date> by or before <Time>`) and space-tolerant date candidate matching.
+  - Added pre-bid meeting notice rejection in `isNonBidEvaluationOrPlanTitle` (`portalParsers.ts`) so informational meetings are not ingested as bid opportunities.
+  - Reprocessed local database, auto-expiring past PSDF tenders and removing non-bid meetings (0 expired unflagged inbox rows).
+  - Proven by `tests/unit/document-extractor.test.ts`, `tests/scraper/crawler.test.ts`, and full 600-test suite.
+
 - **Item 2 (Calibrate MiniLM Semantic Similarity Thresholds `P1-6`, `DED-7`, `MATCH-5`)**: Completed 2026-11-12.
   - Evaluated on 50 labeled tender↔track pairs (`tests/fixtures/calibration/trackMatchPairs.ts`) across 6 procurement domains and negative cross-domain samples. Achieved **$\text{F1} = 95.83\%$**, **$\text{Precision} = 100.0\%$**, **$\text{Recall} = 92.0\%$**, with **0 False Positives**.
   - Evaluated on 30 labeled duplicate/distinct pairs (`tests/fixtures/calibration/duplicatePairs.ts`). Identified and patched a multi-lot false-merge loophole in `titlesAreDistinguishable` (`deduplicator.ts`). Achieved **False-Merge Rate $= 0.00\%$** (0 false merges) and **$\text{Precision} = 100.0\%$**.

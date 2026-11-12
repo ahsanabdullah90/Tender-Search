@@ -70,6 +70,7 @@ describe('playwrightEngine & HITL orchestration', () => {
     };
 
     playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
+    vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(true);
 
     const result = await launchLocalBrowserHITL('epads');
     expect(result.success).toBe(true);
@@ -102,11 +103,29 @@ describe('playwrightEngine & HITL orchestration', () => {
     };
 
     playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
+    vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(true);
 
     const result = await launchLocalBrowserHITL('epads');
     expect(result.success).toBe(true);
     expect(result.isHeadlessFallback).toBe(true);
     expect(result.message).toContain('Open Federal PPRA');
+  });
+
+  it('returns direct link fallback when running in a headless environment without display', async () => {
+    const mockPlaywright = {
+      chromium: {
+        launchPersistentContext: vi.fn()
+      }
+    };
+
+    playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
+    vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(false);
+
+    const result = await launchLocalBrowserHITL('epads');
+    expect(result.success).toBe(true);
+    expect(result.isHeadlessFallback).toBe(true);
+    expect(result.message).toContain('Direct link provided');
+    expect(mockPlaywright.chromium.launchPersistentContext).not.toHaveBeenCalled();
   });
 
   it('creates SESSIONS_DIR if it does not exist on module load', async () => {

@@ -223,6 +223,10 @@ describe('Crawler Engine & Scraper Pipeline', () => {
           <img class="adver-thumbnail" src="https://psdf.org.pk/wp-content/uploads/2026/10/Notice.png" />
           <h4 class="listingadver-title1">Hiring of Training Service Providers for Youth Skills</h4>
         </div>
+        <div class="inner-advertisement-listing-box">
+          <img class="adver-thumbnail" src="https://psdf.org.pk/wp-content/uploads/2026/10/PreBid.png" />
+          <h4 class="listingadver-title1">Pre-Bid Meeting — Skills for Agriculture & Green Environment (SAGE) Programme</h4>
+        </div>
       `;
       const psdfRes = parsePortalHtml(psdfHtml, psdfPortal);
       expect(psdfRes.items.length).toBe(1);
@@ -274,6 +278,21 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       const tsRes = parsePortalHtml(tsUnauthHtml, tsPortal);
       expect(tsRes.hitlRequired).toBe(true);
       expect(tsRes.isLoginRequired).toBe(true);
+    });
+  });
+
+  describe('isNonBidEvaluationOrPlanTitle (DL-8)', () => {
+    it('detects evaluation reports, annual plans, and pre-bid meeting notices', () => {
+      expect(isNonBidEvaluationOrPlanTitle('Pre-Bid Meeting — Skills for Agriculture & Green Environment (SAGE) Programme')).toBe(true);
+      expect(isNonBidEvaluationOrPlanTitle('Minutes of Pre-bid Meeting held on 15 Oct')).toBe(true);
+      expect(isNonBidEvaluationOrPlanTitle('Technical Evaluation Report for IT Equipment')).toBe(true);
+      expect(isNonBidEvaluationOrPlanTitle('Financial Evaluation Report as per PPRA Rule 35')).toBe(true);
+      expect(isNonBidEvaluationOrPlanTitle('Annual Procurement Plan 2026-27')).toBe(true);
+
+      // Real open tenders must not be rejected
+      expect(isNonBidEvaluationOrPlanTitle('Hiring of Training Service Providers for Youth Skills')).toBe(false);
+      expect(isNonBidEvaluationOrPlanTitle('Procurement of Desktop Computers and IT Accessories')).toBe(false);
+      expect(isNonBidEvaluationOrPlanTitle('Invitation to Bid for Solar Power System')).toBe(false);
     });
   });
 

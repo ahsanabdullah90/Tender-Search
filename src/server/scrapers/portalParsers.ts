@@ -57,10 +57,10 @@ export function isNonBidEvaluationOrPlanTitle(title: string, url?: string): bool
     return true;
   }
 
-  // 2. Pre-bid minutes, procurement plans, templates, and non-tender notices
+  // 2. Pre-bid minutes, pre-bid meeting notices, procurement plans, templates, and non-tender notices
   if (
-    /^(?:minutes?\s+of\s+pre[- ]?bid|minuets?\s+of\s+meeting|mom\s+of\s+|annual\s+procurement\s+plan|cancellation(?:\s+notice)?|approval\s+mechanism|management\s+team\s+cv\s+format|cv\s+format|list\s+of\s+trades|manual\s+skills\s+scholarship\s+program\s+system|formats?)$/i.test(cleanTitle) ||
-    /\b(?:annual\s+procurement\s+plan|minutes?\s+of\s+pre[- ]?bid|minuets?\s+of\s+meeting)\b/i.test(combined)
+    /^(?:minutes?\s+of\s+pre[- ]?bid|minuets?\s+of\s+meeting|mom\s+of\s+|annual\s+procurement\s+plan|cancellation(?:\s+notice)?|approval\s+mechanism|management\s+team\s+cv\s+format|cv\s+format|list\s+of\s+trades|manual\s+skills\s+scholarship\s+program\s+system|formats?|pre[- ]?bid\s+meeting)\b/i.test(cleanTitle) ||
+    /\b(?:annual\s+procurement\s+plan|minutes?\s+of\s+pre[- ]?bid|minuets?\s+of\s+meeting|pre[- ]?bid\s+meeting)\b/i.test(combined)
   ) {
     return true;
   }

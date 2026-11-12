@@ -19,6 +19,14 @@ export interface HitlLaunchResult {
 export const playwrightDeps = {
   importPlaywright: async (): Promise<any> => {
     return (Function('m', 'return import(m)')('playwright') as Promise<any>).catch(() => null);
+  },
+  hasDisplay: (): boolean => {
+    return Boolean(
+      process.env.DISPLAY ||
+      process.env.WAYLAND_DISPLAY ||
+      process.platform === 'win32' ||
+      process.platform === 'darwin'
+    );
   }
 };
 
@@ -45,7 +53,7 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
   try {
     const playwright: any = await playwrightDeps.importPlaywright();
 
-    if (playwright && (process.env.DISPLAY || process.platform === 'win32' || process.platform === 'darwin')) {
+    if (playwright && playwrightDeps.hasDisplay()) {
       // Close any already open context for this portal
       if (activeHitlContexts.has(portalId)) {
         try {

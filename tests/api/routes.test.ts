@@ -547,8 +547,11 @@ describe('Server API Routes', () => {
     });
 
     it('rejects path traversal on /api/dossiers/:tenderId/:filename with 400', async () => {
-      const res = await request(app).get('/api/dossiers/..%2F..%2Fsecret/file.pdf');
-      expect(res.status).toBe(400);
+      const res1 = await request(app).get('/api/dossiers/..%2F..%2Fsecret/file.pdf');
+      expect(res1.status).toBe(400);
+
+      const res2 = await request(app).get('/api/dossiers/tender-1/..%2Fsecret.pdf');
+      expect(res2.status).toBe(400);
     });
   });
 
@@ -593,6 +596,8 @@ describe('Server API Routes', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.tender.title).toContain('Solar Photovoltaic Inverter');
       expect(res.body.tender.closing_date_formatted).toContain('15 Dec 2026');
+      expect(res.body.tender.deadline_source).toBe('manual');
+      expect(res.body.tender.deadline_confidence).toBe('high');
       expect(res.body.tender.domain_tracks.length).toBeGreaterThan(0);
       expect(res.body.tender.cached_dossiers.length).toBe(1);
     });
@@ -615,6 +620,8 @@ describe('Server API Routes', () => {
       expect(res.body.tender.title).toBe('Updated Tender Title');
       expect(res.body.tender.reference_no).toBe('REF-UPD-99');
       expect(res.body.tender.closing_date_formatted).toContain('30 Nov 2026');
+      expect(res.body.tender.deadline_source).toBe('manual');
+      expect(res.body.tender.deadline_confidence).toBe('high');
       expect(res.body.tender.description).toContain('Updated scope details');
     });
 
@@ -763,6 +770,17 @@ describe('Server API Routes', () => {
     it('starts server in production mode, serves fallback SPA index, and handles clean exit', async () => {
       const { startServer } = await import('../../server.js');
       const http = await import('http');
+      const fs = await import('fs');
+      const path = await import('path');
+      const distDir = path.resolve(__dirname, '../../dist');
+      const distIndex = path.resolve(distDir, 'index.html');
+      let createdDistFixture = false;
+      if (!fs.existsSync(distIndex)) {
+        fs.mkdirSync(distDir, { recursive: true });
+        fs.writeFileSync(distIndex, '<!DOCTYPE html><html><body><h1>Tender Tracker</h1></body></html>', 'utf-8');
+        createdDistFixture = true;
+      }
+
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
       process.env.NODE_ENV = 'production';
@@ -773,18 +791,27 @@ describe('Server API Routes', () => {
       expect(srv.listening).toBe(true);
 
       const port = (srv.address() as any).port;
-      await new Promise<void>((resolve) => {
-        http.get(`http://127.0.0.1:${port}/client-spa-route`, (res: any) => {
-          expect(res.statusCode).toBe(200);
-          expect(res.headers['content-type']).toContain('text/html');
-          resolve();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = http.get(`http://127.0.0.1:${port}/client-spa-route`, (res: any) => {
+            try {
+              expect(res.statusCode).toBe(200);
+              expect(res.headers['content-type']).toContain('text/html');
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          });
+          req.on('error', reject);
         });
-      });
-
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
-
-      process.env.NODE_ENV = prevEnv;
-      process.env.PORT = prevPort;
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        process.env.NODE_ENV = prevEnv;
+        process.env.PORT = prevPort;
+        if (createdDistFixture) {
+          try { fs.rmSync(distIndex, { force: true }); } catch {}
+        }
+      }
     });
 
     it('starts server in development mode and integrates Vite middleware', async () => {

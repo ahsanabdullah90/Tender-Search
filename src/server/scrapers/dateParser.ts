@@ -184,11 +184,13 @@ export function formatClosingDate(isoDate: string | null): string {
     return d.toLocaleDateString('en-GB', {
       day: '2-digit',
       month: 'short',
-      year: 'numeric'
+      year: 'numeric',
+      timeZone: 'Asia/Karachi'
     }) + ', ' + d.toLocaleTimeString('en-US', {
       hour: '2-digit',
       minute: '2-digit',
-      hour12: true
+      hour12: true,
+      timeZone: 'Asia/Karachi'
     }) + ' PKT';
   } catch {
     return 'Not Available';
@@ -416,7 +418,7 @@ export function inferPublishDateFromUrl(url: string | null | undefined): string 
   return `${m[1]}-${m[2]}-${String(lastDay).padStart(2, '0')}`;
 }
 
-export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:st|nd|rd|th)?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
+export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:st|nd|rd|th)?(?:\\s*,|\\s*,\\s*|[-/.\\s]+)\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
 
 /**
  * Extracts and disambiguates publish dates vs closing dates using labels and chronological sorting (Bug B7)

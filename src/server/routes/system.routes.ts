@@ -25,10 +25,14 @@ export const systemRouter = Router();
 // 0. Dossier Static File Serving with Path-Traversal Guard
 systemRouter.get('/dossiers/:tenderId/:filename', (req, res) => {
   const { tenderId, filename } = req.params;
-  const resolvedRoot = path.resolve(DOSSIERS_DIR);
-  const filePath = path.resolve(DOSSIERS_DIR, tenderId, filename);
+  const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+  const filePath = path.resolve(tenderDir, filename);
 
-  if (!filePath.startsWith(resolvedRoot + path.sep)) {
+  if (
+    path.basename(filename) !== filename ||
+    path.basename(tenderId) !== tenderId ||
+    !filePath.startsWith(tenderDir + path.sep)
+  ) {
     return res.status(400).send('Invalid dossier path');
   }
 

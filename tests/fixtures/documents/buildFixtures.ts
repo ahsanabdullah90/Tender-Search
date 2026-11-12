@@ -4,17 +4,40 @@
  * array produces a page with no text, which behaves like a scanned document.
  */
 export function makePdf(lines: string[]): Buffer {
+  return makeMultiPagePdf([lines]);
+}
+
+export function makeMultiPagePdf(pages: string[][]): Buffer {
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
-  const content = lines.length
-    ? `BT /F1 10 Tf 40 800 Td 12 TL\n${lines.map(l => `(${esc(l)}) Tj T*`).join('\n')}\nET`
-    : '';
+  const pageObjects: string[] = [];
+  const contentObjects: string[] = [];
+  const fontObjNum = 3;
+  const numPages = pages.length;
+  const pageObjNums: number[] = [];
+
+  for (let i = 0; i < numPages; i++) {
+    const pageNum = 4 + i * 2;
+    const contentNum = 5 + i * 2;
+    pageObjNums.push(pageNum);
+    const lines = pages[i];
+    const content = lines.length
+      ? `BT /F1 10 Tf 40 800 Td 12 TL\n${lines.map(l => `(${esc(l)}) Tj T*`).join('\n')}\nET`
+      : '';
+    pageObjects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ${contentNum} 0 R /Resources << /Font << /F1 ${fontObjNum} 0 R >> >> >>`);
+    contentObjects.push(`<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`);
+  }
+
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
-    `<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`,
+    `<< /Type /Pages /Kids [${pageObjNums.map(n => `${n} 0 R`).join(' ')}] /Count ${numPages} >>`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'
   ];
+
+  for (let i = 0; i < numPages; i++) {
+    objects.push(pageObjects[i]);
+    objects.push(contentObjects[i]);
+  }
+
   let pdf = '%PDF-1.4\n';
   const offsets: number[] = [];
   objects.forEach((body, i) => {

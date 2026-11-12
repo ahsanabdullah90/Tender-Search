@@ -9,7 +9,7 @@ import {
   findEstimatedValue,
   findScopeText
 } from '../../src/server/documentExtractor.js';
-import { makePdf, makeDocx, FILLER } from '../fixtures/documents/buildFixtures.js';
+import { makePdf, makeMultiPagePdf, makeDocx, FILLER } from '../fixtures/documents/buildFixtures.js';
 
 const pkt = (iso: string) => new Date(iso).toISOString();
 
@@ -47,6 +47,10 @@ describe('documentExtractor (Phase 2)', () => {
       expect(findSubmissionDeadlines('submission deadline: 15-12-2026 at 1430 hrs')).toEqual([pkt('2026-12-15T14:30:00+05:00')]);
       expect(findSubmissionDeadlines('closing date: 15-12-2026 at 1430 hours')).toEqual([pkt('2026-12-15T14:30:00+05:00')]);
       expect(findSubmissionDeadlines('last date for submission: 15-12-2026 at 11:00 AM')).toEqual([pkt('2026-12-15T11:00:00+05:00')]);
+
+      // Tabular pre-anchor dates: "<Date> by or before <Time>"
+      expect(findSubmissionDeadlines('Provision of Trainers October 28, 2026 by or before 03:00 PM')).toEqual([pkt('2026-10-28T15:00:00+05:00')]);
+      expect(findSubmissionDeadlines('Last Date of Submission of Association Form March 10 , 2026 at 11:00 AM')).toEqual([pkt('2026-03-10T11:00:00+05:00')]);
     });
 
     it('returns several distinct deadlines when a document is ambiguous', () => {
@@ -69,6 +73,27 @@ describe('documentExtractor (Phase 2)', () => {
       const doc = await extractDocumentText(pdf, 'application/pdf');
       expect(doc.kind).toBe('pdf');
       expect(doc.text).toContain('Last date for submission of bids: 25-11-2026');
+    });
+
+    it('reads all pages of a multi-page PDF without truncating at page 5', async () => {
+      const pages = [
+        [...FILLER, 'Page 1 Scope of Work'],
+        ['Page 2 Terms and conditions'],
+        ['Page 3 Technical evaluation criteria'],
+        ['Page 4 Financial criteria'],
+        ['Page 5 Submission instructions'],
+        ['Page 6 Annexures and declarations'],
+        ['Page 7: Last date for submission of bids is 30-12-2026 at 11:00 AM']
+      ];
+      const pdf = makeMultiPagePdf(pages);
+      const doc = await extractDocumentText(pdf, 'application/pdf');
+      expect(doc.pages).toBe(7);
+      expect(doc.text).toContain('Last date for submission of bids is 30-12-2026');
+
+      const extracted = await extractFromDocument(pdf, 'application/pdf', 'Multi-Page RFP');
+      expect(extracted.closingDateISO).toBe(pkt('2026-12-30T11:00:00+05:00'));
+      expect(extracted.confidence).toBe('high');
+      expect(extracted.canAutoExpire).toBe(true);
     });
 
     it('reads a .docx file', async () => {
