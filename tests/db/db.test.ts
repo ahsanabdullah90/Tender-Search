@@ -435,6 +435,16 @@ describe('Database and Repository Layer', () => {
       expect(stats.inPipeline).toBe(1);
     });
 
+    it('HLT-4: counts online portals in KPI stats and excludes selector_broken portals', () => {
+      // Set one portal to online and one to selector_broken
+      db.prepare(`UPDATE portal_health SET status = 'online' WHERE portal_id = 'pseb'`).run();
+      db.prepare(`UPDATE portal_health SET status = 'selector_broken' WHERE portal_id = 'kppra'`).run();
+
+      const stats = getKpiStats();
+      const onlineCountInDb = (db.prepare("SELECT COUNT(*) as c FROM portal_health WHERE status = 'online'").get() as any).c;
+      expect(stats.onlinePortals).toBe(onlineCountInDb);
+    });
+
     it('creates backups and lists backup history', async () => {
       const result = await backupNow();
       expect(result).not.toBeNull();

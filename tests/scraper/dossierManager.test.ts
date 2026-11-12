@@ -167,7 +167,7 @@ describe('dossierManager', () => {
   it('creates DOSSIERS_ROOT directory if it does not exist on module load', async () => {
     expect(fs.existsSync(DOSSIERS_DIR)).toBe(true);
   });
-  it('does not create an empty tender folder on failed download, aborts on AbortSignal, and enforces maxBytes cap (P2-1, P2-3)', async () => {
+  it('DOC-5: does not create an empty tender folder on failed download, aborts on AbortSignal, and enforces maxBytes cap (P2-1, P2-3)', async () => {
     const failedId = 't-no-empty-dir';
     const failRes = await downloadAndCacheDossier(failedId, `${serverBaseUrl}/not-found-404.pdf`, 'MissingDoc');
     expect(failRes).toBeNull();

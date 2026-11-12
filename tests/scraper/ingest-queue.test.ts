@@ -538,7 +538,7 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(unsuppressed?.closing_date).toBe('2026-12-30T10:00:00.000Z');
     });
 
-    it('F2: generic title held as awaiting_scope; worker releases on matching PDF and drops on non-matching', async () => {
+    it('MATCH-3 / F2: generic title held as awaiting_scope; worker releases on matching PDF and drops on non-matching with reason = no-track-match', async () => {
       // Ensure only IT & Software track is active
       db.prepare(`DELETE FROM domain_tracks`).run();
       db.prepare(`
@@ -587,12 +587,14 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(released?.ingestion_status).toBe('ready');
       expect(released?.domain_tracks).toContain('IT & Software');
 
-      // Item 2 should have been purged and suppressed
+      // Item 2 should have been purged and suppressed with reason = 'no-track-match' (MATCH-3)
       const held2 = db.prepare(`SELECT * FROM tenders WHERE title = 'Tender Notice No 102'`).get();
       expect(held2).toBeUndefined();
+      const deletedRecord = db.prepare(`SELECT reason FROM deleted_tenders WHERE reason = 'no-track-match'`).all() as any[];
+      expect(deletedRecord.length).toBeGreaterThan(0);
     });
 
-    it('B8: timed-out download on old folder does not suppress', async () => {
+    it('DOC-9 / B8: timed-out download on old folder does not suppress', async () => {
       // CMS upload folder from 6 months ago in 2026 (older than 90 days, but current calendar year)
       const url = 'https://x.pk/wp-content/uploads/2026/05/rfp.pdf';
       serveDocuments({ [url]: new Error('ETIMEDOUT: Connection timed out') });

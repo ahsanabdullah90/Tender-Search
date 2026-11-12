@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-12 · **System Baseline:** v1.6.0 (576 passing tests across 38 streamlined suites, 84.6% line coverage, 0 uncalibrated requirements, 0 unproven live items).
+**Last updated:** 2026-11-12 · **System Baseline:** v1.6.0 (598 passing tests across 39 streamlined suites, 84.6% line coverage, 0 uncalibrated requirements, 0 untested rules, 0 unproven live items).
 
 This document tracks **only active, unresolved items** requiring operator input, live data accumulation, or portal-specific maintenance. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 

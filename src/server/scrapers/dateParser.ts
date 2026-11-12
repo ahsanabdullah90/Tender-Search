@@ -23,9 +23,11 @@ export function parseDateString(raw: string): string | null {
   // Exclude known non-date text noise
   if (/^(not available|n\/a|none|null|undefined|-+)$/i.test(str)) return null;
 
-  // Strip ordinal suffixes (1st, 2nd, 3rd, 4th..31st) and commas for uniform matching
+  // Strip ordinal suffixes (1st, 2nd, 3rd, 4th..31st), normalize military time (e.g. 1100 hrs -> 11:00), and commas
   const cleanStr = str
     .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1')
+    .replace(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:hrs?|hours?)\b/gi, '$1:$2')
+    .replace(/\b([01]?\d|2[0-3])([0-5]\d)\s*(?:hrs?|hours?)\b/gi, '$1:$2')
     .replace(/,/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -45,6 +47,7 @@ export function parseDateString(raw: string): string | null {
 
       if (
         isValidCalendarDay(year, month, day) &&
+        isPlausibleTenderYear(year) &&
         hour >= 0 && hour < 24 &&
         minute >= 0 && minute < 60 &&
         second >= 0 && second < 60
@@ -75,6 +78,7 @@ export function parseDateString(raw: string): string | null {
       if (
         month &&
         isValidCalendarDay(year, month, day) &&
+        isPlausibleTenderYear(year) &&
         hour >= 0 && hour < 24 &&
         minute >= 0 && minute < 60 &&
         second >= 0 && second < 60
@@ -105,6 +109,7 @@ export function parseDateString(raw: string): string | null {
       if (
         month &&
         isValidCalendarDay(year, month, day) &&
+        isPlausibleTenderYear(year) &&
         hour >= 0 && hour < 24 &&
         minute >= 0 && minute < 60 &&
         second >= 0 && second < 60
@@ -124,7 +129,8 @@ export function parseDateString(raw: string): string | null {
     // Re-reading it as PKT wall-clock time would shift UTC timestamps by 5 hours on every round trip.
     if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(str)) {
       const d = new Date(str);
-      return isNaN(d.getTime()) ? null : d.toISOString();
+      if (isNaN(d.getTime()) || !isPlausibleTenderYear(d.getUTCFullYear())) return null;
+      return d.toISOString();
     }
 
     // 3. ISO format YYYY-MM-DD with optional time
@@ -139,6 +145,7 @@ export function parseDateString(raw: string): string | null {
 
       if (
         isValidCalendarDay(year, month, day) &&
+        isPlausibleTenderYear(year) &&
         hour >= 0 && hour < 24 &&
         minute >= 0 && minute < 60 &&
         second >= 0 && second < 60

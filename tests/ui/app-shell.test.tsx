@@ -174,4 +174,28 @@ describe('AppShell component', () => {
 
     expect(screen.getByText(/Scanning \(20%\)/)).toBeInTheDocument();
   });
+
+  it('OPS-5 / F6: warns with bg-danger indicator when full scan is more than 24 hours old', () => {
+    const staleScanTimestamp = new Date(Date.now() - 25 * 3600000).toISOString();
+    const { container } = render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...idleScan,
+          lastFullScanTimestamp: staleScanTimestamp,
+          lastScanTimestamp: staleScanTimestamp
+        }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    // Indicator dot should carry bg-danger for stale scans (>= 24h)
+    const dangerDot = container.querySelector('.bg-danger');
+    expect(dangerDot).toBeInTheDocument();
+  });
 });

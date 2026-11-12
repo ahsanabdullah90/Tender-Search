@@ -173,7 +173,7 @@ describe('documentExtractor (Phase 2)', () => {
       expect(cancel.isCancellation).toBe(true);
     });
 
-    it('A9: Standard Bidding Document Table of Contents is NOT detected as corrigendum or cancellation', async () => {
+    it('DL-10 / A9: Standard Bidding Document Table of Contents is NOT detected as corrigendum or cancellation', async () => {
       const sbdText = [
         'STANDARD BIDDING DOCUMENT',
         'Table of Contents',

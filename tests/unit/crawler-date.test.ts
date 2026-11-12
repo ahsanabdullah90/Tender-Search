@@ -307,6 +307,20 @@ describe('A11 & isPlausibleTenderYear', () => {
     expect(isPlausibleTenderYear(1995, simulatedNow)).toBe(false);
   });
 
+  it('parses military time (e.g. 1100 hrs -> 11:00 PKT) and rejects implausible years in parseDateString (DL-9, A8, A11)', () => {
+    // 1100 hrs PKT (+05:00) is 06:00:00 UTC
+    const militaryDmy = parseDateString('15/11/2026 1100 hrs');
+    expect(militaryDmy).toContain('2026-11-15T06:00:00.000Z');
+
+    const militaryNamed = parseDateString('15 Nov 2026 1100 hours');
+    expect(militaryNamed).toContain('2026-11-15T06:00:00.000Z');
+
+    // Years < 2010 or > current + 5 rejected
+    expect(parseDateString('15/11/2005')).toBeNull();
+    expect(parseDateString('15/11/2009')).toBeNull();
+    expect(parseDateString('15/11/2035')).toBeNull();
+  });
+
   it('rejects short numbers, lot labels, and yearless dates that previously parsed as year 2001 (A11)', () => {
     expect(parseDateString('12')).toBeNull();
     expect(parseDateString('Lot 3')).toBeNull();

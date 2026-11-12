@@ -218,4 +218,129 @@ describe('Retention Lifecycle Daemon', () => {
     expect(ids).toContain(tenderExpiredUnreviewed);
     expect(ids).not.toContain(tenderTrackedActive);
   });
+
+  it('MATCH-4: purges awaiting_scope tenders older than 3 days during retention cycle', () => {
+    const staleHeldId = 'tender-stale-awaiting-scope';
+    db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, ingestion_status, created_at, updated_at
+      ) VALUES (?, ?, 'Stale Awaiting Scope', 'Org', 'epads', 'Federal PPRA', 'https://example.com/stale',
+        '[]', '[]', 0, 'awaiting_scope', datetime('now', '-4 days'), datetime('now', '-4 days'))
+    `).run(staleHeldId, staleHeldId);
+
+    const report = runRetentionCycle({ dryRun: false });
+    expect(report.staleAwaitingScopeDeletedCount).toBeGreaterThanOrEqual(1);
+
+    const check = getTenderById(staleHeldId);
+    expect(check).toBeNull();
+
+    const deleted = db.prepare('SELECT reason FROM deleted_tenders WHERE id = ?').get(staleHeldId) as any;
+    expect(deleted?.reason).toBe('no-track-match');
+    db.prepare('DELETE FROM deleted_tenders WHERE id = ?').run(staleHeldId);
+  });
+
+  it('RET-2: never uses publish date inferred from upload folder for ageing; uses created_at instead (A2)', async () => {
+    const { getExpiredUnreviewedTenderIds } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const folderDateId = 'tender-upload-folder-date';
+    // publish_date is old (120 days ago), but it came from an upload folder; created_at is fresh (2 days ago)
+    db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, publish_date, publish_date_source,
+        closing_date, pipeline_status, created_at
+      ) VALUES (?, ?, 'Upload Folder Date Tender', 'Org', 'epads', 'Federal PPRA', 'https://example.com/uf',
+        '[]', '[]', 80, date('now', '-120 days'), 'upload_folder',
+        NULL, 'New Opportunity', datetime('now', '-2 days'))
+    `).run(folderDateId, folderDateId);
+
+    const expiredIds = getExpiredUnreviewedTenderIds(2, 500);
+    expect(expiredIds).not.toContain(folderDateId);
+    db.prepare('DELETE FROM tenders WHERE id = ?').run(folderDateId);
+  });
+
+  it('RET-3: records every deletion in deleted_tenders with explicit reason (G3)', async () => {
+    const { deleteTenders } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const testDelId = 'tender-test-deletion-record';
+    db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, pipeline_status
+      ) VALUES (?, ?, 'Deletion Record Test', 'Org', 'epads', 'Federal PPRA', 'https://example.com/del',
+        '[]', '[]', 75, 'New Opportunity')
+    `).run(testDelId, testDelId);
+
+    deleteTenders([testDelId], 'user');
+    const record = db.prepare('SELECT reason FROM deleted_tenders WHERE id = ?').get(testDelId) as any;
+    expect(record).toBeDefined();
+    expect(record.reason).toBe('user');
+    db.prepare('DELETE FROM deleted_tenders WHERE id = ?').run(testDelId);
+  });
+
+  it('RET-4: permanent user suppression vs auto-expired suppression lifting on future date (F4, B8)', async () => {
+    const { deleteTenders, isTenderSuppressed } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const userSuppressedId = 'tender-user-suppressed';
+    const autoExpiredId = 'tender-auto-expired';
+
+    // Insert and delete with reason = 'user'
+    db.prepare(`
+      INSERT INTO tenders (id, canonical_id, title, organization, portal_id, portal_name, direct_url, pipeline_status)
+      VALUES (?, ?, 'User Suppressed', 'Org', 'epads', 'Federal PPRA', 'https://example.com/u', 'New Opportunity')
+    `).run(userSuppressedId, userSuppressedId);
+    deleteTenders([userSuppressedId], 'user');
+
+    // Future closing date does NOT lift user suppression
+    const futureDate = new Date(Date.now() + 10 * 86400000).toISOString();
+    expect(isTenderSuppressed(userSuppressedId, userSuppressedId, futureDate)).toBe(true);
+
+    // Insert and delete with reason = 'auto-expired'
+    db.prepare(`
+      INSERT INTO tenders (id, canonical_id, title, organization, portal_id, portal_name, direct_url, pipeline_status)
+      VALUES (?, ?, 'Auto Expired', 'Org', 'epads', 'Federal PPRA', 'https://example.com/ae', 'New Opportunity')
+    `).run(autoExpiredId, autoExpiredId);
+    deleteTenders([autoExpiredId], 'auto-expired');
+
+    // Future closing date DOES lift auto-expired suppression
+    expect(isTenderSuppressed(autoExpiredId, autoExpiredId, futureDate)).toBe(false);
+
+    db.prepare('DELETE FROM deleted_tenders WHERE id IN (?, ?)').run(userSuppressedId, autoExpiredId);
+  });
+
+  it('RET-5: tender with needs_review = 1 is NEVER auto-expired', () => {
+    const reviewTenderId = 'tender-needs-review-retention';
+    db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, publish_date, closing_date,
+        pipeline_status, is_bookmarked, needs_review
+      ) VALUES (?, ?, 'Needs Review Tender', 'Org', 'epads', 'Federal PPRA', 'https://example.com/rev',
+        '[]', '[]', 80, '2026-10-01', date('now', '-10 days'),
+        'New Opportunity', 0, 1)
+    `).run(reviewTenderId, reviewTenderId);
+
+    runRetentionCycle({ dryRun: false });
+
+    const check = getTenderById(reviewTenderId);
+    expect(check).not.toBeNull();
+    expect(check?.needs_review).toBe(1);
+    db.prepare('DELETE FROM tenders WHERE id = ?').run(reviewTenderId);
+  });
+
+  it('RET-8: releases staging tenders older than 60 minutes to ready status', () => {
+    const stagingTenderId = 'tender-stale-staging';
+    db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, ingestion_status, created_at, updated_at
+      ) VALUES (?, ?, 'Stale Staging Tender', 'Org', 'epads', 'Federal PPRA', 'https://example.com/stg',
+        '[]', '[]', 80, 'staging', datetime('now', '-75 minutes'), datetime('now', '-75 minutes'))
+    `).run(stagingTenderId, stagingTenderId);
+
+    runRetentionCycle({ dryRun: false });
+
+    const check = getTenderById(stagingTenderId);
+    expect(check).not.toBeNull();
+    expect(check?.ingestion_status).toBe('ready');
+    db.prepare('DELETE FROM tenders WHERE id = ?').run(stagingTenderId);
+  });
 });
