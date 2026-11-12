@@ -322,8 +322,8 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
       const stat = fs.statSync(fullPath);
       if (stat.isDirectory()) {
         if (!existingIdSet.has(entry)) {
-          // Check grace period
-          if (now - stat.mtimeMs >= graceMs) {
+          // Check grace period (bypassed if graceMs <= 0)
+          if (graceMs <= 0 || now - stat.mtimeMs >= graceMs) {
             let size = 0;
             try {
               const files = fs.readdirSync(fullPath);
