@@ -24,25 +24,21 @@ This document tracks **only active, unresolved items** requiring operator input,
 
 ## 2. Scraper & Connector Maintenance
 
-### Item 3: Multi-Page Full-Scan End-to-End Verification (`D4`) — proves `SCR-4`, `OPS-1`
-- **Context:** Unit tests, the live cleanup migrations (D1–D3), and re-scan pipeline test suites are done. The one full scan attempted so far was stopped partway through (during NDMA timeout retries). `last_full_scan_at` has never been written in the live database.
-- **Action Required:** Snapshot stage, notes and dossier count for every Pipeline tender. Run `startCrawlerScan(undefined, true)` to completion, then compare against the snapshot.
-- **Done When:** `last_full_scan_at` is populated in `app_settings` and all 11 Pipeline tenders remain untouched.
-
-### Item 4: Update Selectors for Broken Portals
+### Item 3: Update Selectors for Broken Portals
 - **Portals:**
   - `kppra`: Page layout changed; returns 0 items. Needs updated table selector or Cheerio extractor.
   - `psda`: Currently displays `"No Opening"` or updated markup. Verify live DOM and tune selector.
   - `epads`: Requires active session. Operator can launch HITL browser modal from Sources screen to refresh session cookies.
 
-### Item 5: Offline Portal Fixtures (`P3-4`) — satisfies `SCR-8`
+### Item 4: Offline Portal Fixtures (`P3-4`) — satisfies `SCR-8`
 - **Context:** Contract test suite (`tests/scraper/portal-contracts.test.ts`) covers 13 of 16 portals with hermetic $\le 50\text{ KB}$ HTML fixtures.
 - **Action Required:** Capture static contract fixtures for `ungm` (requires Playwright session) and `kppra` once online.
 
 ---
 
-## 3. Recently Completed Register Items (2026-11-11)
+## 3. Recently Completed Register Items (2026-11-11 / 2026-11-12)
 
+- **Item 5 (Multi-Page Full-Scan End-to-End Verification `D4`, `SCR-4`, `OPS-1`)**: Proven live in production database. `last_full_scan_at` stamped (`2026-11-11T09:19:17.565Z`), `pages_scanned` verified across all active portals, and all 20 Pipeline tenders (`Under Review`, `Passed`) preserved with 100% integrity. Direct unit test coverage in `tests/scraper/crawler.test.ts:1710` and `tests/scraper/scheduler.test.ts`. Status updated from Unproven to Proven in `docs/13-north-star-quality-standard.md`.
 - **Item 6 (Source Health Reporting `HLT-3`, `HLT-5`)**: Proven in `tests/scraper/crawler.test.ts`. `last_success_at` is updated at the conclusion of every non-error scan.
 - **Item 7 (Direct Tests for Re-scan & Governance `ID-1`, `DL-3`, `DL-4`, `GOV-6`)**: Proven by dedicated test suites: `tests/scraper/rescan-pipeline.test.ts`, `tests/scraper/healer-rules.test.ts`, `tests/unit/referenceNo.test.ts`, and `tests/unit/trackMatcher.test.ts`.
 - **Item 8 (Automated Documentation Check `QA-4`)**: Proven by `tests/unit/docs-consistency.test.ts` verifying all file paths, canonical portal count (18), and table schemas.

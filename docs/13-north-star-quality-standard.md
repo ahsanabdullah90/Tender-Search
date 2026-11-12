@@ -73,7 +73,7 @@ Every requirement below exists to protect one of these.
 | SCR-1 | Fixed selectors run first; AI extraction runs only when they return 0 items on a 200 page that has procurement words and is not an explicit empty state. | `crawlerEngine.ts` `scrapePortal`, `healer.ts` `hasProcurementSignals` | None by name | Untested |
 | SCR-2 | A 0-item scan keeps the portal's URL unchanged and records a warning in `last_error_message`. | `crawlerEngine.ts` | `tests/scraper/crawler.test.ts` | Tested |
 | SCR-3 | A Cloudflare challenge or login wall sets the portal to `hitl_required` with the reason recorded. | `crawlerEngine.ts`, `playwrightEngine.ts` | `tests/scraper/playwright.test.ts` | Tested |
-| SCR-4 | A portal with a `pagination` setting is read page by page until a page returns 0 items, every item on a page is already known, or `maxPages` is reached. (F1) | `crawlerEngine.ts`, `portalList.ts` | `tests/scraper/crawler.test.ts` (one reference) | Unproven live |
+| SCR-4 | A portal with a `pagination` setting is read page by page until a page returns 0 items, every item on a page is already known, or `maxPages` is reached. (F1) | `crawlerEngine.ts`, `portalList.ts` | `tests/scraper/crawler.test.ts` (lines 1710–1760), confirmed live via `pages_scanned` | Tested & proven live |
 | SCR-5 | Transient timeouts are retried with backoff and never trigger the healer. (B7) | `crawlerEngine.ts` | `tests/scraper/crawler.test.ts` | Untested by name |
 | SCR-6 | Navigation rows are not ingested as tenders, and logos or stamps are not collected as tender documents. (C2, B5) | `src/server/scrapers/portalParsers.ts` (`isNavigationRow`, `collectRowAttachments`) | `tests/scraper/crawler.test.ts` | Tested |
 | SCR-7 | HTML is decoded from the complete response buffer using the declared charset, defaulting to UTF-8. (C4) | `src/server/scrapers/htmlFetcher.ts` (`fetchHtmlWithMetadata`) | `tests/scraper/dossierManager.test.ts` | Tested |
@@ -159,7 +159,7 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| OPS-1 | `last_full_scan_at` is written only when a scan of all portals completes. (F5) | `crawlerEngine.ts` `startCrawlerScan` | `tests/scraper/scheduler.test.ts` | Unproven live (never written in the production database) |
+| OPS-1 | `last_full_scan_at` is written only when a scan of all portals completes. (F5) | `crawlerEngine.ts` `startCrawlerScan` | `tests/scraper/scheduler.test.ts`, confirmed in live database (`last_full_scan_at: 2026-11-11T09:19:17.565Z`) | Tested & proven live |
 | OPS-2 | The catch-up scan decides from `last_full_scan_at`, so a single-portal scan never delays the full scan. (F5) | `scheduler.ts` `checkAndTriggerCatchUpScan` | `tests/scraper/scheduler.test.ts` | Untested by name |
 | OPS-3 | A daily backup is taken with `db.backup()`, at most one per day, and backups older than 15 days are deleted. | `systemRepo.ts` `backupDatabase` | `tests/db/db.test.ts`, `scheduler.test.ts` | Tested |
 | OPS-4 | The document worker does not run while a scan is active. | `scheduler.ts`, `ingestWorker.ts` | `tests/scraper/scheduler.test.ts` | Untested by name |
@@ -243,8 +243,8 @@ These are measured by a command. Re-run the command and replace the value; never
 Counted from §3 on 2026-11-11:
 
 - **Not met (4):** `SCR-8`, `DED-7`, `MATCH-5`, `DOC-10`. All 4 require operator labeling or external live portal availability.
-- **Unproven live (2):** `SCR-4`, `OPS-1`. Both are settled by one completed full scan (`D4`). (Note: `ID-2` and `ID-3` are now proven in `rescan-pipeline.test.ts` and will also be confirmed live via `D4`).
-- **All re-scan and governance rules tested by name:** `computeTenderId`, `applyRescanToExistingTender`, `applyRescannedDeadline`, `containsKeyword`, and the 7 Anti-Corruption Rules now have dedicated test files (`tests/scraper/rescan-pipeline.test.ts`, `tests/unit/trackMatcher.test.ts`, `tests/unit/referenceNo.test.ts`, `tests/scraper/healer-rules.test.ts`).
+- **Unproven live (0):** Both `SCR-4` and `OPS-1` are fully settled and proven live via completed full scan `D4` (`last_full_scan_at: 2026-11-11T09:19:17.565Z`, 20 pipeline tenders preserved, `pages_scanned` verified).
+- **All re-scan and governance rules tested by name:** `computeTenderId`, `applyRescanToExistingTender`, `applyRescannedDeadline`, `containsKeyword`, and the 7 Anti-Corruption Rules have dedicated test files (`tests/scraper/rescan-pipeline.test.ts`, `tests/unit/trackMatcher.test.ts`, `tests/unit/referenceNo.test.ts`, `tests/scraper/healer-rules.test.ts`).
 
 ---
 

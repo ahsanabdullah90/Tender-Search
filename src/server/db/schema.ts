@@ -434,6 +434,24 @@ export function seedPortalHealth() {
             db.prepare('UPDATE portal_health SET base_url = ?, tenders_url = ?, verified_status = ? WHERE portal_id = ?')
               .run(p.baseUrl, p.tendersUrl, p.verifiedStatus, p.id);
           }
+
+          // Rule 7 sync: upgrade known dead legacy domains to canonical definitions from PORTAL_DEFINITIONS
+          if (p.id === 'sppra' && String(dbRow.tenders_url).includes('e.pprasindh.gov.pk')) {
+            db.prepare('UPDATE portal_health SET base_url = ?, tenders_url = ?, verified_status = ? WHERE portal_id = ?')
+              .run(p.baseUrl, p.tendersUrl, p.verifiedStatus, p.id);
+          }
+          if (p.id === 'kppra' && String(dbRow.tenders_url).includes('kp.gov.pk/tenders')) {
+            db.prepare("UPDATE portal_health SET base_url = ?, tenders_url = ?, access_mode = ?, status = 'error', verified_status = ? WHERE portal_id = ?")
+              .run(p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
+          }
+          if (p.id === 'punjab_eproc' && String(dbRow.base_url).startsWith('https:')) {
+            db.prepare("UPDATE portal_health SET base_url = 'http://eproc.punjab.gov.pk' WHERE portal_id = ?")
+              .run(p.id);
+          }
+          if (p.id === 'gilgit' && dbRow.access_mode !== p.accessMode) {
+            db.prepare("UPDATE portal_health SET base_url = ?, tenders_url = ?, access_mode = ?, status = 'error', verified_status = ? WHERE portal_id = ?")
+              .run(p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
+          }
         }
       } catch {}
     }
