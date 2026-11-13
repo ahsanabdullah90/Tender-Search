@@ -21,6 +21,7 @@ In addition to environment variables, system-level budgets and operational flags
 | Setting Key | Default | Description |
 |---|---|---|
 | `gemini_api_key` | `""` | Google AI Studio API key for multimodal document OCR and text cross-checks. |
+| `local_ocr_enabled` | `'true'` | Enables/disables offline `tesseract.js` + `@napi-rs/canvas` OCR fallback (`localOcrService.ts`) when Gemini Vision is unconfigured or over budget. |
 | `ingest_upfront_time_budget_sec` | `300` | Maximum seconds allowed for upfront document fetching during a portal crawl. |
 | `ingest_max_file_mb` | `25` | Maximum allowable document download size in megabytes. |
 | `ingest_vision_calls_per_scan` | `20` | Maximum Gemini Vision OCR calls permitted within a single scan run. |
@@ -29,7 +30,12 @@ In addition to environment variables, system-level budgets and operational flags
 | `retention_auto_clean` | `'true'` | Enables/disables automated retention sweeps. |
 | `retention_grace_days` | `2` | Days after closing date before unreviewed New Opportunities are auto-expired. |
 | `retention_passed_days` | `10` | Days after being marked Passed before non-pipeline tenders are auto-retired. |
+| `digest_enabled` | `'false'` | Enables/disables opt-in daily closing digest webhook delivery (`maybeDispatchDailyDigest`). |
+| `digest_webhook_url` | `""` | Webhook endpoint URL for the daily digest (validated via `urlSafety.ts`, `SEC-5`). |
+| `digest_within_hours` | `48` | Lookahead window in hours for urgent closing alerts (`getAlertsDigest`). |
+| `digest_last_sent_pkt` | `null` | PKT calendar date (`YYYY-MM-DD`) when the last daily digest webhook succeeded. |
 | `last_full_scan_at` | `null` | ISO timestamp of the last complete scan across all portals (`F5`). |
+| `last_deep_scan_at` | `null` | ISO timestamp of the last completed `deep` multi-page scan (`scheduler.ts`). |
 
 ---
 
@@ -45,10 +51,13 @@ C:\Tender_Tracker/
     dossiers/               # Cached bidding documents (PDFs, images, docs)
     logs/                   # Last 3 session execution logs
     models/                 # Local HuggingFace MiniLM ONNX model cache
+    tessdata/               # Offline Tesseract language traineddata cache
     sessions/               # Serialized session cookies from HITL portal sessions
   data-sample/              # Isolated sample data used for preview & demonstration
+  dist/                     # Built Vite client bundle (served by Express in production)
+  dist-server/              # Compiled server bundle (dist-server/server.mjs)
   public/                   # Brand logos (public/brand/) and favicons
-  scripts/                  # Operational scripts (seed-sample.ts, probe-portals.ts, capture-portal-fixture.ts)
+  scripts/                  # Operational scripts (launch.cmd, seed-sample.ts, probe-portals.ts, capture-portal-fixture.ts)
   src/                      # Application source code
     client/                 # React 19 UI application (App, theme, index.css, components/, ui/)
       components/           # UI screens (Inbox, Pipeline, Sources, AppShell, inbox/, pipeline/)
@@ -57,9 +66,9 @@ C:\Tender_Tracker/
     server/                 # Express backend, db/, routes/, scrapers/, services/
       db/                   # SQLite connection, schema migrations, and repositories/
       routes/               # Modular Express domain routers (tenders, portals, tracks, scan, system)
-      scrapers/             # Modular scrapers (htmlFetcher, crawlerDeps, portalParsers, tenderAnalysis, ingestPipeline, healer, crawlerEngine)
-      services/             # Domain services (deduplicator, documentExtractor, dossierManager, ocrService, embeddingService, ingestWorker, retention, scheduler, etc.)
-  tests/                    # Full test suite (39 test files, 598 tests across node & jsdom runners)
+      scrapers/             # Modular scrapers (htmlFetcher, crawlerDeps, portalParsers, tenderAnalysis, ingestPipeline, healer, crawlerEngine, etc.)
+      services/             # Domain services (deduplicator, documentExtractor, dossierManager, ocrService, localOcrService, urlSafety, embeddingService, ingestWorker, retention, scheduler, etc.)
+  tests/                    # Full Vitest suite across node & jsdom runners
   docs/                     # Comprehensive architecture and operational documentation
 ```
 
@@ -67,7 +76,9 @@ C:\Tender_Tracker/
 
 ## Startup Script
 
-Double-clicking **`start-tender-tracker.bat`** handles startup on Windows 11:
-1. Verifies dependencies exist (`npm install` run automatically if `node_modules` is absent).
-2. Spawns background browser opening to `http://localhost:3000`.
-3. Runs `npm run dev` to launch Express and Vite with live hot reloading.
+Double-clicking **`start-tender-tracker.bat`** (which invokes `scripts/launch.cmd`) handles production startup on Windows 11:
+1. Verifies dependencies exist (`npm install` runs automatically if `node_modules` is absent) and builds `dist/` + `dist-server/server.mjs` (`npm run build`) if compiled bundles are missing.
+2. Spawns a background browser launch to `http://localhost:3000`.
+3. Runs **`npm start`** (`node dist-server/server.mjs --production`) for a fast, standalone server with zero dev-watcher overhead.
+
+For active development with live TypeScript & Vite hot reloading, run **`npm run dev`** directly in PowerShell.

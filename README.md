@@ -4,7 +4,7 @@ Autonomous procurement scout and opportunity command center monitoring 18 Pakist
 
 ## Quick Start (Windows 11)
 
-1. Double-click **`start-tender-tracker.bat`** (or run `npm install` followed by `npm run dev`).
+1. Double-click **`start-tender-tracker.bat`** to build (if needed) and launch the production bundle via `npm start`, or run `npm install` followed by `npm run dev` for development with Vite hot reloading.
 2. Tender Tracker will initialize the local SQLite WAL database in `./data/tender_tracker.db` and launch the browser at `http://localhost:3000`.
 
 ## The three screens
@@ -42,7 +42,7 @@ Sample data is kept in `./data-sample/`, separate from `./data/`.
 ## Testing & Quality Assurance
 
 ```powershell
-# Run full quality gate (TypeScript type-check + all 598 tests across 39 suites)
+# Run full quality gate (TypeScript type-check + all unit/DB/scraper/API/UI suites + builds)
 npm run verify
 
 # Run all unit, scraper, API, and UI tests

@@ -28,3 +28,17 @@ For the numbered requirements register (the immutable single source of rules the
 [`docs/13-north-star-quality-standard.md`](docs/13-north-star-quality-standard.md)
 
 That register is an absolute reference—do not modify its rules or thresholds for routine runs; update §3/§6 only when a requirement or operator decision itself changes. Operational status, runtime telemetry, and open work are tracked in [`docs/14-active-backlog.md`](docs/14-active-backlog.md).
+
+## 4. Code-to-Documentation Synchronization Matrix
+Every code revision must update its matching documentation in the **same commit** (enforced automatically by `QA-4` in `tests/unit/docs-consistency.test.ts` on every `npm test` and `npm run verify`):
+
+| Code Change Scope | Required Documentation Updates |
+|---|---|
+| `src/server/db/schema.ts` (tables, columns, FTS5, migrations) | [`docs/03-database-schema.md`](docs/03-database-schema.md) |
+| `src/server/routes/*.routes.ts` (endpoints, params, validation, payloads) | [`docs/04-api-reference.md`](docs/04-api-reference.md) |
+| `src/server/scrapers/` (`portalList.ts`, parsers, healer, crawler) | [`docs/05-portals-and-scraping.md`](docs/05-portals-and-scraping.md) (& `docs/13` if rules change) |
+| New modules or structural changes under `src/server/` | [`docs/02-architecture-and-stack.md`](docs/02-architecture-and-stack.md) |
+| `app_settings` keys, `.env` vars, directory layout, or startup scripts | [`docs/11-configuration-and-env.md`](docs/11-configuration-and-env.md) & [`docs/03-database-schema.md`](docs/03-database-schema.md) |
+| Operator-facing UI screens, filters, or workflows (`src/client/`) | [`docs/10-operator-guide.md`](docs/10-operator-guide.md) |
+| Test infrastructure or new unit/integration suites (`tests/`) | [`docs/08-testing-and-coverage.md`](docs/08-testing-and-coverage.md) (never hardcode brittle test/suite counts) |
+| Version bump, new feature rollout, or resolved backlog work | [`docs/12-decisions-and-changelog.md`](docs/12-decisions-and-changelog.md), [`docs/14-active-backlog.md`](docs/14-active-backlog.md), and [`README.md`](README.md) |

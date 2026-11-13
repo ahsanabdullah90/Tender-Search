@@ -15,22 +15,23 @@ graph TD
     end
 
     subgraph Server [Backend Engine: Express on Node 20/24]
-        API[src/server/routes/*.routes.ts: Modular REST & Dossier Endpoints]
+        API["src/server/routes/*.routes.ts: Modular REST, Auth & Digest API"]
         SSEHub[SSE Stream /api/scan/progress]
-        Scheduler[scheduler.ts: Cron, Retention & Ingest Worker Trigger]
-        Crawler[crawlerEngine.ts: Thin Scan Orchestrator & Facade]
+        Scheduler[scheduler.ts & retention.ts: Cron, Digest, Retention & Worker Trigger]
+        Crawler[crawlerEngine.ts & baseScraper.ts: Scan Orchestrator & Worker Pool]
         IngestPipeline[ingestPipeline.ts: Dedup, Staging, Rescan & Ingestion Decisions]
-        PortalParsers[portalParsers.ts: Multi-Pattern DOM, Table & Layout Parsing]
-        HTMLFetcher[htmlFetcher.ts: Redirect-Aware & Charset-Decoded HTTP]
-        TenderAnalysis[tenderAnalysis.ts: Single-Tender Detail & On-Demand AI Analysis]
+        PortalParsers[portalParsers.ts, dateParser.ts, trackMatcher.ts & portalList.ts]
+        HTMLFetcher[htmlFetcher.ts & crawlerDeps.ts: Redirect-Aware & Charset-Decoded HTTP]
+        TenderAnalysis[tenderAnalysis.ts: Detail Page & On-Demand Analysis]
         Healer[healer.ts: 7-Rule Guarded URL Healer & Link Scorer]
-        DocExtractor[documentExtractor.ts: Local PDF/DOCX + Budgeted Vision]
-        IngestWorker[ingestWorker.ts & ingestBudget.ts: Durable Retry Queue]
-        Deduplicator[deduplicator.ts: 3-Tier Ref, Bigram & MiniLM Matcher]
-        Embedding[embeddingService.ts: 384-D MiniLM & Tagged Vector Spaces]
+        DocExtractor[documentExtractor.ts & documentApply.ts: Local PDF/DOCX + Vision/OCR]
+        IngestWorker[ingestWorker.ts & ingestBudget.ts: Durable Retry Queue & Budgets]
+        Deduplicator[deduplicator.ts & referenceNo.ts: 3-Tier Ref, Bigram & MiniLM Matcher]
+        Embedding[embeddingService.ts & embeddingBackfill.ts: 384-D MiniLM Vector Spaces]
         DossierMgr[dossierManager.ts & dossierStore.ts: Abortable Cache & Reconciler]
-        Repos[src/server/db/repositories/*.ts: Strict SQLite Repository Layer]
-        OCR[ocrService.ts: 4-Model Gemini Pool & JSON Repair]
+        Repos[src/server/db/repositories/*.ts & schema.ts: Strict SQLite Repository Layer]
+        OCR[ocrService.ts & localOcrService.ts: 4-Model Gemini Pool + Offline Tesseract OCR]
+        URLSafety[urlSafety.ts & logger.ts: SEC-5 SSRF Guard & Secret-Redacting Logs]
         BrowserEngine[playwrightEngine.ts & portalAuth.ts]
     end
 
@@ -140,11 +141,19 @@ When `startCrawlerScan()` in `crawlerEngine.ts` processes a portal via `scrapePo
 - **Journal Mode**: Write-Ahead Logging (`PRAGMA journal_mode = WAL`) for concurrent reads and writes without blocking.
 - **Schema & Migrations**: Programmatic, idempotent guarded `ALTER TABLE` schema updates and `app_settings` initialization in `src/server/db/schema.ts` (exported via `src/server/db/index.ts`).
 
+### Database, Routing & Service Inventory
+Every backend module lives cleanly inside four domain directories under `src/server/`:
+- **Database (`src/server/db/`)**: `connection.ts`, `schema.ts`, `index.ts`, and domain repositories `repositories/tendersRepo.ts`, `repositories/portalsRepo.ts`, `repositories/tracksRepo.ts`, `repositories/systemRepo.ts`, `repositories/ingestJobsRepo.ts`.
+- **Routes (`src/server/routes/`)**: `index.ts` mounting `tenders.routes.ts`, `portals.routes.ts`, `tracks.routes.ts`, `scan.routes.ts`, and `system.routes.ts`.
+- **Scrapers (`src/server/scrapers/`)**: `baseScraper.ts`, `crawlerDeps.ts`, `crawlerEngine.ts`, `dateParser.ts`, `healer.ts`, `htmlFetcher.ts`, `ingestPipeline.ts`, `playwrightEngine.ts`, `portalAuth.ts`, `portalList.ts`, `portalParsers.ts`, `tenderAnalysis.ts`, `trackMatcher.ts`.
+- **Services (`src/server/services/`)**: `deduplicator.ts`, `documentApply.ts`, `documentExtractor.ts`, `dossierManager.ts`, `dossierStore.ts`, `embeddingBackfill.ts`, `embeddingService.ts`, `ingestBudget.ts`, `ingestWorker.ts`, `localOcrService.ts`, `logger.ts`, `ocrService.ts`, `referenceNo.ts`, `retention.ts`, `scheduler.ts`, `urlSafety.ts`.
+
 ### Scraping, Automation & AI
 - **HTML Parsing**: `cheerio` for fast, lightweight DOM parsing and link-preserving HTML compaction.
-- **HTTP Client**: Redirect-aware tolerant HTTPS/HTTP agents (`fetchHtmlWithMetadata`) with 15s timeouts, realistic Chrome header masquerading, and unverified TLS bypass for legacy government SSL certificates.
-- **Browser Automation**: Playwright Chromium for rendering dynamic SPA portals (e.g., Sindh SPPRA) and interactive HITL Cloudflare bypass.
-- **AI Engine (`src/server/services/ocrService.ts`)**: `@google/genai` configured with a cached client (`20s` timeout) and a **4-Model Failover Chain** (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`) plus a self-healing JSON repair parser (`parseAndRepairTenderJson`).
+- **HTTP Client**: Redirect-aware tolerant HTTPS/HTTP agents (`fetchHtmlWithMetadata` in `htmlFetcher.ts`) with 25s default timeouts (35s for `epms.ppra.gov.pk`), realistic Chrome header masquerading, and unverified TLS bypass for legacy government SSL certificates.
+- **Browser Automation**: Playwright Chromium (`playwrightEngine.ts`) for rendering dynamic SPA portals and interactive HITL Cloudflare bypass.
+- **AI & Offline OCR Engine**: `ocrService.ts` wraps `@google/genai` with a cached client (`20s` timeout) and a **4-Model Failover Chain** (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`) plus `parseAndRepairTenderJson()`. When Gemini Vision is unconfigured, over budget, or returns `null`, `localOcrService.ts` (`tesseract.js` + `@napi-rs/canvas`) performs serialized offline OCR capped at 3 pages/PDF (`DOC-11`).
+- **SSRF & External URL Validation (`SEC-5`)**: `urlSafety.ts` (`validateExternalHttpUrl`) rejects non-HTTP(S) schemes, embedded credentials, loopback, RFC1918 private IPs, link-local metadata ranges, and private IPv6 hosts on portal and webhook configurations.
 
 ---
 

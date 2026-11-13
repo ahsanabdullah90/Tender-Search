@@ -42,7 +42,7 @@
 ### ADR 08: Local-First Document Reading, Deadline Resolution and Durable Document Queue (2026-11-10)
 - **Context**: Every tender PDF used to be sent to Gemini Vision (slow, quota-heavy), a single attachment could delete a tender whose listing showed an extended deadline, and background downloads were fire-and-forget (lost on timeouts or restarts). See archived [`docs/archive/13-ingestion-pipeline-plan.md`](./archive/13-ingestion-pipeline-plan.md).
 - **Decision**:
-  1. **Local text first.** `pdfjs-dist@4.10.38` (first 5 pages) and `mammoth@1.13.0` (`.docx`) read the text layer locally; deadlines are found only next to submission phrases. Gemini Vision is used only for documents with no text layer (scans, clippings, images), within per-scan (20) and per-day (100) budgets. `mammoth@1.9.0` was rejected for a directory-traversal advisory (GHSA-rmjr-87wv-gf87).
+  1. **Local text first.** `pdfjs-dist@4.10.38` (full multi-page text extraction; initial 5-page cap later lifted in `v1.8.0`) and `mammoth@1.13.0` (`.docx`) read the text layer locally; deadlines are found only next to submission phrases. Gemini Vision (with offline `tesseract.js` fallback capped at 3 rasterized pages/PDF) is used only for documents with no text layer (scans, clippings, images), within per-scan (20) and per-day (100) budgets. `mammoth@1.9.0` was rejected for a directory-traversal advisory (GHSA-rmjr-87wv-gf87).
   2. **Deadline resolution** (`resolveCanonicalDeadline`): the later valid date wins; on the same day a document's time beats a listing's default 14:00; a corrigendum may move the deadline earlier but the tender is flagged for review (never auto-deleted on that basis); once a corrigendum sets the deadline, the original RFP cannot restore its date. Only an unambiguous document reading (one anchored date, AI agreement, or Vision) may auto-expire a tender.
   3. **Durable queue** (`document_ingest_jobs`, `ingestWorker.ts`): documents not read before insert are retried every 2 minutes with backoff, lease-based crash recovery, and no worker activity during scans.
 - **Consequences**: Digital documents cost no Gemini quota; scans no longer block on slow portals; every deadline records where it came from (`deadline_source`, `deadline_confidence`) and the Inbox shows it.
@@ -114,6 +114,30 @@
 
 ## Changelog
 
+### Version 1.9.0 (November 13, 2026)
+- **Federal PPRA (EPMS) Integration (`epms_ppra` replacing `epads`, `DB-1`)**:
+  - Replaced Imperva/WAF-blocked `epads` (`epads.gov.pk`) with the open Federal PPRA EPMS board (`https://epms.ppra.gov.pk/public/tenders/active-tenders`), retiring `epads` to `deleted_portals` while preserving historical saved tenders.
+  - Implemented `parseEpmsDetailHtml` and `applyEpmsDetailMetadata` for deterministic detail-page `BidBrief` extraction and `/pdf?file=` document discovery, broadened Framework Agreement reference extraction (`/^[A-Z]{2}\d{5,}[A-Z0-9]*$/i`), and disabled ephemeral `PHPSESSID` forwarding during EPMS GET pagination to avoid PHP session lock timeouts.
+- **Offline Local OCR Fallback (`DOC-11`)**:
+  - Added `src/server/services/localOcrService.ts` (`tesseract.js` + `@napi-rs/canvas`, rasterizing up to 3 PDF pages via serialized worker mutex) integrated into Stage 2 of `documentExtractor.ts` whenever Gemini Vision is unconfigured, over budget, or fails, with `canAutoExpire: false` guardrail (`DL-7`/`AI-3`).
+- **SQLite FTS5 Full-Text Document Index (`tenders_fts`)**:
+  - Added `tenders.extracted_text` and external-content FTS5 virtual table `tenders_fts` with insert/update/delete synchronization triggers in `src/server/db/schema.ts`, queried safely via `buildFts5PrefixQuery`.
+- **North Star Refactor, Invariant Gates & SSRF Security Guard (`SEC-5`, `QA-4`)**:
+  - Refactored `docs/13-north-star-quality-standard.md` §4 into immutable acceptance criteria separated from volatile metrics in `docs/14-active-backlog.md`.
+  - Added `src/server/services/urlSafety.ts` (`validateExternalHttpUrl`) enforcing HTTP(S)-only external URLs on portal and digest webhook routes, rejecting loopback, RFC1918 private IPs, and link-local metadata ranges (`SEC-5`).
+  - Strengthened `tests/unit/docs-consistency.test.ts` to enforce code-to-documentation synchronization across schemas, server modules, canonical portals, baseline versions, and requirement proofs.
+
+### Version 1.8.0 (November 13, 2026)
+- **Structured Go / No-Go Bid Brief (`BID-1`)**:
+  - Added optional `BidBrief` JSON extraction (`bidSecurityAmount`, `tenderFee`, `requiredRegistrations`, `requiredExperience`, `deliverablesSummary`, `bidMethod`) in `ocrService.ts`, `documentExtractor.ts`, `documentApply.ts`, and `tenderAnalysis.ts`, persisted in `tenders.bid_brief` and rendered as a collapsible panel in `Detail.tsx`.
+- **Proactive 48h Closing Alerts & Daily Digest (`OPS-7`)**:
+  - Added `getAlertsDigest` / `maybeDispatchDailyDigest` in `systemRepo.ts` + `scheduler.ts`, `/api/system/digest` endpoints in `system.routes.ts`, and the Inbox `Closing <=48h` filter chip in `InboxScreen.tsx`.
+- **Two-Speed Pagination & Bounded Parallel Portal Workers (`SCR-4`, Plan C/D)**:
+  - Added `quickMaxPages` / `deepMaxPages` on `PortalDefinition` (`portalList.ts`), SQLite early-stop for known unchanged pages, `depth` parameter on `/api/scan/start`, bounded parallel crawling (`3` HTTP / `1` Playwright workers), and typed `ScraperErrorCode` tracking in `portal_health.last_error_code`.
+- **Production Runtime Separation & Multi-Page PDF Reading (`OPS-8`)**:
+  - Added compiled `esbuild` server bundle (`dist-server/server.mjs`) launched cleanly by `npm start` and `start-tender-tracker.bat` without dev-watcher overhead.
+  - Removed the initial 5-page cap in `documentExtractor.ts` so full digital PDFs are read locally and tabular `<Date> by or before <Time>` deadlines are matched reliably (`DL-8`).
+
 ### Version 1.7.0 (November 12, 2026)
 - **100% Clean Audit Pass on North-Star Quality Register**:
   - All 60 active architectural and operational requirements verified and tested by name across 39 test suites (598 passing tests).
@@ -152,7 +176,7 @@
   - Built unified document result application (`documentApply.ts`) across crawler, fetch documents, and analyze routes.
   - Fixed HTML download rejections on non-document payloads (`dossierManager.ts`) and chunk-by-chunk UTF-8 buffer decoding.
   - Added full scan clock (`last_full_scan_at`), Windows Task Scheduler logon script (`scripts/install-startup-task.ps1`), and UI freshness indicator.
-  - Ran live database cleanup D1–D3 (the D4 full-scan check is still open) and expanded the test suite to **525 passing tests across 34 test files**.
+  - Ran live database cleanup D1–D3 (D4 full-scan verification subsequently completed in `v1.7.0`) and expanded the test suite to **525 passing tests across 34 test files**.
 
 ### Version 1.4.0 (November 10–11, 2026)
 - **Ingestion Pipeline Upgrade (Phases 0–4) & Backlog Resolution (`docs/13`, `docs/14`)**:

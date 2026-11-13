@@ -18,10 +18,11 @@ Returns a list of all active opportunities.
 - **Query Parameters**:
   - `status` *(optional)*: Filter by pipeline status (`New Opportunity`, `Under Review`, `Preparing Bid`, `Submitted`, `Won`, `Passed`).
   - `track` *(optional)*: Filter by matched domain track.
-  - `search` *(optional)*: Text query matched against title, organization, reference number, or description.
+  - `search` *(optional)*: FTS5 prefix + semantic fallback text query matched against title, organization, reference number, description, and extracted PDF/DOCX text (`extracted_text`).
   - `bookmarkedOnly` *(optional, `true`\|`false`)*: Filter starred items.
   - `corrigendumOnly` *(optional, `true`\|`false`)*: Filter tenders with active unacknowledged amendments.
-- **Response**: `200 OK` array of tender objects.
+  - `closingWithinHours` *(optional, integer)*: Filter open opportunities closing within the next `N` hours (e.g., `48` for the `Closing <=48h` Inbox chip).
+- **Response**: `200 OK` array of tender objects (including parsed `bid_brief_json` when structured Go/No-Go brief fields are available).
 
 ### `GET /api/tenders/:id`
 Retrieves a single tender by its unique identifier.
@@ -208,7 +209,7 @@ Returns health metrics, access modes, and configuration for all active procureme
 - **Response**: `200 OK` array of `PortalHealth` records.
 
 ### `POST /api/portals`
-Adds a new custom procurement portal to SQLite.
+Adds a new custom procurement portal to SQLite. URLs are validated by `validateExternalHttpUrl` (`urlSafety.ts`, `SEC-5`), rejecting non-`http:`/`https:` schemes, embedded credentials, loopback (`localhost`, `127.0.0.1`), RFC1918 private IPs, and link-local/metadata ranges (`400 Bad Request`).
 - **Request Body**:
   ```json
   {
@@ -220,14 +221,14 @@ Adds a new custom procurement portal to SQLite.
     "access_mode": "public"
   }
   ```
-- **Response**: `201 Created` (`{"success": true, "portal": {...}}`).
+- **Response**: `201 Created` (`{"success": true, "portal": {...}}`) or `400 Bad Request`.
 
 ### `DELETE /api/portals/:portalId`
 Deletes a procurement portal from active monitoring and records it in `deleted_portals` so it is not re-seeded.
 - **Response**: `200 OK` (`{"success": true, "portal_id": "...", "message": "..."}`).
 
 ### `PUT /api/portals/:portalId`
-Updates portal settings (name, website URL, base URL, tier, access mode). Enforces strict origin normalization on `base_url`.
+Updates portal settings (name, website URL, base URL, tier, access mode). Enforces strict origin normalization on `base_url` and `SEC-5` external URL safety (`validateExternalHttpUrl`).
 - **Request Body**:
   ```json
   {
@@ -236,7 +237,7 @@ Updates portal settings (name, website URL, base URL, tier, access mode). Enforc
     "base_url": "https://example.gov.pk"
   }
   ```
-- **Response**: `200 OK` (`{"success": true, "message": "Portal updated successfully"}`).
+- **Response**: `200 OK` (`{"success": true, "message": "Portal updated successfully"}`) or `400 Bad Request`.
 
 ### `POST /api/portals/:portalId/reset-default`
 Resets a modified portal's URL, access mode, and tier back to canonical baseline values in `PORTAL_DEFINITIONS`.
@@ -287,15 +288,17 @@ Returns immediate snapshot of crawler status.
   ```json
   {
     "isScanning": true,
-    "currentPortal": "Federal PPRA (EPADS)",
+    "currentPortal": "Federal PPRA (EPMS)",
+    "activePortals": ["Federal PPRA (EPMS)", "Punjab PPRA (eproc.punjab.gov.pk)"],
+    "scanDepth": "quick",
     "progressPercent": 45,
     "completedPortals": 8,
     "totalPortals": 18,
     "newTendersFound": 12,
     "corrigendaFound": 2,
     "heldForScope": 3,
-    "lastScanTimestamp": "2026-11-04T09:00:00+05:00",
-    "lastFullScanTimestamp": "2026-11-04T08:00:00+05:00"
+    "lastScanTimestamp": "2026-11-13T09:00:00+05:00",
+    "lastFullScanTimestamp": "2026-11-13T08:00:00+05:00"
   }
   ```
 
@@ -355,4 +358,4 @@ Lists all available SQLite backups with filenames, creation timestamps, and byte
 
 ### `GET /api/system/digest` & `POST /api/system/digest/settings`
 - `GET /api/system/digest` *(alias `/api/digest`, optional `?hours=48`)*: Returns the proactive alert summary (`closingSoon`, `closingSoonCount`, `unacknowledgedCorrigendaCount`, `newMatchesLast24hCount`) plus current `settings` (`enabled`, `webhookUrl`, `withinHours`, `lastSentDatePkt`).
-- `POST /api/system/digest/settings` *(alias `/api/digest/settings`)*: Updates opt-in daily digest webhook configuration (`enabled`, `webhookUrl`, `withinHours`) in `app_settings`.
+- `POST /api/system/digest/settings` *(alias `/api/digest/settings`)*: Updates opt-in daily digest webhook configuration (`enabled`, `webhookUrl`, `withinHours`) in `app_settings`. Non-empty `webhookUrl` values must pass `validateExternalHttpUrl` (`urlSafety.ts`, `SEC-5`, returning `400 Bad Request` on invalid or private/loopback targets).

@@ -2,9 +2,9 @@
 
 ## Test Tooling & Philosophy
 
-Tender Tracker uses **Vitest v4** with V8 code coverage. The test suite maintains **598 passing tests across 39 files** (~24 seconds total run time on `C:\Tender_Tracker`) organized into two isolated execution projects:
-1. **`node` Project**: Tests pure TypeScript utilities, Pakistani date parsing & deadline reconciliation, local PDF/DOCX extraction (`documentExtractor.ts`), durable document queue & worker (`ingestJobsRepo.ts`, `ingestWorker.ts`), 3-tier deduplication & 384-D `all-MiniLM-L6-v2` tagged vector spaces, strict reference validation (`referenceNo.ts`), token-boundary matching (`trackMatcher.ts`), modular scrapers (`htmlFetcher.ts`, `portalParsers.ts`, `tenderAnalysis.ts`, `ingestPipeline.ts`, and orchestrator `crawlerEngine.ts`), portal contract tests (`portal-contracts.test.ts`), 7-rule guarded URL healer (`healer.ts`), 4-model Google Gemini failover & JSON repair logic, Express API routes, retention/reconciliation, and schedulers.
-2. **`jsdom` Project**: Tests React 19 UI components (`InboxScreen`, `Detail`, `AddTenderModal`, `TenderRow`, `PipelineScreen`, `SourcesScreen`, `App`), deadline provenance badges, review banners (`Confirm` / `Pass as cancelled`), ingest budget controls, modal dialogs, inline previews, and slide-overs using `@testing-library/react`.
+Tender Tracker uses **Vitest v4** with V8 code coverage (`QA-1`–`QA-4` in [`13-north-star-quality-standard.md`](./13-north-star-quality-standard.md); `node` runner < 30s, full `npm run verify` gate < 60s, ≥ 80% line coverage across `src/`) organized into two isolated execution projects:
+1. **`node` Project**: Tests pure TypeScript utilities, Pakistani date parsing & deadline reconciliation, local PDF/DOCX extraction (`documentExtractor.ts`), offline `tesseract.js` fallback (`localOcrService.ts`), external URL SSRF safety (`urlSafety.ts`), durable document queue & worker (`ingestJobsRepo.ts`, `ingestWorker.ts`), 3-tier deduplication & 384-D `all-MiniLM-L6-v2` tagged vector spaces, strict reference validation (`referenceNo.ts`), token-boundary matching (`trackMatcher.ts`), modular scrapers (`htmlFetcher.ts`, `portalParsers.ts`, `tenderAnalysis.ts`, `ingestPipeline.ts`, and orchestrator `crawlerEngine.ts`), portal contract tests (`portal-contracts.test.ts`), 7-rule guarded URL healer (`healer.ts`), 4-model Google Gemini failover & JSON repair logic, Express API routes, retention/reconciliation, automated doc-to-code sync (`docs-consistency.test.ts`), and schedulers.
+2. **`jsdom` Project**: Tests React 19 UI components (`InboxScreen`, `Detail`, `AddTenderModal`, `TenderRow`, `PipelineScreen`, `SourcesScreen`, `App`), deadline provenance badges, Go/No-Go `BidBrief` panels, review banners (`Confirm` / `Pass as cancelled`), ingest budget & digest controls, modal dialogs (`aria-modal`, `aria-labelledby`), inline previews, and slide-overs using `@testing-library/react`.
 
 ---
 
@@ -16,7 +16,7 @@ tests/
     test-env.ts           # Test environment initialization
     node-setup.ts         # Temp directory database isolation & safety assertions
     jsdom-setup.ts        # JSDOM matchMedia mock & automatic afterEach(cleanup)
-  unit/                   # Pure function tests (dates, document extractor, deduplication, embeddings, keywords, theme)
+  unit/                   # Pure function tests (dates, document extractor, deduplication, embeddings, keywords, theme, urlSafety, docs-consistency)
   db/                     # SQLite repositories, durable document_ingest_jobs queue, triggers, and audit logging
   scraper/                # Offline crawler engine, portal-contracts, ingest-queue, URL healer, Playwright, auth, and Gemini OCR tests
   api/                    # Supertest HTTP integration tests against createApp()
@@ -43,10 +43,10 @@ tests/
 ## Running Tests & Coverage
 
 ```powershell
-# Run full quality gate: TypeScript typecheck + all 598 tests across 39 suites
+# Run full quality gate: TypeScript typecheck, all Vitest suites, and production client/server builds
 npm run verify
 
-# Run all unit, scraper, API, and UI tests (598 passing tests across 39 suites)
+# Run all unit, db, scraper, API, and UI tests
 npm test
 
 # Run tests in watch mode during development

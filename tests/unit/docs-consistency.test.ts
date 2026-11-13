@@ -100,4 +100,94 @@ describe('docs-consistency (QA-4 Automated Documentation Consistency)', () => {
     expect(missingProofFiles).toEqual([]);
     expect(untestedRows).toEqual([]);
   });
+
+  it('proves every table in schema.ts is documented in docs/03-database-schema.md (QA-4)', () => {
+    const schemaFile = fs.readFileSync(path.resolve(rootDir, 'src/server/db/schema.ts'), 'utf8');
+    const doc03 = fs.readFileSync(path.resolve(docsDir, '03-database-schema.md'), 'utf8');
+
+    const tablePattern = /CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+([a-z_][a-z0-9_]*)/gi;
+    const schemaTables = new Set<string>();
+    let match: RegExpExecArray | null;
+    while ((match = tablePattern.exec(schemaFile)) !== null) {
+      schemaTables.add(match[1].toLowerCase());
+    }
+
+    const undocumented = [...schemaTables].filter(t => !doc03.includes(t));
+    expect(schemaTables.size).toBeGreaterThanOrEqual(10);
+    expect(undocumented).toEqual([]);
+  });
+
+  it('proves every server module under src/server/ is documented in docs/02-architecture-and-stack.md (QA-4)', () => {
+    const doc02 = fs.readFileSync(path.resolve(docsDir, '02-architecture-and-stack.md'), 'utf8');
+    const dirsToCheck = [
+      'src/server/db',
+      'src/server/db/repositories',
+      'src/server/routes',
+      'src/server/scrapers',
+      'src/server/services'
+    ];
+
+    const missingModules: string[] = [];
+    for (const relDir of dirsToCheck) {
+      const fullDir = path.resolve(rootDir, relDir);
+      const files = fs.readdirSync(fullDir)
+        .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && f !== 'index.ts');
+      for (const file of files) {
+        if (!doc02.includes(file)) {
+          missingModules.push(`${relDir}/${file}`);
+        }
+      }
+    }
+
+    expect(missingModules).toEqual([]);
+  });
+
+  it('proves canonical PORTAL_DEFINITIONS IDs & schema sync with docs/05 and operational docs avoid retired epads (QA-4)', () => {
+    const doc01 = fs.readFileSync(path.resolve(docsDir, '01-overview.md'), 'utf8');
+    const doc03 = fs.readFileSync(path.resolve(docsDir, '03-database-schema.md'), 'utf8');
+    const doc04 = fs.readFileSync(path.resolve(docsDir, '04-api-reference.md'), 'utf8');
+    const doc05 = fs.readFileSync(path.resolve(docsDir, '05-portals-and-scraping.md'), 'utf8');
+    const doc13 = fs.readFileSync(path.resolve(docsDir, '13-north-star-quality-standard.md'), 'utf8');
+
+    const missingFromDoc05 = PORTAL_DEFINITIONS.map(p => p.id).filter(id => !doc05.includes(`\`${id}\``));
+    expect(missingFromDoc05).toEqual([]);
+
+    expect(doc05).toContain('PortalDefinition');
+    expect(doc05).not.toContain('UnifiedPortalConfig');
+    expect(doc13).not.toContain('UnifiedPortalConfig');
+
+    expect(doc01).not.toMatch(/Federal PPRA\/EPADS/i);
+    expect(doc03).not.toContain('`epads`');
+    expect(doc04).not.toContain('Federal PPRA (EPADS)');
+  });
+
+  it('proves baseline version matches across docs/12, docs/13, and docs/14 and bans brittle test counts (QA-4)', () => {
+    const doc12 = fs.readFileSync(path.resolve(docsDir, '12-decisions-and-changelog.md'), 'utf8');
+    const doc13 = fs.readFileSync(path.resolve(docsDir, '13-north-star-quality-standard.md'), 'utf8');
+    const doc14 = fs.readFileSync(path.resolve(docsDir, '14-active-backlog.md'), 'utf8');
+
+    const ver13 = doc13.match(/\*\*Applies to:\*\*\s*v(\d+\.\d+\.\d+)/)?.[1];
+    const ver14 = doc14.match(/\*\*System Baseline:\*\*\s*v(\d+\.\d+\.\d+)/)?.[1];
+    expect(ver13).toBeTruthy();
+    expect(ver14).toBe(ver13);
+    expect(doc12).toContain(`### Version ${ver13}`);
+
+    const filesToCheck = [
+      path.resolve(rootDir, 'README.md'),
+      ...fs.readdirSync(docsDir)
+        .filter(f => /^\d{2}-.*\.md$/.test(f))
+        .map(f => path.join(docsDir, f))
+    ];
+    const brittleCountFiles: string[] = [];
+    const currentFiles = ['README.md', '01-overview.md', '02-architecture-and-stack.md', '03-database-schema.md', '04-api-reference.md', '05-portals-and-scraping.md', '06-pipeline-and-workflow.md', '07-operations-and-backup.md', '08-testing-and-coverage.md', '09-known-bugs-and-fixes.md', '10-operator-guide.md', '11-configuration-and-env.md', '13-north-star-quality-standard.md', '14-active-backlog.md'];
+    for (const filePath of filesToCheck) {
+      const base = path.basename(filePath);
+      if (!currentFiles.includes(base)) continue;
+      const content = fs.readFileSync(filePath, 'utf8');
+      if (/\b\d{3}\s+(?:passing\s+)?tests\s+across\s+\d{2}\s+(?:test\s+)?(?:files|suites)\b/i.test(content)) {
+        brittleCountFiles.push(base);
+      }
+    }
+    expect(brittleCountFiles).toEqual([]);
+  });
 });

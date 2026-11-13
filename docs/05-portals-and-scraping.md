@@ -118,60 +118,39 @@ When a portal deploys Cloudflare Turnstile, CAPTCHA bot protection, or requires 
 
 ---
 
-## Unified Declarative Portal Configuration Schema
+## Portal Configuration & Pagination Schema (`src/server/scrapers/portalList.ts`)
 
-To eliminate bespoke, one-off extractor branches and allow adding new procurement portals declaratively, Tender Tracker defines a unified portal specification schema (`src/server/scrapers/portalList.ts`):
+Every canonical portal in `PORTAL_DEFINITIONS` conforms to `PortalDefinition` and optional two-speed `PaginationConfig`:
 
 ```typescript
-export interface UnifiedPortalConfig {
-  /** Unique kebab-case identifier (e.g. 'punjab_eproc', 'ndma') */
+export interface PaginationConfig {
+  kind: 'query' | 'path' | 'postback' | 'click';
+  param?: string;          // e.g. 'page'
+  pathPattern?: string;
+  maxPages: number;        // baseline crawl page bound
+  quickMaxPages?: number;  // fast periodic crawl bound (with DB early-stop on known pages)
+  deepMaxPages?: number;   // 24h deep crawl bound
+  nextSelector?: string;
+}
+
+export interface PortalDefinition {
   id: string;
-  /** Formal display name */
   name: string;
-  /** Operational category */
   category: 'Regulatory' | 'Federal/Regional' | 'Tech & Skills' | 'Multilateral' | 'Aggregator';
-  /** Transport execution tier */
-  tier: 'http' | 'playwright';
-  /** Access barrier classification */
-  accessMode: 'public' | 'login_required' | 'offline_broken';
-  /** Origin base URL */
+  tier: 'playwright' | 'http';
   baseUrl: string;
-  /** Specific tender listing subpath */
   tendersUrl: string;
-
-  /** Pagination configuration for multi-page crawling */
-  pagination?: {
-    type: 'page_param' | 'offset' | 'postback' | 'none';
-    paramName?: string;    // e.g. 'page', 'p'
-    startPage?: number;    // default 1
-    pageSize?: number;     // e.g. 20
-    maxPages?: number;     // default 5
-  };
-
-  /** Declarative CSS selectors replacing custom Cheerio branches */
-  selectors?: {
-    container: string;       // Row or card element (e.g. 'tr.tender-row-main', '.tender-card')
-    siblingRow?: string;     // Multi-row grouping (e.g. 'tr.tender-row-dates' for BPPRA)
-    title: string;           // Title element selector
-    reference?: string;      // Reference number element or attribute
-    closingDate?: string;    // Closing deadline element or data-attribute
-    publishDate?: string;    // Publication date element
-    agency?: string;         // Procuring agency name selector
-    directUrl?: string;      // Detail link or direct document anchor
-    attachments?: string;    // Bidding document / PDF download links
-  };
-
-  /** Authentication parameters for login_required portals */
-  auth?: {
-    loginUrl: string;
-    usernameSelector?: string;
-    passwordSelector?: string;
-    submitSelector?: string;
-  };
+  fileCode?: string;
+  loginUrl?: string;
+  description: string;
+  defaultKeywords: string[];
+  accessMode: 'public' | 'login_required' | 'cloudflare' | 'offline_broken';
+  verifiedStatus: string;
+  pagination?: PaginationConfig;
 }
 ```
 
-### Schema Principles & Phased Rollout
-1. **Single Source of Truth**: All 18 canonical portals are defined in `PORTAL_DEFINITIONS` adhering to this interface.
-2. **Declarative Fallback**: When `selectors` is provided on a portal definition, `portalParsers.ts` runs the declarative selector extraction loop automatically. If omitted, it falls back to the deterministic structural parsers (`parseBppraRows`, `parseNdmaCards`, `parseFdeCards`, `parsePsdfBoxes`) or general table parsing.
-3. **Zero Engine Modifications**: Adding a 19th portal requires only adding an entry to `PORTAL_DEFINITIONS` without touching crawler or parser logic.
+### Configuration & Parser Principles
+1. **Single Source of Truth**: All 18 canonical portals are defined in `PORTAL_DEFINITIONS` adhering to `PortalDefinition`, while user edits live in SQLite `portal_health` (`HEAL-7` preserves `reset-default`).
+2. **Two-Speed Pagination (`quick` vs `deep`)**: `crawlerEngine.ts` selects `quickMaxPages` for routine scans (with SQLite early-stop on `page >= 2` when all items match known unchanged notices) and `deepMaxPages` for scheduled/manual deep sweeps, recording `pages_scanned` in `portal_health`.
+3. **Deterministic Dispatch + Heuristic Fallback**: `portalParsers.ts` dispatches portal-specific Cheerio extractors by `portal.id` / URL pattern (`epms_ppra`, `bppra`, `ndma`, `fde`, `psdf`, ASP.NET RadGrid for `punjab_eproc`, etc.) before falling back to generic table/PDF link parsing and Phase-2 Gemini DOM extraction.

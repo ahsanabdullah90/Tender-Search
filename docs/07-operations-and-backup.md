@@ -37,7 +37,7 @@ To restore from a backup:
    ```powershell
    Copy-Item data/backups/tender_tracker_20261102.db data/tender_tracker.db
    ```
-5. Restart the server (`start-tender-tracker.bat` or `npm run dev`).
+5. Restart the server (`start-tender-tracker.bat` / `npm start`, or `npm run dev` during development).
 
 ---
 
@@ -60,7 +60,7 @@ Over months of operation, passed and expired tenders can accumulate cached files
 ## Daily Operational Health Checklist
 
 At the beginning of each business day:
-1. **Launch Tender Tracker**: Double-click `start-tender-tracker.bat` or launch via npm (`npm run dev`).
+1. **Launch Tender Tracker**: Double-click `start-tender-tracker.bat` (runs compiled production bundle `npm start`) or launch via `npm run dev` during development.
 2. **Review KPI Banner**:
    - Check if any portal has `hitl_required` (amber warning). If present, click "Launch HITL Browser", solve the challenge or sign in, and click "I've finished".
    - Check if any portal is in `error` state.

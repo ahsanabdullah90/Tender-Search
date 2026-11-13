@@ -9,7 +9,7 @@ This guide outlines the day-to-day routine for managing and tracking tenders usi
 ### 1. Starting the Application
 
 On Windows 11:
-- Double-click **`start-tender-tracker.bat`** in the project directory, or run from PowerShell:
+- Double-click **`start-tender-tracker.bat`** in the project directory (builds if missing and starts the compiled production server via `npm start`), or run in PowerShell for live hot-reloading during development:
   ```powershell
   npm run dev
   ```
@@ -53,7 +53,8 @@ The **Inbox** holds newly discovered opportunities that matched your domain keyw
   - Click **Confirm** to clear the review flag and keep the tender.
   - Click **Pass** (or **Pass as cancelled** on cancelled notices) to move it to Passed.
 - **Retry Document Fetch**: If background document downloads failed (`Could not fetch all documents`), click **"Retry document fetch"** in the detail header to re-queue them immediately.
-- **Filtering**: Use the search bar or the **Filters** popover (domain tracks, bookmarked, amended, sort by closing soonest / newest).
+- **Filtering**: Use the FTS5-powered search bar (matches titles, agencies, references, and extracted PDF/DOCX text), the **`Closing <=48h`** quick-filter chip for urgent deadlines, or the **Filters** popover (domain tracks, bookmarked, amended, sort by closing soonest / newest).
+- **Go / No-Go Bid Brief**: Open the collapsible **Bid Brief** card inside the tender detail panel to inspect bid security, tender fee, required registrations/experience, bid method, and deliverables extracted from EPMS detail pages or tender PDFs (`BID-1`).
 - **Track this bid**: Moves the tender out of the Inbox and into your active **Pipeline** under `Under Review`.
 - **Pass**: Archives the notice if it is not commercially viable (with an instant **Undo** toast).
 - **Star (Bookmark)**: Pins high-priority opportunities so you never lose sight of them (bookmarked tenders are never auto-expired).
@@ -101,7 +102,8 @@ Navigate to **Sources & Keywords**:
    - **Streamlined Editing**: Click **"Edit"** on any portal to update its **Portal name** and **Website address** in a clean two-field dialog.
    - **Portal Login**: Enter your login credentials for **Tender Services Pakistan** (`https://tenderservice.pk/permits/login.php`).
 3. **Data Subtab**:
-   - **Document Ingest & Vision Budgets**: View today's Gemini Vision usage and configure the upfront scan time budget (seconds), maximum file size (MB), and Vision OCR call caps per scan and per day.
+   - **Document Ingest, Offline OCR & Vision Budgets**: View today's Gemini Vision usage, toggle offline `local_ocr` fallback (`local_ocr_enabled`), and configure the upfront scan time budget (seconds), maximum file size (MB), and Vision/text call caps per scan and per day.
+   - **Daily Closing Digest Webhook**: Opt-in daily alert webhook (`digest_enabled`, `digest_webhook_url`, `digest_within_hours` default 48h) dispatching once per PKT day for urgent closings and unacknowledged corrigenda.
    - **CSV Export**: Export all bids, unreviewed inbox items, or active pipeline pursuits formatted with UTF-8 BOM for Microsoft Excel.
    - **Backups**: Create on-demand database snapshots (`data/backups/`).
    - **Saved Documents & Automated Retention**: Delete cached documents for passed tenders, run on-demand disk-to-DB file reconciliation (`Reconcile files on disk`), or configure automated background retention cleanup.

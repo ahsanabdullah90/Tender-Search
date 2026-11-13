@@ -11,7 +11,7 @@ Public procurement in Pakistan is fragmented across dozens of independent federa
 ## Core Value Proposition
 
 1. **Autonomous Multi-Portal Discovery**:
-   Continuously monitors 18 public procurement portals across Pakistan, covering regulatory authorities (Federal PPRA/EPADS, Punjab PPRA, Sindh SPPRA, Balochistan BPPRA, KP KPPRA), federal & regional entities (NDMA, FDE, MOFEPT, Gilgit-Baltistan), technology & skills authorities (PSEB/TechDestination, Ignite, PSDF, PSDA, PEEF), multilateral agencies (UNGM, GIZ), and aggregators (Tender Services Pakistan, PID).
+   Continuously monitors 18 public procurement portals across Pakistan, covering regulatory authorities (Federal PPRA (EPMS), Punjab PPRA, Sindh SPPRA, Balochistan BPPRA, KP KPPRA), federal & regional entities (NDMA, FDE, MOFEPT, Gilgit-Baltistan), technology & skills authorities (PSEB/TechDestination, Ignite, PSDF, PSDA, PEEF), multilateral agencies (UNGM, GIZ), and aggregators (Tender Services Pakistan, PID).
 
 2. **Self-Healing Scraper & 7 Anti-Corruption Rules**:
    Recovers when a government portal moves its tender page (HTTP 404/410/500) or redirects to a new host/port (e.g., `bppra.gob.pk` $\rightarrow$ `bpptwo.vdc.services:5451/Tenders`), governed by 7 strict Anti-Corruption Rules (`AGENTS.md §2`):
@@ -19,8 +19,8 @@ Public procurement in Pakistan is fragmented across dozens of independent federa
    - **Adaptive AI DOM Extraction**: When deterministic CSS selectors yield 0 items on an HTTP 200 page containing procurement text (and not an explicit empty state like `"No active tenders"` or `"No Opening"`), compacts the DOM while preserving inline `[Label](URL)` links and extracts structured tender items via Google Gemini.
 
 3. **Local-First Document Ingestion & Durable Retry Queue**:
-   - **Local Digital Extraction (`documentExtractor.ts`)**: Reads the text layer of digital PDFs (`pdfjs-dist`) and Word `.docx` files (`mammoth`) locally in ~100–250 ms without consuming Gemini quota, extracting phrase-anchored submission deadlines, reference numbers, budgets, and scope text.
-   - **Budgeted Vision Fallback (`ingestBudget.ts`)**: Invokes the 4-model Gemini Vision failover chain (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`) only for scanned PDFs and image clippings, governed by configurable per-scan and daily budgets.
+   - **Local Digital Extraction (`documentExtractor.ts`)**: Reads the text layer of digital PDFs (`pdfjs-dist`, all pages) and Word `.docx` files (`mammoth`) locally in ~100–250 ms without consuming Gemini quota, extracting phrase-anchored submission deadlines, reference numbers, budgets, scope text, and Go/No-Go `BidBrief` fields.
+   - **Budgeted Vision & Offline OCR Fallbacks (`ingestBudget.ts`, `localOcrService.ts`)**: Invokes the 4-model Gemini Vision failover chain (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`) for scanned PDFs and image clippings within configurable per-scan and daily budgets, and falls back to offline `local_ocr` (`tesseract.js` + `@napi-rs/canvas`, capped at 3 pages/PDF) when Vision is unconfigured or over budget.
    - **Durable Background Worker (`ingestWorker.ts` & `document_ingest_jobs`)**: Queues remaining attachments and failed/timed-out downloads with lease-based crash recovery and exponential backoff (2 $\rightarrow$ 10 $\rightarrow$ 30 minutes).
 
 4. **Hybrid Keyword + 384-D Semantic Track Matching**:

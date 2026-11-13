@@ -218,7 +218,7 @@ Every requirement below exists to protect one of these.
 | QA-1 | The `node` test project passes in under 30 seconds and the full `npm run verify` gate (lint + `node` & `jsdom` suites + client/server builds) passes in under 60 seconds. | `vitest.config.ts`, `package.json` | `npm run verify` | Tested |
 | QA-2 | Line coverage across `src/` is ≥ 80% (`repositories`, `deduplicator`, `scrapers`, `dateParser` enforced via coverage thresholds). | `vitest.config.ts` | `npm run test:coverage` | Tested |
 | QA-3 | No automated test needs a live internet connection. | `tests/fixtures/` | `npm run verify` | Tested |
-| QA-4 | Every source file path in `docs/`, canonical `PORTAL_DEFINITIONS` count, documented DB table, and §3 proof-test reference exists; §3 has zero duplicate IDs or active untested rows. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
+| QA-4 | Every source file path in `docs/`, canonical `PORTAL_DEFINITIONS` count & IDs, database tables in `schema.ts`, server modules under `src/server/`, baseline version across `docs/12`/`13`/`14`, and §3 proof-test references stay synchronized; zero duplicate IDs, active untested rows, or brittle hardcoded test counts. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
 
 ---
 
@@ -268,8 +268,8 @@ Counted from §3 for **v1.9.0**:
 
 All four core architectural design areas are now fully specified and documented:
 
-1. **Module layout for `crawlerEngine.ts`**: **Completed 2026-11-11** — decomposed into single-responsibility submodules (`htmlFetcher.ts`, `crawlerDeps.ts`, `portalParsers.ts`, `trackMatcher.ts`, `tenderAnalysis.ts`, `ingestPipeline.ts`), shrinking `crawlerEngine.ts` to ~430 lines while preserving 100% backward compatibility (`docs/02`).
-2. **Per-portal settings schema**: **Completed 2026-11-11** — unified `UnifiedPortalConfig` interface defined in `docs/05-portals-and-scraping.md`, standardizing container/field selectors, pagination parameters, tier, and access mode to allow zero-code declarative additions.
+1. **Module layout for `crawlerEngine.ts`**: **Completed 2026-11-11** — decomposed into single-responsibility submodules (`htmlFetcher.ts`, `crawlerDeps.ts`, `portalParsers.ts`, `trackMatcher.ts`, `tenderAnalysis.ts`, `ingestPipeline.ts`) while keeping `crawlerEngine.ts` as the orchestrator and facade (`docs/02`).
+2. **Per-portal settings schema**: **Completed 2026-11-13** — `PortalDefinition` and two-speed `PaginationConfig` (`quickMaxPages`/`deepMaxPages`) documented in `docs/05-portals-and-scraping.md` matching `src/server/scrapers/portalList.ts`.
 3. **Allowed transitions for `ingestion_status`**: **Completed 2026-11-11** — state diagram and invariants documented in `docs/06-pipeline-and-workflow.md`, defining transitions between `staging`, `awaiting_scope`, `ready`, and `failed_verification`, alongside retention auto-release guards (`RET-8`, `MATCH-4`).
 4. **Non-goals & system boundaries**: **Completed 2026-11-11** — explicitly documented in `docs/01-overview.md`, establishing single-operator scope, local Pakistan ISP network trust, zero-cost HITL browser sessions, manual final bid submission, and embedded SQLite vector storage.
 
@@ -287,9 +287,17 @@ Get-ChildItem -Path "src/server" -Recurse -Filter "*.ts" | Where-Object { $_.Ful
 
 Then, in the same change:
 
-3. Verify the change against every affected requirement in §3 and every invariant gate in §4 (never relax a rule or target threshold in this document to pass broken behavior).
-4. Leave `docs/13` untouched for routine work; only edit §3/§6 when a new standard rule is introduced, a requirement's proof status changes, or the operator decides a question in §6.
-5. Record operational runs, open/closed work items, and point-in-time metrics in [`14-active-backlog.md`](./14-active-backlog.md).
+3. Update affected documentation per the **Code-to-Documentation Synchronization Matrix** (`AGENTS.md §4`):
+   - `src/server/db/schema.ts` $\rightarrow$ `docs/03-database-schema.md`
+   - `src/server/routes/*.routes.ts` $\rightarrow$ `docs/04-api-reference.md`
+   - `src/server/scrapers/` (`portalList.ts`, parsers, healer) $\rightarrow$ `docs/05-portals-and-scraping.md`
+   - New modules under `src/server/` $\rightarrow$ `docs/02-architecture-and-stack.md`
+   - `app_settings` / `.env` / startup changes $\rightarrow$ `docs/11-configuration-and-env.md` & `docs/03-database-schema.md`
+   - UI workflow changes $\rightarrow$ `docs/10-operator-guide.md`
+   - Baseline version / feature releases $\rightarrow$ `docs/12-decisions-and-changelog.md` & `docs/14-active-backlog.md`
+4. Verify the change against every affected requirement in §3 and every invariant gate in §4 (never relax a rule or target threshold in this document to pass broken behavior).
+5. Leave `docs/13` untouched for routine work; only edit §3/§6 when a new standard rule is introduced, a requirement's proof status changes, or the operator decides a question in §6.
+6. Record operational runs, open/closed work items, and point-in-time metrics in [`14-active-backlog.md`](./14-active-backlog.md).
 
 ---
 

@@ -38,7 +38,7 @@ All approved non-breaking improvement plans are implemented and moved to the Com
   - **Plan C (Two-Speed Pagination + DB Early-Stop):** Added `quickMaxPages` / `deepMaxPages` on paginated portals in `src/server/scrapers/portalList.ts`, `depth` support on `POST /api/scan/start` (`src/server/routes/scan.routes.ts`) and `startCrawlerScan`/`scrapePortal` (`src/server/scrapers/crawlerEngine.ts`), SQLite early-stop on `page >= 2` when all items match known unchanged notices via `getKnownTenderMapForPortal`, and 24h deep-scan selection in `src/server/services/scheduler.ts`.
   - **Plan D (Bounded Concurrency Parallel Workers & Typed Error Taxonomy):** Extracted `scanSinglePortal` + `runWithConcurrency` in `src/server/scrapers/crawlerEngine.ts` (HTTP concurrency `3`, Playwright concurrency `1`), added `activePortals` / `scanDepth` tracking on `ScanStatus`, and classified failures via `classifyScraperError` into `portal_health.last_error_code` (`TIMEOUT`, `TLS_ERROR`, `CLOUDFLARE_HITL`, `LOGIN_REQUIRED`, `HTTP_4XX_5XX`, `PARSE_EMPTY`, `NETWORK_UNREACHABLE`).
 
-- **EPADS v2.0 Open Federal Integration (`2026-11-13`)**:
+- **EPADS v2.0 Open Federal Integration (`2026-11-13`) *(Superseded in v1.9.0 by Item 1 `epms_ppra` after `epads.gov.pk` re-enabled WAF blocking)***:
   - Updated `epads` in `portalList.ts` from login-gated `epms.ppra.gov.pk` to open `https://epads.gov.pk/` (`tier: 'http'`, `accessMode: 'public'`, `pagination: { kind: 'query', param: 'page', maxPages: 3 }`).
   - Added deterministic EPADS row extractor in `portalParsers.ts` (extracting untruncated tooltip titles, procuring agency, `P`-prefixed ref no, `Published On:` / `Closing On:` PKT timestamps + `"Xh Ym Left"` countdowns, and corrigendum flags).
   - Updated `parseDateString` (`dateParser.ts`) to strip leading weekdays and convert 12h `AM/PM` times explicitly to `+05:00` PKT.
@@ -81,11 +81,11 @@ All approved non-breaking improvement plans are implemented and moved to the Com
 
 ---
 
-## 3. Completed Design Specifications (from `docs/13` §7)
+## 4. Completed Design Specifications (from `docs/13` §7)
 
 All four design specifications are completed and documented:
 - **Crawler Submodule Layout**: Decomposed into `htmlFetcher.ts`, `crawlerDeps.ts`, `portalParsers.ts`, `tenderAnalysis.ts`, `ingestPipeline.ts` (`docs/02`).
-- **Unified Portal Schema (`UnifiedPortalConfig`)**: Declarative selector & pagination configuration schema documented in `docs/05`.
+- **Portal Configuration Schema (`PortalDefinition` / `PaginationConfig`)**: Canonical two-speed pagination and portal metadata schema documented in `docs/05`.
 - **`ingestion_status` Transitions**: Mermaid state diagram and retention invariants documented in `docs/06`.
 - **Non-Goals & System Boundaries**: Explicit architectural constraints documented in `docs/01`.
 

@@ -137,6 +137,13 @@ erDiagram
         text verified_status
     }
 
+    PORTAL_HEALTH ||--o| DELETED_PORTALS : "retired_to"
+
+    DELETED_PORTALS {
+        text portal_id PK
+        text deleted_at
+    }
+
     DELETED_TENDERS {
         text id PK
         text canonical_id
@@ -191,6 +198,7 @@ The primary entity representing scraped, matched, and tracked procurement opport
 | `bid_brief` | `TEXT` | `NULL` | Optional JSON `BidBrief` (`bidSecurityAmount`, `tenderFee`, `requiredRegistrations`, `requiredExperience`, `deliverablesSummary`, `bidMethod`). |
 | `cached_dossiers` | `TEXT` | `DEFAULT '[]'` | JSON array of downloaded bidding document metadata `{label, localPath, originalUrl, mimeType, sha256, sizeBytes, downloadedAt}`. |
 | `attachment_urls` | `TEXT` | `DEFAULT '[]'` | JSON array of discovered document URLs persisted at ingest so attachments can be backfilled or re-queued (`P1-1`). |
+| `extracted_text` | `TEXT` | `DEFAULT ''` | Aggregated local PDF/DOCX and OCR document text synchronized into `tenders_fts`. |
 | `embedding` | `BLOB` | `NULL` | Tagged 384-dimensional float32 vector (`model`-tagged `all-MiniLM-L6-v2` or `fast`-tagged fallback). |
 | `semantic_score` | `REAL` | `DEFAULT 0` | Cosine similarity score against the best-matching active domain track. |
 | `has_corrigendum` | `INTEGER`| `DEFAULT 0` | Flag (0 or 1) indicating active amendment notice. |
@@ -273,6 +281,7 @@ Configurable business domain filters.
 | `name` | `TEXT` | `NOT NULL` | Track title (e.g., `"Solar & Clean Energy"`). |
 | `positive_keywords`| `TEXT` | `NOT NULL` | JSON array of mandatory match words. |
 | `negative_keywords`| `TEXT` | `DEFAULT '[]'` | JSON array of exclusion words. |
+| `embedding` | `BLOB` | `NULL` | Cached 384-D `all-MiniLM-L6-v2` embedding of track name + positive keywords. |
 | `is_active` | `INTEGER`| `DEFAULT 1` | 1 if actively evaluated during scraping. |
 
 ---
@@ -282,7 +291,7 @@ Maintains operational health, credentials, and scan metrics for each of the 18 p
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
-| `portal_id` | `TEXT` | `PRIMARY KEY` | Identifier (e.g., `epads`, `punjab_eproc`). |
+| `portal_id` | `TEXT` | `PRIMARY KEY` | Identifier (e.g., `epms_ppra`, `punjab_eproc`). |
 | `portal_name` | `TEXT` | `NOT NULL` | Human-friendly name. |
 | `category` | `TEXT` | `NOT NULL` | `'Regulatory'`, `'Federal/Regional'`, `'Tech & Skills'`, `'Multilateral'`, `'Aggregator'`. |
 | `tier` | `TEXT` | `NOT NULL` | `'http'` (Cheerio) or `'playwright'` (Browser). |
@@ -308,11 +317,14 @@ Maintains operational health, credentials, and scan metrics for each of the 18 p
 ### 6. `app_settings`
 Key-value storage for application configuration managed directly via the UI:
 - `gemini_api_key`: Google AI Studio API key.
+- `local_ocr_enabled` (`true`/`false`, default `true`): Enables/disables offline `tesseract.js` fallback (`DOC-11`).
 - `retention_auto_clean` (`true`/`false`), `retention_grace_days` (default `2`), `retention_passed_days` (default `10`).
 - `ingest_upfront_time_budget_sec` (default `300`), `ingest_max_file_mb` (default `25`), `ingest_vision_calls_per_scan` (default `20`), `ingest_vision_calls_per_day` (default `100`).
 - `ingest_ai_text_calls_per_day` (default `150`): Daily budget cap for Gemini text cross-checks (`C3`).
 - `ingest_vision_calls_YYYY-MM-DD`: Daily background Vision counter (counters older than 7 days are automatically pruned by `pruneOldDailyVisionCounters(7)` during the retention cycle).
-- `last_full_scan_at`: Timestamp when the last full multi-portal scan completed. Used by `checkAndTriggerCatchUpScan` so single-portal scans never delay the 12-hour full scan clock (`F5`).
+- `digest_enabled` (`true`/`false`), `digest_webhook_url` (SSRF-validated via `urlSafety.ts`), `digest_within_hours` (default `48`), `digest_last_sent_pkt` (`YYYY-MM-DD`): Daily closing alert digest settings (`OPS-7`, `SEC-5`).
+- `last_full_scan_at`: Timestamp when the last full multi-portal scan completed (`F5`).
+- `last_deep_scan_at`: Timestamp when the last `deep` pagination crawl completed (`scheduler.ts`).
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
@@ -321,11 +333,12 @@ Key-value storage for application configuration managed directly via the UI:
 
 ---
 
-### 7. `deleted_tenders` & `pending_file_purges`
+### 7. `deleted_portals`, `deleted_tenders` & `pending_file_purges`
+- **`deleted_portals`**: Tombstone registry (`portal_id TEXT PRIMARY KEY`, `deleted_at TEXT DEFAULT CURRENT_TIMESTAMP`) preserving operator-deleted or retired portals (`HLT-7`) across restarts.
 - **`deleted_tenders`**: Suppression registry (`id`, `canonical_id`, `closing_date`, `deleted_at`, `reason`) preventing deleted, passed-and-retired, or auto-expired notices from being re-downloaded and re-inserted on subsequent crawls:
   - `reason`: Provenance of deletion (`'user'`, `'auto-expired'`, `'no-track-match'`, `'legacy'`).
   - Suppression expiry & unblocking: Undated suppressions expire after 120 days. Auto-expired suppressions are automatically lifted if a re-scan finds a new future closing date (`F4`). User-initiated deletions are never unblocked.
-- **`pending_file_purges`**: Retry queue (`id`, `tender_id`, `target_path`, `reason`, `attempts`, `last_error`, `created_at`) for dossier folders locked by Windows file handles at deletion time (`dossierStore.ts`).
+- **`pending_file_purges`**: Retry queue (`id`, `folder_path`, `attempts`, `last_error`, `created_at`) for dossier folders locked by Windows file handles at deletion time (`dossierStore.ts`).
 
 ---
 

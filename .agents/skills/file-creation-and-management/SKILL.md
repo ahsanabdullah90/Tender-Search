@@ -143,4 +143,5 @@ When introducing a new file or refactoring an existing one:
    npx vitest run      # All unit/integration tests must pass
    npm run build       # Vite production bundle must build cleanly
    ```
-5. **Git Hygiene**: Commit logical changes in small, well-described commits. Never commit temporary scratch files or loose root assets.
+5. **Documentation Sync (Same Commit)**: Consult the **Code-to-Documentation Synchronization Matrix** in `AGENTS.md §4` and update matching `docs/` (`docs/02` for new server modules, `docs/03` for `schema.ts`, `docs/04` for routes, `docs/05` for scrapers/portals, `docs/10` for UI workflows, `docs/11` for env/settings, `docs/12`/`14` for releases) so `tests/unit/docs-consistency.test.ts` (`QA-4`) passes cleanly.
+6. **Git Hygiene**: Commit logical changes in small, well-described commits. Never commit temporary scratch files or loose root assets.
