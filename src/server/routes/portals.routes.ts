@@ -12,6 +12,7 @@ import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
 import { authenticatePortal } from '../scrapers/portalAuth.js';
 import { healPortalConnection, getActivePortalsList } from '../scrapers/crawlerEngine.js';
 import { launchLocalBrowserHITL, verifyAndResumePortal } from '../scrapers/playwrightEngine.js';
+import { validateExternalHttpUrl } from '../services/urlSafety.js';
 
 export const portalsRouter = Router();
 
@@ -29,6 +30,15 @@ portalsRouter.post('/', (req, res) => {
   const effectiveUrl = (tenders_url || base_url || '').trim();
   if (!effectiveUrl) {
     return res.status(400).json({ success: false, message: 'Portal website or tenders URL is required.' });
+  }
+
+  for (const candidate of [effectiveUrl, base_url, login_url]) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      const check = validateExternalHttpUrl(candidate);
+      if (!check.valid) {
+        return res.status(400).json({ success: false, message: check.reason });
+      }
+    }
   }
 
   try {
@@ -81,7 +91,16 @@ portalsRouter.put('/:portalId', (req, res) => {
     }
   }
 
-  // Enforce strict origin normalization on base_url (Rule 6: never store file paths in base_url)
+  // Enforce external HTTP(S) URL safety and strict origin normalization on base_url (SEC-5, Rule 6)
+  for (const field of ['base_url', 'tenders_url'] as const) {
+    if (typeof updates[field] === 'string' && updates[field].trim()) {
+      const check = validateExternalHttpUrl(updates[field]);
+      if (!check.valid) {
+        return res.status(400).json({ success: false, message: check.reason });
+      }
+    }
+  }
+
   if (typeof updates.base_url === 'string' && updates.base_url.trim()) {
     try {
       updates.base_url = new URL(updates.base_url.trim()).origin;
@@ -151,6 +170,10 @@ portalsRouter.post('/:portalId/heal', async (req, res) => {
     }
     const targetPortal = { ...portals[0] };
     if (typeof req.body?.baseUrl === 'string' && req.body.baseUrl.trim()) {
+      const check = validateExternalHttpUrl(req.body.baseUrl);
+      if (!check.valid) {
+        return res.status(400).json({ success: false, message: check.reason });
+      }
       targetPortal.baseUrl = req.body.baseUrl.trim();
     }
 

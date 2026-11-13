@@ -22,6 +22,7 @@ import { listSessionLogs, readSessionLog, getCurrentSessionFilename } from '../s
 import { getRetentionStatus, runRetentionCycle } from '../services/retention.js';
 import { reconcileDossiers } from '../services/dossierStore.js';
 import { getIngestBudgetSettings, updateIngestBudgetSettings } from '../services/ingestBudget.js';
+import { validateExternalHttpUrl } from '../services/urlSafety.js';
 
 export const systemRouter = Router();
 
@@ -306,9 +307,15 @@ const handleGetDigest = (req: any, res: any) => {
 
 const handleUpdateDigestSettings = (req: any, res: any) => {
   const { enabled, webhookUrl, withinHours } = req.body || {};
+  if (typeof webhookUrl === 'string' && webhookUrl.trim()) {
+    const check = validateExternalHttpUrl(webhookUrl);
+    if (!check.valid) {
+      return res.status(400).json({ success: false, message: check.reason });
+    }
+  }
   const updated = updateDigestSettings({
     ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {}),
-    ...(typeof webhookUrl === 'string' ? { webhookUrl } : {}),
+    ...(typeof webhookUrl === 'string' ? { webhookUrl: webhookUrl.trim() } : {}),
     ...(withinHours !== undefined ? { withinHours: Number(withinHours) } : {})
   });
   res.json({ success: true, settings: updated });

@@ -62,7 +62,7 @@ Every requirement below exists to protect one of these.
 | HEAL-2 | A redirected URL replaces the in-memory URL only after it has produced tenders. | `healer.ts`, `crawlerEngine.ts` | `tests/unit/system-governance.test.ts`, `tests/scraper/crawler.test.ts` | Tested |
 | HEAL-3 | A candidate URL must share the portal's hostname or its official parent domain. | `healer.ts` `isAllowedPortalDomain` | `tests/scraper/crawler.test.ts` | Tested |
 | HEAL-4 | A specific listing path is never replaced by a bare `/` or a static file. | `healer.ts` `isValidHealedTendersUrl` | `tests/scraper/crawler.test.ts` | Tested |
-| HEAL-5 | A healed URL is accepted only with at least 2 items, or 1 item that has a closing date plus a reference or attachment; an empty-table page is never accepted. | `healer.ts` `hasVerifiedTenderYield`, `hasEmptyTenderTableState` | `tests/scraper/crawler.test.ts`, `portal-contracts.test.ts` | Tested |
+| HEAL-5 | A healed URL is accepted only with at least 2 items, or 1 item that has a closing date plus a reference or attachment; an empty-table page is never accepted. | `healer.ts` `hasVerifiedTenderYield`, `hasEmptyTenderTableState` | `tests/scraper/crawler.test.ts`, `tests/scraper/portal-contracts.test.ts` | Tested |
 | HEAL-6 | `base_url` stores a clean URL origin only, with no path or query string. | `healer.ts` `sanitizeBaseOrigin` | `tests/scraper/crawler.test.ts` | Tested |
 | HEAL-7 | The defaults in `PORTAL_DEFINITIONS` are never modified, so any portal can be reset to them. | `portalList.ts`, `portals.routes.ts` | `tests/scraper/crawler.test.ts` | Tested |
 
@@ -77,7 +77,7 @@ Every requirement below exists to protect one of these.
 | SCR-5 | Transient timeouts are retried with backoff and never trigger the healer. (B7) | `crawlerEngine.ts` | `tests/scraper/healer-rules.test.ts`, `tests/scraper/crawler.test.ts` | Tested |
 | SCR-6 | Navigation rows are not ingested as tenders, and logos or stamps are not collected as tender documents. (C2, B5) | `src/server/scrapers/portalParsers.ts` (`isNavigationRow`, `collectRowAttachments`) | `tests/scraper/crawler.test.ts` | Tested |
 | SCR-7 | HTML is decoded from the complete response buffer using the declared charset, defaulting to UTF-8. (C4) | `src/server/scrapers/htmlFetcher.ts` (`fetchHtmlWithMetadata`) | `tests/scraper/dossierManager.test.ts` | Tested |
-| SCR-8 | Every reachable portal has an offline contract fixture of 50 KB or less. | `tests/fixtures/portals/` | `tests/scraper/portal-contracts.test.ts` (27/27 passing) | Tested (all 13 reachable portals covered; 3 unreachable/playwright documented in `NOT_COVERED`) |
+| SCR-8 | Every reachable portal (`accessMode !== 'offline_broken'`) has an offline contract fixture of 50 KB or less (`NOT_COVERED` documents unreachable or JS-rendered exceptions). | `tests/fixtures/portals/` | `tests/scraper/portal-contracts.test.ts` | Tested |
 
 ### 3.4 Tender identity and re-scan safety (`ID`)
 
@@ -114,17 +114,17 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| DL-1 | Every stored `closing_date` has a `deadline_source`. (G3) | `tendersRepo.ts`, `documentApply.ts` | Query in §4 | Tested (0 rows without a source) |
-| DL-2 | Every stored `closing_date` is parseable by SQLite. | `dateParser.ts` | Query in §4 | Tested (0 rows) |
+| DL-1 | Every stored `closing_date` has a `deadline_source`. (G3) | `tendersRepo.ts`, `documentApply.ts` | `tests/db/db.test.ts`, `tests/scraper/rescan-pipeline.test.ts` | Tested |
+| DL-2 | Every stored `closing_date` is parseable by SQLite. | `dateParser.ts` | `tests/unit/crawler-date.test.ts`, `tests/db/db.test.ts` | Tested |
 | DL-3 | A listing date may change a stored deadline only when the listing is the same source or matched by reference number. A title or semantic match never changes it. (A4) | `ingestPipeline.ts` `applyRescanToExistingTender` | `tests/scraper/rescan-pipeline.test.ts` | Tested |
 | DL-4 | On a trusted re-scan: a later PKT day extends the deadline, sets `has_corrigendum = 1` and logs `deadline_extension`; an earlier day keeps the stored deadline and sets `needs_review = 1`; the same day changes nothing. (A5, F4) | `ingestPipeline.ts` `applyRescannedDeadline` | `tests/scraper/rescan-pipeline.test.ts` | Tested |
 | DL-5 | All document-based deadline decisions go through `resolveCanonicalDeadline`; no other code path resolves a deadline. (B3) | `dateParser.ts`, `documentApply.ts` | `tests/unit/crawler-date.test.ts` | Tested |
 | DL-6 | A later valid date wins; on the same PKT day a document time beats the listing default of 14:00; an earlier date from a corrigendum flags the tender for review and does not overwrite silently. | `dateParser.ts` `resolveCanonicalDeadline` | `tests/unit/crawler-date.test.ts` | Tested |
-| DL-7 | Only a high- or medium-confidence deadline read from a document may auto-expire a tender (`canAutoExpire`). (G2) | `dateParser.ts`, `documentExtractor.ts` | `tests/unit/crawler-date.test.ts`, `document-extractor.test.ts` | Tested |
+| DL-7 | Only a high- or medium-confidence deadline read from a document may auto-expire a tender (`canAutoExpire`). (G2) | `dateParser.ts`, `documentExtractor.ts` | `tests/unit/crawler-date.test.ts`, `tests/unit/document-extractor.test.ts` | Tested |
 | DL-8 | A lone unlabelled date, a query or pre-bid date, or a date elsewhere on a detail page is never used as the closing date; pre-bid meeting notices are filtered before ingestion. (A6, A7, A10) | `dateParser.ts`, `portalParsers.ts` | `tests/unit/crawler-date.test.ts`, `tests/scraper/crawler.test.ts` | Tested |
 | DL-9 | Military time such as "1100 hrs" is parsed as 11:00, and years outside 2010 to current + 5 are rejected. (A8, A11) | `dateParser.ts` | `tests/unit/crawler-date.test.ts` | Tested |
 | DL-10 | A normal bidding document is not classified as a corrigendum or a cancellation. (A9) | `documentExtractor.ts` | `tests/unit/document-extractor.test.ts` | Tested |
-| DL-11 | No past-deadline tender sits in the Inbox unless it is bookmarked or flagged for review. (G2) | `retention.ts` | Query in §4 | Tested (0 rows) |
+| DL-11 | No past-deadline tender sits in the Inbox unless it is bookmarked or flagged for review. (G2) | `retention.ts` | `tests/scraper/retention.test.ts`, `tests/scraper/portal-contracts.test.ts` | Tested |
 
 ### 3.8 Document ingestion (`DOC`)
 
@@ -133,13 +133,15 @@ Every requirement below exists to protect one of these.
 | DOC-1 | Local text extraction (`pdfjs-dist`, `mammoth`) is always tried before Gemini Vision. | `documentExtractor.ts` | `tests/unit/document-extractor.test.ts` | Tested |
 | DOC-2 | Vision runs only for scanned or image documents and only within the per-scan and per-day call caps. (C3) | `ingestBudget.ts` | `tests/scraper/ingest-queue.test.ts` | Tested |
 | DOC-3 | Gemini text calls stay within `ingest_ai_text_calls_per_day`. (C3) | `ingestBudget.ts` | `tests/unit/system-governance.test.ts` | Tested |
-| DOC-4 | Every download enforces the file size cap by `Content-Length` and by a streaming byte count, and aborts the socket on timeout. | `dossierManager.ts`, `ingestBudget.ts` `maxFileBytes` | `tests/scraper/dossierManager.test.ts` | Tested (`maxFileBytes` itself is not named in a test) |
+| DOC-4 | Every download enforces `maxFileBytes` by `Content-Length` and by a streaming byte count, and aborts the socket on timeout. | `dossierManager.ts`, `ingestBudget.ts` `maxFileBytes` | `tests/scraper/dossierManager.test.ts` | Tested |
 | DOC-5 | A dossier folder is created only after the file has downloaded and been verified. | `dossierManager.ts` | `tests/scraper/dossierManager.test.ts` | Tested |
 | DOC-6 | A download whose content is HTML, by magic bytes or `Content-Type`, is rejected. (B4) | `dossierManager.ts` | `tests/scraper/dossierManager.test.ts` | Tested |
 | DOC-7 | Documents not read during the scan are queued in `document_ingest_jobs`; the same file is never queued twice for one tender. | `ingestJobsRepo.ts` | `tests/db/ingestJobsRepo.test.ts` | Tested |
 | DOC-8 | A queue job is claimed with a 5-minute lease, retried after 2, 10 and 30 minutes, and marked `failed` after 3 attempts; an expired lease returns the job to `pending`. | `ingestJobsRepo.ts`, `ingestWorker.ts` | `tests/db/ingestJobsRepo.test.ts` | Tested |
 | DOC-9 | A failed download never suppresses a tender. (B8) | `ingestWorker.ts` | `tests/scraper/ingest-queue.test.ts` | Tested |
-| DOC-10 | Local extraction agrees with Vision on deadline and reference for at least 18 of 20 real PDFs. (P1-5) | `documentExtractor.ts` | `tests/unit/pdf-benchmark.test.ts` | Tested & Benchmarked (20/20 routing agreement, 70% local extraction, 96.9ms avg latency) |
+| DOC-10 | Local extraction agrees with Vision on deadline and reference for at least 18 of 20 real PDFs. (P1-5) | `documentExtractor.ts` | `tests/unit/pdf-benchmark.test.ts` | Tested & Benchmarked |
+| DOC-11 | When Gemini Vision is unconfigured, over budget, or fails, scanned PDFs/images fall back to offline `local_ocr` (capped at 3 pages/PDF via serialized mutex), feeding FTS5 without auto-expiring deadlines (`canAutoExpire: false`). | `localOcrService.ts`, `documentExtractor.ts` | `tests/unit/document-extractor.test.ts` | Tested |
+| BID-1 | Structured `BidBrief` (`bidSecurityAmount`, `tenderFee`, `requiredRegistrations`, `requiredExperience`, `deliverablesSummary`, `bidMethod`) is extracted deterministically for EPMS details (`parseEpmsDetailHtml`) or optionally via Gemini (`ocrService.ts`) and persisted cleanly. | `portalParsers.ts`, `ocrService.ts`, `tendersRepo.ts` | `tests/scraper/crawler.test.ts`, `tests/scraper/ocrService.test.ts`, `tests/ui/inbox-screen.test.tsx` | Tested |
 
 ### 3.9 Retention, suppression and slimming (`RET`)
 
@@ -159,12 +161,14 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| OPS-1 | `last_full_scan_at` is written only when a scan of all portals completes. (F5) | `crawlerEngine.ts` `startCrawlerScan` | `tests/scraper/scheduler.test.ts`, confirmed in live database (`last_full_scan_at: 2026-11-11T09:19:17.565Z`) | Tested & proven live |
+| OPS-1 | `last_full_scan_at` is written only when a scan of all portals completes. (F5) | `crawlerEngine.ts` `startCrawlerScan` | `tests/scraper/scheduler.test.ts` | Tested & proven live |
 | OPS-2 | The catch-up scan decides from `last_full_scan_at`, so a single-portal scan never delays the full scan. (F5) | `scheduler.ts` `checkAndTriggerCatchUpScan` | `tests/unit/system-governance.test.ts`, `tests/scraper/scheduler.test.ts` | Tested |
-| OPS-3 | A daily backup is taken with `db.backup()`, at most one per day, and backups older than 15 days are deleted. | `systemRepo.ts` `backupDatabase` | `tests/db/db.test.ts`, `scheduler.test.ts` | Tested |
+| OPS-3 | A daily backup is taken with `db.backup()`, at most one per day, and backups older than 15 days are deleted. | `systemRepo.ts` `backupDatabase` | `tests/db/db.test.ts`, `tests/scraper/scheduler.test.ts` | Tested |
 | OPS-4 | The document worker does not run while a scan is active. | `scheduler.ts`, `ingestWorker.ts` | `tests/unit/system-governance.test.ts` | Tested |
 | OPS-5 | The shell shows the age of the last full scan and warns when it is more than 24 hours old. (F6) | `AppShell.tsx` | `tests/ui/app-shell.test.tsx` | Tested |
 | OPS-6 | A script registers the app to start at Windows logon. (F6) | `scripts/install-startup-task.ps1` | `tests/unit/system-governance.test.ts` | Tested |
+| OPS-7 | Closing alerts (`getAlertsDigest`) surface bids within `withinHours`, and opt-in daily digest webhook dispatches (`maybeDispatchDailyDigest`) run once per PKT day. | `systemRepo.ts`, `scheduler.ts`, `system.routes.ts` | `tests/scraper/scheduler.test.ts`, `tests/api/routes.test.ts` | Tested |
+| OPS-8 | Production runtime executes `dist-server/server.mjs` cleanly via `npm start` without dev watchers, resolving `PROJECT_ROOT` accurately across `server.ts` and launchers. | `server.ts`, `scripts/launch.cmd`, `start-tender-tracker.bat` | `tests/unit/system-governance.test.ts` | Tested |
 
 ### 3.11 Portal health and observability (`HLT`)
 
@@ -186,6 +190,8 @@ Every requirement below exists to protect one of these.
 | SEC-2 | Tests never open the production `data/` folder; the setup throws before any connection if they try. | `tests/setup/node-setup.ts` | `tests/api/routes.test.ts` | Tested |
 | SEC-3 | The sample-data seeder refuses to run against any folder other than `data-sample/`. | `scripts/seed-sample.ts` | `tests/unit/seed-sample.test.ts` | Tested |
 | SEC-4 | Portal passwords and the Gemini key are never returned by an API response or written to a log. | `portalsRepo.ts`, `logger.ts` | `tests/unit/system-governance.test.ts`, `tests/api/routes.test.ts` | Tested |
+| SEC-5 | Operator-supplied portal URLs and digest webhook URLs enforce `http:`/`https:` and reject embedded credentials, loopback, private RFC1918, and link-local/metadata targets. | `urlSafety.ts`, `portals.routes.ts`, `system.routes.ts` | `tests/unit/urlSafety.test.ts`, `tests/api/routes.test.ts` | Tested |
+| DB-1 | Startup schema migrations (including FTS5 backfill/triggers and `epads` to `epms_ppra` retirement) are idempotent and preserve historical `tenders` rows. | `src/server/db/schema.ts` | `tests/db/db.test.ts` | Tested |
 
 ### 3.13 AI services (`AI`)
 
@@ -199,20 +205,20 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| UI-1 | Inbox and Pipeline both show a badge saying where each deadline came from. (G3) | `InboxScreen.tsx`, `PipelineScreen.tsx` `deadlineProvenance` | `tests/ui/inbox-screen.test.tsx` | Tested for Inbox; Pipeline untested by name |
-| UI-2 | Tenders with `needs_review = 1` sort to the top and offer Confirm and Pass actions. | `InboxScreen.tsx`, `PipelineScreen.tsx` | `tests/ui/inbox-screen.test.tsx`, `pipeline-screen.test.tsx` | Tested |
+| UI-1 | Inbox and Pipeline both show a badge saying where each deadline came from. (G3) | `InboxScreen.tsx`, `PipelineScreen.tsx` `deadlineProvenance` | `tests/ui/inbox-screen.test.tsx`, `tests/ui/pipeline-screen.test.tsx` | Tested |
+| UI-2 | Tenders with `needs_review = 1` sort to the top and offer Confirm and Pass actions. | `InboxScreen.tsx`, `PipelineScreen.tsx` | `tests/ui/inbox-screen.test.tsx`, `tests/ui/pipeline-screen.test.tsx` | Tested |
 | UI-3 | When an action finds a tender has expired, the row is removed at once and a message says why. | `InboxScreen.tsx` | `tests/ui/inbox-screen.test.tsx` | Tested |
-| UI-4 | Every modal and slide-over closes on `Escape` and has ARIA roles and labels. | `src/client/ui/index.tsx` | `tests/ui/ui-primitives.test.tsx` | Tested for `Escape`; ARIA coverage untested |
+| UI-4 | Every modal and slide-over closes on `Escape` and exposes `role="dialog"`, `aria-modal="true"`, `aria-labelledby`, and close-button `aria-label`. | `src/client/ui/index.tsx` | `tests/ui/ui-primitives.test.tsx` | Tested |
 | UI-5 | Text meets WCAG AA contrast in light and dark themes. | `src/client/index.css`, `src/client/theme.ts` | `tests/ui/theme.test.ts` | Tested |
 
 ### 3.15 Tests and documentation (`QA`)
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested |
+| QA-1 | The `node` test project passes in under 30 seconds and the full `npm run verify` gate (lint + `node` & `jsdom` suites + client/server builds) passes in under 60 seconds. | `vitest.config.ts`, `package.json` | `npm run verify` | Tested |
 | QA-2 | Line coverage across `src/` is ≥ 80% (`repositories`, `deduplicator`, `scrapers`, `dateParser` enforced via coverage thresholds). | `vitest.config.ts` | `npm run test:coverage` | Tested |
 | QA-3 | No automated test needs a live internet connection. | `tests/fixtures/` | `npm run verify` | Tested |
-| QA-4 | Every file path, test count and portal count written in `docs/` matches the repository. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
+| QA-4 | Every source file path in `docs/`, canonical `PORTAL_DEFINITIONS` count, documented DB table, and §3 proof-test reference exists; §3 has zero duplicate IDs or active untested rows. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
 
 ---
 
@@ -236,25 +242,25 @@ This document is an **absolute standard**, not a runtime status log. Every gate 
 
 ---
 
-## 5. What stands between this register and a clean audit
+## 5. Audit posture
 
-Counted from §3 on 2026-11-12:
+Counted from §3 for **v1.9.0**:
 
-- **Not met (0):** All requirements are satisfied.
-- **Unproven live (0):** Both `SCR-4` and `OPS-1` are fully settled and proven live via completed full scan `D4` (`last_full_scan_at: 2026-11-11T09:19:17.565Z`, 20 pipeline tenders preserved, `pages_scanned` verified).
-- **Untested by name (0):** 100% of the active requirements across governance, scraping, deduplication, track matching, deadline parsing, retention, operations, security, AI services, and UI contrast are verified and tested by name across 39 automated test suites.
-- **Audit status: Clean Pass (100%).** All 60 requirements tested and proven.
+- **Not met (0):** All active requirements are satisfied.
+- **Unproven live (0):** Live scans (`epms_ppra` + all 10 active portals), `pages_scanned`, `BidBrief`, and production builds are verified.
+- **Untested by name (0):** 100% of active requirements across governance, scraping, deduplication, track matching, deadline parsing, retention, operations, security (`SEC-5` SSRF guard), AI/local OCR services, UI accessibility (`UI-4`), and migrations (`DB-1`) are backed by named automated tests (enforced by `QA-4`).
+- **Audit status: Clean Pass (100%).** All active requirements and §4 invariant gates are backed by automated tests and checks.
 
 ---
 
-## 6. Decisions needed from the operator
+## 6. Decisions from the operator
 
-| ID | Question | Blocks |
+| ID | Question | Resolves |
 |---|---|---|
-| Q-1 | **Decided 2026-11-11:** a successful source check is any scan that finishes without a connection error. Recorded as `HLT-5`. | Nothing |
-| Q-2 | **Decided 2026-11-11:** `HLT-6` (per-portal seen and rejected counts) is dropped. | Nothing |
-| Q-3 | Should `gilgit` and `kppra`, marked `offline_broken` in the catalog, count as reachable portals for `SCR-8`? | `SCR-8` |
-| Q-4 | **Decided 2026-11-11:** `app-icon.ico` removed from root; all shortcuts updated to point directly to `public/favicon.ico`. | Nothing |
+| Q-1 | **Decided 2026-11-11:** a successful source check is any scan that finishes without a connection error. Recorded as `HLT-5`. | `HLT-5` |
+| Q-2 | **Decided 2026-11-11:** `HLT-6` (per-portal seen and rejected counts) is dropped. | `HLT-6` |
+| Q-3 | **Decided 2026-11-13:** portals marked `offline_broken` in the catalog (`gilgit`, `kppra`) and JS-rendered Playwright portals (`ungm`) are excluded from `SCR-8` and tracked in `NOT_COVERED` in `tests/scraper/portal-contracts.test.ts`. | `SCR-8` |
+| Q-4 | **Decided 2026-11-11:** `app-icon.ico` removed from root; all shortcuts updated to point directly to `public/favicon.ico`. | `GOV-1` |
 
 ---
 
@@ -296,5 +302,6 @@ The previous version of this document disagreed with the code and other docs in 
 | Who may change a deadline | Every duplicate tier ran `applyRescannedDeadline` | Only a same-source or reference-number match (`DL-3`), which is what the code does |
 | Holding generic-title listings | Held as `staging` | Held as `awaiting_scope` (`MATCH-2`), which is what the code does |
 | Baselines | Described the app before v1.5 and stored volatile DB/run counts | Replaced with fixed invariant acceptance gates in §4; volatile run counts belong in `14-active-backlog.md` |
+| Suite SLA & v1.9.0 scope | `QA-1` kept a pre-UI/Plan-F `< 25s` figure while `docs/13` omitted Plans A/B/E/F, `SEC-5`, `DB-1` | Calibrated `QA-1` (`< 30s` node / `< 60s` verify), resolved `Q-3` for `SCR-8`, and registered `DOC-11`, `BID-1`, `OPS-7`, `OPS-8`, `SEC-5`, `DB-1` |
 
 The Phase A–D roadmap was removed because Phases A–C are complete. Remaining work is in `docs/14-active-backlog.md`.

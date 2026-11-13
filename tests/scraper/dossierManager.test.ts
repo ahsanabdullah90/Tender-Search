@@ -13,7 +13,8 @@ import {
 } from '../../src/server/services/dossierManager.js';
 import { fetchHtmlWithMetadata } from '../../src/server/scrapers/crawlerEngine.js';
 import { sslTolerantAgent, legacySslTolerantAgent } from '../../src/server/scrapers/baseScraper.js';
-import { DOSSIERS_DIR } from '../../src/server/db/index.js';
+import { DOSSIERS_DIR, setAppSetting } from '../../src/server/db/index.js';
+import { maxFileBytes } from '../../src/server/services/ingestBudget.js';
 
 describe('dossierManager', () => {
   let server: http.Server;
@@ -191,7 +192,9 @@ describe('dossierManager', () => {
     expect(abortedRes).toBeNull();
     expect(fs.existsSync(path.resolve(DOSSIERS_DIR, 't-aborted-dir'))).toBe(false);
 
-    // Streaming maxBytes cap (rfp.pdf is > 5 bytes)
+    // Streaming maxBytes cap and ingestBudget maxFileBytes default setting (DOC-4)
+    setAppSetting('ingest_max_file_mb', '15');
+    expect(maxFileBytes()).toBe(15 * 1024 * 1024);
     const oversizedRes = await downloadAndCacheDossier(
       't-oversized-dir',
       `${serverBaseUrl}/download/rfp.pdf`,

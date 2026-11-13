@@ -390,6 +390,19 @@ describe('Server API Routes', () => {
       const badRes2 = await request(app).post('/api/portals').send({ portal_name: 'Test Portal' });
       expect(badRes2.status).toBe(400);
 
+      // Unsafe / non-HTTP / private SSRF URLs (SEC-5)
+      const unsafePortal1 = await request(app).post('/api/portals').send({
+        portal_name: 'Unsafe SSRF Portal',
+        tenders_url: 'http://169.254.169.254/latest/meta-data/'
+      });
+      expect(unsafePortal1.status).toBe(400);
+
+      const unsafePortal2 = await request(app).post('/api/portals').send({
+        portal_name: 'Unsafe File Portal',
+        tenders_url: 'file:///etc/passwd'
+      });
+      expect(unsafePortal2.status).toBe(400);
+
       // Success
       const createRes = await request(app)
         .post('/api/portals')
@@ -877,6 +890,11 @@ describe('Server API Routes', () => {
         closing_date: in12Hours,
         pipeline_status: 'New Opportunity'
       });
+
+      const badWebhook = await request(app)
+        .post('/api/system/digest/settings')
+        .send({ enabled: true, webhookUrl: 'http://127.0.0.1:8080/internal', withinHours: 36 });
+      expect(badWebhook.status).toBe(400);
 
       const updRes = await request(app)
         .post('/api/system/digest/settings')

@@ -64,4 +64,40 @@ describe('docs-consistency (QA-4 Automated Documentation Consistency)', () => {
       expect(schemaFile).toContain(table);
     }
   });
+
+  it('proves North Star requirements register has unique IDs, existing proof files, and zero untested active rows (QA-4)', () => {
+    const northStarPath = path.resolve(docsDir, '13-north-star-quality-standard.md');
+    const content = fs.readFileSync(northStarPath, 'utf8');
+    const sec3 = content.split('## 4.')[0];
+    const rowPattern = /^\|\s*([A-Z]+-\d+)\s*\|\s*[^|]+\|\s*[^|]+\|\s*([^|]+)\|\s*([^|]+)\|/gm;
+
+    const seenIds = new Set<string>();
+    const duplicateIds: string[] = [];
+    const missingProofFiles: string[] = [];
+    const untestedRows: string[] = [];
+
+    let match: RegExpExecArray | null;
+    while ((match = rowPattern.exec(sec3)) !== null) {
+      const [, id, provenBy, status] = match;
+      if (seenIds.has(id)) duplicateIds.push(id);
+      seenIds.add(id);
+
+      const testMatches = provenBy.match(/tests\/[A-Za-z0-9_.\-/]+/g) || [];
+      for (const rel of testMatches) {
+        const cleaned = rel.replace(/\/$/, '');
+        if (!fs.existsSync(path.resolve(rootDir, cleaned))) {
+          missingProofFiles.push(`${id}: ${cleaned}`);
+        }
+      }
+
+      if (!/Withdrawn|Decision needed/i.test(status) && /\buntested\b/i.test(status)) {
+        untestedRows.push(`${id}: ${status.trim()}`);
+      }
+    }
+
+    expect(seenIds.size).toBeGreaterThanOrEqual(55);
+    expect(duplicateIds).toEqual([]);
+    expect(missingProofFiles).toEqual([]);
+    expect(untestedRows).toEqual([]);
+  });
 });

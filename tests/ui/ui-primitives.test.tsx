@@ -136,7 +136,10 @@ describe('UI Primitives (src/ui/index.tsx)', () => {
         </Dialog>
       );
 
-      expect(screen.getByRole('dialog', { name: 'Confirm Delete' })).toBeInTheDocument();
+      const dialog = screen.getByRole('dialog', { name: 'Confirm Delete' });
+      expect(dialog).toBeInTheDocument();
+      expect(dialog).toHaveAttribute('aria-modal', 'true');
+      expect(dialog.getAttribute('aria-labelledby')).toBeTruthy();
       expect(screen.getByText('Are you sure?')).toBeInTheDocument();
 
       // Click close icon button
@@ -173,7 +176,10 @@ describe('UI Primitives (src/ui/index.tsx)', () => {
         </SlideOver>
       );
 
-      expect(screen.getByRole('dialog', { name: 'Tender Details' })).toBeInTheDocument();
+      const slideOver = screen.getByRole('dialog', { name: 'Tender Details' });
+      expect(slideOver).toBeInTheDocument();
+      expect(slideOver).toHaveAttribute('aria-modal', 'true');
+      expect(slideOver.getAttribute('aria-labelledby')).toBeTruthy();
       expect(screen.getByText('RFP Specs')).toBeInTheDocument();
 
       const closeBtn = screen.getByRole('button', { name: 'Close' });
