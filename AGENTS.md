@@ -24,7 +24,7 @@ When modifying or interacting with scrapers, strictly adhere to the 7 Anti-Corru
 For comprehensive instructions, decision trees, and checklists, consult the workspace skill:
 [`.agents/skills/file-creation-and-management/SKILL.md`](.agents/skills/file-creation-and-management/SKILL.md)
 
-For the numbered requirements register (every rule the app must obey, with its enforcing file, proving test and status), the measured baselines, and the pre-completion checklist, consult:
+For the numbered requirements register (the immutable single source of rules the app must obey), the invariant acceptance gates, and the pre-completion verification checklist, consult:
 [`docs/13-north-star-quality-standard.md`](docs/13-north-star-quality-standard.md)
 
-That register is the single source of rules. When a change affects a requirement, update its status there in the same change. Open work is tracked by requirement ID in [`docs/14-active-backlog.md`](docs/14-active-backlog.md).
+That register is an absolute reference—do not modify its rules or thresholds for routine runs; update §3/§6 only when a requirement or operator decision itself changes. Operational status, runtime telemetry, and open work are tracked in [`docs/14-active-backlog.md`](docs/14-active-backlog.md).

@@ -209,32 +209,30 @@ Every requirement below exists to protect one of these.
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested (626 passing across 39 suites, ~25–28 s) |
-| QA-2 | Line coverage across `src/` is ≥ 80% (measured: 84.6% overall, 93.5% repositories, 90.5% deduplicator, 86.6% scrapers, 98.6% dateParser). | `vitest.config.ts` | `npm run test:coverage` | Tested |
+| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested |
+| QA-2 | Line coverage across `src/` is ≥ 80% (`repositories`, `deduplicator`, `scrapers`, `dateParser` enforced via coverage thresholds). | `vitest.config.ts` | `npm run test:coverage` | Tested |
 | QA-3 | No automated test needs a live internet connection. | `tests/fixtures/` | `npm run verify` | Tested |
 | QA-4 | Every file path, test count and portal count written in `docs/` matches the repository. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
 
 ---
 
-## 4. Measured baselines
+## 4. Invariant Acceptance Gates
 
-These are measured by a command. Re-run the command and replace the value; never type in an estimate.
+This document is an **absolute standard**, not a runtime status log. Every gate below defines the permanent pass criterion that code and live databases must satisfy when checked—do **not** alter target values to match transient run metrics or broken state. Record point-in-time scan results and maintenance history in [`14-active-backlog.md`](./14-active-backlog.md), not here.
 
-| Measure | Value on 2026-11-13 | Command |
+| Gate | Required Standard (Absolute) | Verification Command |
 |---|---|---|
-| TypeScript errors | 0 (root + split client/server configs) | `npm run lint` |
-| Tests passing | 626 of 626, 39 files, 23.02 s | `npm run verify` |
-| Production build | Builds (`dist/` in 534 ms + `dist-server/server.mjs` in 17 ms) | `npm run build` |
-| `db.prepare` outside `src/server/db/` | 0 | `Get-ChildItem src/server -Recurse -Filter *.ts \| Where-Object { $_.FullName -notmatch '\\db\\' } \| Select-String 'db\.prepare'` |
-| Unparseable `closing_date` rows | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND julianday(closing_date) IS NULL;` |
-| Deadlines with no `deadline_source` | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND deadline_source IS NULL;` |
-| Expired, unflagged Inbox rows | 1 (within retention grace window) | `SELECT COUNT(*) FROM tenders WHERE pipeline_status='New Opportunity' AND is_bookmarked=0 AND needs_review=0 AND ingestion_status='ready' AND closing_date IS NOT NULL AND julianday(closing_date) < julianday('now');` |
-| Portals tracked | 10 active (18 defined in `PORTAL_DEFINITIONS`; 9 retired in `deleted_portals`: `epads`, `gilgit`, `giz`, `kppra`, `pid`, `psda`, `sppra`, `tender_services`, `ungm`; `epms_ppra` active on `epms.ppra.gov.pk` replacing retired `epads`, `punjab_eproc` expanded to `quickMaxPages: 3` / `deepMaxPages: 10`) | `SELECT COUNT(*) FROM portal_health;` |
-| Portals that returned items on their last scan | 7 of 10 (`bppra`, `ignite`, `ndma` returned empty-state `online`) | `SELECT COUNT(*) FROM portal_health WHERE last_items_found > 0;` |
-| Portals shown as "checked successfully" (`HLT-4`; includes empty-state portals) | 10 of 10 | `SELECT COUNT(*) FROM portal_health WHERE status='online';` |
-| Completed full scans | Latest: `2026-11-13T10:19:19.111Z` | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` |
-| Tenders stored (FTS5-indexed) | 446 (193 `ready`, 253 `awaiting_scope`; 446 `tenders_fts` rows) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
-| Line coverage | 84.41% lines (82.63% statements, 81.13% functions, 73.4% branches) | `npm run test:coverage` |
+| TypeScript errors | `0` across root, client (`tsconfig.client.json`), and server (`tsconfig.server.json`) | `npm run lint` |
+| Automated test suite | `100%` passing (`0` skipped or relaxed assertions across all suites) | `npm run verify` |
+| Production build | Clean client (`dist/`) and server (`dist-server/server.mjs`) bundle exit `0` | `npm run build` |
+| `db.prepare` outside `src/server/db/` | `0` occurrences | `Get-ChildItem src/server -Recurse -Filter *.ts \| Where-Object { $_.FullName -notmatch '\\db\\' } \| Select-String 'db\.prepare'` |
+| Unparseable `closing_date` rows | `0` rows | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND julianday(closing_date) IS NULL;` |
+| Deadlines with no `deadline_source` | `0` rows | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND deadline_source IS NULL;` |
+| Expired, unflagged Inbox rows | `0` rows past retention grace window (`DL-8` / `G2`) | `SELECT COUNT(*) FROM tenders WHERE pipeline_status='New Opportunity' AND is_bookmarked=0 AND needs_review=0 AND ingestion_status='ready' AND closing_date IS NOT NULL AND julianday(closing_date) < julianday('now');` |
+| Active portals vs. canonical catalog | All non-retired `PORTAL_DEFINITIONS` rows present in `portal_health` (minus `deleted_portals`, `HEAL-7` preserved) | `SELECT COUNT(*) FROM portal_health;` |
+| Scan health invariant (`HLT-4`/`HLT-5`) | Every active non-offline portal completes checks without unhandled connection errors (`status='online'` or explicit diagnostic `last_error_code`) | `SELECT portal_id, status, last_error_code FROM portal_health;` |
+| FTS5 index parity | `COUNT(*) FROM tenders_fts` equals `COUNT(*) FROM tenders` | `SELECT (SELECT COUNT(*) FROM tenders) AS tenders_count, (SELECT COUNT(*) FROM tenders_fts) AS fts_count;` |
+| Code line coverage | `>= 80%` across `src/` (`QA-2`, enforced in `vitest.config.ts`) | `npm run test:coverage` |
 
 ---
 
@@ -283,9 +281,9 @@ Get-ChildItem -Path "src/server" -Recurse -Filter "*.ts" | Where-Object { $_.Ful
 
 Then, in the same change:
 
-3. Update the status of every requirement in §3 that the change affects.
-4. Re-measure any baseline in §4 that the change affects.
-5. Update `docs/14-active-backlog.md` if an open item was closed or a new one found.
+3. Verify the change against every affected requirement in §3 and every invariant gate in §4 (never relax a rule or target threshold in this document to pass broken behavior).
+4. Leave `docs/13` untouched for routine work; only edit §3/§6 when a new standard rule is introduced, a requirement's proof status changes, or the operator decides a question in §6.
+5. Record operational runs, open/closed work items, and point-in-time metrics in [`14-active-backlog.md`](./14-active-backlog.md).
 
 ---
 
@@ -297,6 +295,6 @@ The previous version of this document disagreed with the code and other docs in 
 |---|---|---|
 | Who may change a deadline | Every duplicate tier ran `applyRescannedDeadline` | Only a same-source or reference-number match (`DL-3`), which is what the code does |
 | Holding generic-title listings | Held as `staging` | Held as `awaiting_scope` (`MATCH-2`), which is what the code does |
-| Baselines | Described the app before v1.5 (page 1 only, substring matching) | Replaced by measured values in §4 |
+| Baselines | Described the app before v1.5 and stored volatile DB/run counts | Replaced with fixed invariant acceptance gates in §4; volatile run counts belong in `14-active-backlog.md` |
 
 The Phase A–D roadmap was removed because Phases A–C are complete. Remaining work is in `docs/14-active-backlog.md`.
