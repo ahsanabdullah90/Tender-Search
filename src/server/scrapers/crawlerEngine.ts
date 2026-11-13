@@ -610,7 +610,7 @@ export async function scrapePortal(
         await crawlerDeps.sleep(getHumanJitterDelay(1500, 3000));
         const pageFetched = postBody
           ? await postFormSmart(pageUrl, postBody, currentCookies)
-          : await fetchHtmlSmart(pageUrl, currentCookies);
+          : await fetchHtmlSmart(pageUrl, portal.id === 'epms_ppra' ? portal.sessionCookies : currentCookies);
         if (!pageFetched.html) break;
         currentPageHtml = pageFetched.html;
         if (pageFetched.cookies) currentCookies = pageFetched.cookies;
@@ -723,7 +723,7 @@ export async function scrapePortal(
 export function seedRealisticTenders() {
   const sampleTenders = [
     {
-      referenceNo: 'EPADS-2026-SLR-041',
+      referenceNo: 'EPMS-2026-SLR-041',
       title: 'Solarization of 150 Public Schools and Rural Health Centers in Southern Punjab (Phase-II)',
       organization: 'Punjab Energy Department / Punjab eProc',
       portalId: 'punjab_eproc',

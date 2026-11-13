@@ -98,12 +98,12 @@ describe('portalAuth', () => {
   });
 
   it('handles generic portal credentials saving without remote HTTP call', async () => {
-    const result = await authenticatePortal('epads', 'epads_user', 'epads_pass');
+    const result = await authenticatePortal('epms_ppra', 'epms_user', 'epms_pass');
     expect(result.success).toBe(true);
     expect(result.message).toContain('Credentials saved successfully');
 
-    const epads = getPortalHealthList().find(p => p.portal_id === 'epads');
-    expect(epads?.status).toBe('online');
+    const epms = getPortalHealthList().find(p => p.portal_id === 'epms_ppra');
+    expect(epms?.status).toBe('online');
   });
 
   it('extracts cookies via fallback set-cookie header when getSetCookie is unavailable', async () => {

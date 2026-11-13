@@ -10,7 +10,7 @@ This document tracks **active operational items and approved non-breaking featur
 
 ### Item 1: Connector & Session Monitoring
 - **Active Regulatory Coverage (`10/10` online in live DB):**
-  - `epads`: Open Federal EPADS v2.0 (`https://epads.gov.pk/`, `tier: 'http'`, `accessMode: 'public'`, 100 opportunities/page, `quickMaxPages: 3` / `deepMaxPages: 10`). Optional authenticated cookie support (`loginUrl: https://epads.gov.pk/login`) remains intact for operator downloads if needed.
+  - `epms_ppra`: Replaced Federal EPADS with open Federal PPRA EPMS (`https://epms.ppra.gov.pk/public/tenders/active-tenders`, `tier: 'http'`, `accessMode: 'public'`, 50 opportunities/page, `quickMaxPages: 2` / `deepMaxPages: 5`), paired with deterministic detail-page `BidBrief` and `/pdf?file=` document extraction (`parseEpmsDetailHtml` in `src/server/scrapers/portalParsers.ts` + `applyEpmsDetailMetadata` in `src/server/scrapers/tenderAnalysis.ts`). Legacy `epads` is retired in `deleted_portals` while preserving historical tenders.
   - `punjab_eproc`: Primary Punjab provincial source (`https://eproc.punjab.gov.pk/ActiveTenders.aspx`, ASP.NET postback pagination bumped to `quickMaxPages: 3` / `deepMaxPages: 10`), aggregating tenders across Punjab departments and authorities centrally.
 - **Removed / Blocked Portals (`deleted_portals` in live DB; canonical entries retained in `PORTAL_DEFINITIONS` per `HEAL-7`):**
   - `kppra`: KP government portal migrated to EPADS (`kp.eprocure.gov.pk`), access-walled / timing out (`offline_broken`); archived out of active scans via `deletePortal`.

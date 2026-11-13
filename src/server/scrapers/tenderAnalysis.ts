@@ -16,7 +16,7 @@ import { applyDocumentResultToTender } from '../services/documentApply.js';
 import { summarizeTenderTextWithAI } from '../services/ocrService.js';
 import { tryConsumeDailyAiText } from '../services/ingestBudget.js';
 import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
-import { isGenericListingUrl, collectRowAttachments, cleanRowSummary } from './portalParsers.js';
+import { isGenericListingUrl, collectRowAttachments, parseEpmsDetailHtml, cleanRowSummary } from './portalParsers.js';
 import { crawlerDeps } from './crawlerDeps.js';
 
 /** Reads a cached dossier's bytes from disk, or null if it is missing. */
@@ -37,6 +37,31 @@ export function isReadableDocumentMime(mimeType?: string | null): boolean {
       mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     )
   );
+}
+
+/**
+ * Applies structured deterministic metadata parsed from an EPMS PPRA detail page
+ * (`epms.ppra.gov.pk/public/tenders/tender-details/...`) onto the tender record
+ * without consuming Gemini API quota.
+ */
+function applyEpmsDetailMetadata(tender: Tender, html: string, forceRefresh: boolean = false): void {
+  if (!tender.direct_url?.includes('epms.ppra.gov.pk')) return;
+  const meta = parseEpmsDetailHtml(html);
+  if (!meta) return;
+
+  const updates: Partial<Tender> = {};
+  if (meta.bidBrief && (forceRefresh || !tender.bid_brief)) {
+    updates.bid_brief = meta.bidBrief;
+  }
+  if (meta.description && (forceRefresh || !tender.description || meta.description.length > tender.description.length + 20)) {
+    updates.description = meta.description;
+  }
+  if (meta.location && (!tender.location || tender.location === 'Pakistan')) {
+    updates.location = meta.location;
+  }
+  if (Object.keys(updates).length > 0) {
+    updateTenderFields(tender.id, updates);
+  }
 }
 
 /**
@@ -91,6 +116,7 @@ export async function fetchDocumentsForTender(
 
       try {
         const html = await crawlerDeps.fetchHtml(tender.direct_url);
+        applyEpmsDetailMetadata(tender, html, Boolean(_options.forceRefresh));
         const $ = cheerio.load(html);
         $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
 
@@ -215,6 +241,7 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
 
       try {
         const html = await crawlerDeps.fetchHtml(tender.direct_url);
+        applyEpmsDetailMetadata(tender, html, Boolean(options.forceRefresh));
         const $ = cheerio.load(html);
         $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
 

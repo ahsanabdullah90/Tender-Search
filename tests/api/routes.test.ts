@@ -349,7 +349,7 @@ describe('Server API Routes', () => {
       expect(listRes.body.length).toBeGreaterThan(0);
 
       const credRes = await request(app)
-        .post('/api/portals/epads/credentials')
+        .post('/api/portals/epms_ppra/credentials')
         .send({
           username: 'portal_officer',
           password: 'pass123Password!',
@@ -359,7 +359,7 @@ describe('Server API Routes', () => {
       expect(credRes.status).toBe(200);
       expect(credRes.body.success).toBe(true);
 
-      const getCredRes = await request(app).get('/api/portals/epads/credentials');
+      const getCredRes = await request(app).get('/api/portals/epms_ppra/credentials');
       expect(getCredRes.status).toBe(200);
       expect(getCredRes.body.username).toBe('portal_officer');
       expect(getCredRes.body.hasPassword).toBe(true);
@@ -372,11 +372,11 @@ describe('Server API Routes', () => {
     });
 
     it('supports HITL launch and verification routes', async () => {
-      const launchRes = await request(app).post('/api/portals/epads/hitl-launch');
+      const launchRes = await request(app).post('/api/portals/epms_ppra/hitl-launch');
       expect(launchRes.status).toBe(200);
       expect(launchRes.body.success).toBe(true);
 
-      const verifyRes = await request(app).post('/api/portals/epads/hitl-verify');
+      const verifyRes = await request(app).post('/api/portals/epms_ppra/hitl-verify');
       expect(verifyRes.status).toBe(200);
       expect(verifyRes.body.success).toBe(true);
     });
@@ -912,11 +912,11 @@ describe('Server API Routes', () => {
       try {
         const res = await request(app)
           .post('/api/scan/start')
-          .send({ portalId: 'epads', depth: 'deep' });
+          .send({ portalId: 'epms_ppra', depth: 'deep' });
 
         expect(res.status).toBe(200);
         expect(res.body.scanDepth).toBe('deep');
-        expect(startSpy).toHaveBeenCalledWith('epads', false, { depth: 'deep' });
+        expect(startSpy).toHaveBeenCalledWith('epms_ppra', false, { depth: 'deep' });
       } finally {
         scanRouteDeps.startCrawlerScan = origStart;
       }

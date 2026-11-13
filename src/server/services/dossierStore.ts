@@ -29,6 +29,7 @@ export type DocType = 'notice' | 'bidding-document' | 'rfp' | 'boq' | 'tor' | 'd
  * Standard portal file codes mapping
  */
 export const PORTAL_FILE_CODES: Record<string, string> = {
+  epms_ppra: 'FPPRA',
   epads: 'FPPRA',
   punjab_eproc: 'PPPRA',
   sppra: 'SPPRA',

@@ -17,11 +17,11 @@ describe('playwrightEngine & HITL orchestration', () => {
   });
 
   it('provides a graceful fallback message when headless or desktop browser is invoked', async () => {
-    const result = await launchLocalBrowserHITL('epads');
+    const result = await launchLocalBrowserHITL('epms_ppra');
 
     expect(result.success).toBe(true);
     expect(result.portalName).toBeDefined();
-    expect(result.portalUrl).toContain('epads');
+    expect(result.portalUrl).toContain('epms.ppra');
     expect(result.message).toBeDefined();
   });
 
@@ -35,18 +35,18 @@ describe('playwrightEngine & HITL orchestration', () => {
   });
 
   it('resumes portal status to online and clears error message on verifyAndResumePortal', () => {
-    updatePortalHealth('epads', {
+    updatePortalHealth('epms_ppra', {
       status: 'hitl_required',
       last_error_message: 'Verification challenge'
     });
 
-    const before = getPortalHealthList().find(p => p.portal_id === 'epads');
+    const before = getPortalHealthList().find(p => p.portal_id === 'epms_ppra');
     expect(before?.status).toBe('hitl_required');
 
-    const success = verifyAndResumePortal('epads');
+    const success = verifyAndResumePortal('epms_ppra');
     expect(success).toBe(true);
 
-    const after = getPortalHealthList().find(p => p.portal_id === 'epads');
+    const after = getPortalHealthList().find(p => p.portal_id === 'epms_ppra');
     expect(after?.status).toBe('online');
     expect(after?.last_error_message).toBeNull();
   });
@@ -72,13 +72,13 @@ describe('playwrightEngine & HITL orchestration', () => {
     playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
     vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(true);
 
-    const result = await launchLocalBrowserHITL('epads');
+    const result = await launchLocalBrowserHITL('epms_ppra');
     expect(result.success).toBe(true);
     expect(result.isHeadlessFallback).toBe(false);
     expect(mockPage.goto).toHaveBeenCalled();
 
     // Calling launch again for same portal tests closing the previous browser context
-    const result2 = await launchLocalBrowserHITL('epads');
+    const result2 = await launchLocalBrowserHITL('epms_ppra');
     expect(result2.success).toBe(true);
     expect(mockBrowser.close).toHaveBeenCalled();
 
@@ -86,8 +86,8 @@ describe('playwrightEngine & HITL orchestration', () => {
     if (closeListener) (closeListener as () => void)();
 
     // Verify and resume with active browser context
-    await launchLocalBrowserHITL('epads');
-    verifyAndResumePortal('epads');
+    await launchLocalBrowserHITL('epms_ppra');
+    verifyAndResumePortal('epms_ppra');
   });
 
   it('handles error gracefully when browser close or page goto throws', async () => {
@@ -105,7 +105,7 @@ describe('playwrightEngine & HITL orchestration', () => {
     playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
     vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(true);
 
-    const result = await launchLocalBrowserHITL('epads');
+    const result = await launchLocalBrowserHITL('epms_ppra');
     expect(result.success).toBe(true);
     expect(result.isHeadlessFallback).toBe(true);
     expect(result.message).toContain('Open Federal PPRA');
@@ -121,7 +121,7 @@ describe('playwrightEngine & HITL orchestration', () => {
     playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
     vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(false);
 
-    const result = await launchLocalBrowserHITL('epads');
+    const result = await launchLocalBrowserHITL('epms_ppra');
     expect(result.success).toBe(true);
     expect(result.isHeadlessFallback).toBe(true);
     expect(result.message).toContain('Direct link provided');

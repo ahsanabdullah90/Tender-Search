@@ -4,11 +4,11 @@
 
 Tender Tracker catalogs 18 official and aggregator procurement portals across Pakistan, categorized into 5 operational sectors.
 
-These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The live database tracks 14 active portals (with `epads` re-enabled against open EPADS v2.0 `https://epads.gov.pk/`, and 4 operator-removed portals: `giz`, `pid`, `tender_services`, and `ungm` in `deleted_portals`).
+These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The live database tracks 10 active online portals (with `epms_ppra` replacing legacy `epads`, and `deleted_portals` recording `epads`, `giz`, `pid`, `tender_services`, `ungm`, `kppra`, `sppra`, `psda`, and `gilgit`).
 
 | ID | Portal Name | Category | Tier | Access Mode | Default Tenders URL | Scraping Strategy & Operational Status |
 |---|---|---|---|---|---|---|
-| `epads` | Federal PPRA (EPADS) | Regulatory | `http` | `public` | `https://epads.gov.pk/` | Statutory federal electronic procurement portal (`epads.gov.pk`, 100 opportunities/page across paginated `?page=` pages). Open notice listings require no login. |
+| `epms_ppra` | Federal PPRA (EPMS) | Regulatory | `http` | `public` | `https://epms.ppra.gov.pk/public/tenders/active-tenders` | Federal public SSR Bootstrap tender board (50 notices/page across paginated `?page=` pages, expandable detail rows, deterministic detail-page BidBrief + `/pdf?file=` document extraction with zero login). |
 | `punjab_eproc` | Punjab PPRA | Regulatory | `http` | `public` | `https://eproc.punjab.gov.pk/ActiveTenders.aspx` | Highest volume provincial source (750+ active tenders). Scraped via Cheerio RadGrid extractor (`table.rgMasterTable`) with ASP.NET `__doPostBack` pagination and legacy TLS cipher fallback. |
 | `sppra` | Sindh SPPRA | Regulatory | `playwright` | `public` | `https://portalsindh.eprocure.gov.pk` | Dynamic portal indexing 12,000+ listings. Headless Playwright context renders DOM before extraction. |
 | `kppra` | Khyber Pakhtunkhwa KPPRA | Regulatory | `playwright` | `offline_broken` | `https://kp.eprocure.gov.pk` | KP EPADS portal protected by basic-auth challenge; health probe tracks connectivity without interrupting crawls. |
@@ -96,7 +96,7 @@ When a configured `tenders_url` fails with a dead-link HTTP error (`404`, `410`,
 ## Portal Contract Test Suite (`tests/scraper/portal-contracts.test.ts`)
 
 Every portal in `PORTAL_DEFINITIONS` is accounted for in `tests/scraper/portal-contracts.test.ts`:
-- **Captured Live Fixtures (`<= 50 KB` each)**: `epads`, `bppra`, `ndma`, `fde` (plus `fde_detail` exercising WordPress Download Manager `?wpdmdl=` attachment discovery), `mofept`, `pseb`, `ignite`, `psdf`, and `peef`.
+- **Captured Live Fixtures (`<= 50 KB` each)**: `epms_ppra`, `bppra`, `ndma`, `fde` (plus `fde_detail` exercising WordPress Download Manager `?wpdmdl=` attachment discovery), `mofept`, `pseb`, `ignite`, `psdf`, and `peef`.
 - **Synthetic Fixtures**: `punjab_eproc`, `sppra`, `tender_services`, `cloudflare_challenge`, and `login_required`.
 - **Documented HTTP Zero-Yield / Non-Listing Portals**:
   - `psda`: Live page renders `<p><span><b>No Opening</b></span></p>` (recognized by `hasEmptyTenderTableState`).

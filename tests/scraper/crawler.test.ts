@@ -46,6 +46,8 @@ import * as cheerio from 'cheerio';
 import http from 'http';
 import * as ocrSvc from '../../src/server/services/ocrService.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
+import { parseEpmsDetailHtml } from '../../src/server/scrapers/portalParsers.js';
+import { deriveDossierLabel } from '../../src/server/services/dossierManager.js';
 import type { RawScrapedItem } from '../../src/server/scrapers/crawlerEngine.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -151,60 +153,103 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(item.publishDate).toContain('2026-06-02');
     });
 
-    it('parses Federal EPADS fixture items accurately', () => {
-      const html = fs.readFileSync(path.join(FIXTURES_DIR, 'epads', 'page.html'), 'utf8');
-      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epads')!;
+    it('parses Federal PPRA (EPMS) fixture items accurately', () => {
+      const html = fs.readFileSync(path.join(FIXTURES_DIR, 'epms_ppra', 'page.html'), 'utf8');
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epms_ppra')!;
 
       const result = parsePortalHtml(html, portal);
       expect(result.hitlRequired).toBe(false);
       expect(result.items.length).toBe(5);
 
       const item = result.items[0];
-      expect(item.referenceNo).toMatch(/^P\d+$/);
+      expect(item.referenceNo).toMatch(/^TS\d+[A-Z0-9]*$/);
       expect(item.title.length).toBeGreaterThan(10);
       expect(item.organization.length).toBeGreaterThan(3);
-      expect(item.directUrl).toMatch(/^https:\/\/epads\.gov\.pk\/opportunities\//);
+      expect(item.directUrl).toMatch(/^https:\/\/epms\.ppra\.gov\.pk\/public\/tenders\/tender-details\//);
       expect(item.closingDate).toBeTruthy();
       expect(item.publishDate).toBeTruthy();
     });
 
-    it('parses Federal EPADS countdown deadlines ("Xh Ym Left") and corrigendum indicators', () => {
-      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epads')!;
-      const syntheticHtml = `
-        <table><tbody>
+    it('skips Cancelled EPMS rows, extracts deterministic BidBrief from detail pages, and discovers /pdf?file= attachments', () => {
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epms_ppra')!;
+      const listingHtml = `
+        <table class="cb-rt"><tbody>
           <tr>
-            <td>1</td>
-            <td>
-              <a href="/opportunities/federal/procurements/199999">
-                <span data-bs-toggle="tooltip" title="Supply and Installation of Solar PV System for Government Schools">Supply and Installation of Solar PV...</span>
-              </a>
-              <br>
-              <span data-bs-toggle="tooltip" title="Federal Directorate of Education">Federal Directorate of Education</span>
-              <div><span class="badge">P199999</span><span class="badge">Under Corrigendum</span></div>
+            <td><button class="cb-rt-expand" data-id="1"></button></td>
+            <td data-label="Sr">1</td>
+            <td data-label="Tender No"><strong>TS0000017761E</strong><span class="badge">Procurement</span></td>
+            <td data-label="Tender Details">
+              <strong>Procurement of Solar PV Systems for Federal Schools</strong>
+              <small class="text-muted">FDE invites sealed bids...</small>
+              <div><small class="badge">Equipments</small><small class="badge">04-FY2627-SOLAR</small></div>
             </td>
-            <td>
-              <div>
-                <div><span class="text-secondary">Published On:</span><span class="badge">Friday, November 6, 2026 09:00 AM</span></div>
-                <div><span class="text-secondary">Closing On:</span><span class="badge">2h 45m Left</span></div>
-              </div>
+            <td data-label="Status"><span class="badge">Published</span></td>
+            <td data-label="Advertised">Nov 13, 2026</td>
+            <td data-label="Closing"><strong>Dec 02, 2026</strong><small>11:00 AM</small></td>
+            <td data-label="Actions"><a href="/public/tenders/tender-details/TS0000017761E">View</a></td>
+          </tr>
+          <tr id="cb-rt-detail-1" class="cb-rt-detail-row"><td colspan="8"><div class="cb-rt-grid">
+            <div><span class="cb-rt-dl">Organization</span><span class="cb-rt-dv"><strong>NUST</strong><span class="text-dark">SMME</span><small>Islamabad - Pakistan</small></span></div>
+            <div><span class="cb-rt-dl">Procurement Category</span><span class="cb-rt-dv">Goods</span></div>
+          </div></td></tr>
+          <tr>
+            <td><button class="cb-rt-expand" data-id="2"></button></td>
+            <td data-label="Tender No"><strong>FW0000017985E</strong></td>
+            <td data-label="Tender Details">
+              <strong>Framework Agreement for Laboratory Chemicals</strong>
+              <div><small class="badge">P194565</small></div>
             </td>
-            <td>Goods Single Stage-One Envelope</td>
-            <td></td>
+            <td data-label="Status"><span class="badge">Published</span></td>
+            <td data-label="Advertised">Nov 13, 2026</td>
+            <td data-label="Closing"><strong>Dec 03, 2026</strong><small>01:00 PM</small></td>
+            <td data-label="Actions"><a href="/public/tenders/tender-details/FW0000017985E">View</a></td>
+          </tr>
+          <tr>
+            <td><button class="cb-rt-expand" data-id="3"></button></td>
+            <td data-label="Tender No"><strong>TS0000099999E</strong></td>
+            <td data-label="Tender Details"><strong>Cancelled Tender Notice Must Skip</strong></td>
+            <td data-label="Status"><span class="badge">Cancelled</span></td>
+            <td data-label="Advertised">Nov 10, 2026</td>
+            <td data-label="Closing"><strong>Dec 15, 2026</strong><small>10:00 AM</small></td>
+            <td data-label="Actions"><a href="/public/tenders/tender-details/TS0000099999E">View</a></td>
           </tr>
         </tbody></table>`;
-      const result = parsePortalHtml(syntheticHtml, portal);
-      expect(result.items).toHaveLength(1);
-      expect(result.items[0].title).toBe('Supply and Installation of Solar PV System for Government Schools');
-      expect(result.items[0].organization).toBe('Federal Directorate of Education');
-      expect(result.items[0].referenceNo).toBe('P199999');
-      expect(result.items[0].isCorrigendum).toBe(true);
-      expect(result.items[0].publishDate).toBe('2026-11-06T04:00:00.000Z');
-      expect(result.items[0].closingDate).toBeTruthy();
+
+      const parsed = parsePortalHtml(listingHtml, portal);
+      expect(parsed.items).toHaveLength(2);
+      expect(parsed.items[0].referenceNo).toBe('TS0000017761E');
+      expect(parsed.items[1].referenceNo).toBe('FW0000017985E');
+      expect(parsed.items[0].organization).toBe('NUST (SMME)');
+      expect(parsed.items[0].location).toBe('Islamabad - Pakistan');
+      expect(parsed.items[0].closingDate).toBe('2026-12-02T06:00:00.000Z');
+
+      const encodedBiddingDoc = Buffer.from('tender_attachments/bidding-document_1_415.pdf', 'utf8').toString('base64');
+      const detailHtml = `
+        <div class="list-group">
+          <div class="list-group-item"><span class="detail-label">Tender No / Reference No / Tender Inquiry No</span><span class="flex-grow-1">04-FY2627-SOLAR</span></div>
+          <div class="list-group-item"><span class="detail-label">Procurement Procedure</span><span class="flex-grow-1">Single Stage-Two Envelope</span></div>
+          <div class="list-group-item"><span class="detail-label">City</span><span class="flex-grow-1">Islamabad</span></div>
+          <div class="list-group-item"><span class="detail-label">Bid Security</span><span class="flex-grow-1">32,444.00</span></div>
+          <div class="list-group-item"><span class="detail-label">Bid Validity</span><span class="flex-grow-1">120 days</span></div>
+          <div class="list-group-item"><span class="detail-label">Description</span><span class="flex-grow-1">Full scope of work for turnkey 50kW solar systems across Islamabad campuses.</span></div>
+        </div>
+        <a href="/pdf?file=${encodedBiddingDoc}">Download Tender Document</a>`;
+
+      const detailMeta = parseEpmsDetailHtml(detailHtml);
+      expect(detailMeta?.location).toBe('Islamabad');
+      expect(detailMeta?.bidBrief?.bidSecurityAmount).toBe('PKR 32,444.00');
+      expect(detailMeta?.bidBrief?.bidMethod).toBe('Single Stage-Two Envelope');
+      expect(detailMeta?.bidBrief?.deliverablesSummary.join(' ')).toContain('04-FY2627-SOLAR');
+
+      const $ = cheerio.load(detailHtml);
+      const links = collectRowAttachments($, $('body').get(0), portal);
+      expect(links).toEqual([`https://epms.ppra.gov.pk/pdf?file=${encodedBiddingDoc}`]);
+      expect(deriveDossierLabel(links[0])).toBe('bidding document 1 415');
     });
 
     it('detects Cloudflare Turnstile challenge and flags hitlRequired (Bug B4)', () => {
       const html = fs.readFileSync(path.join(FIXTURES_DIR, 'cloudflare_challenge', 'page.html'), 'utf8');
-      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epads')!;
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epms_ppra')!;
 
       const result = parsePortalHtml(html, portal);
       expect(result.hitlRequired).toBe(true);
@@ -540,26 +585,26 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     });
 
     it('maps all db portal fields in getActivePortalsList', () => {
-      updatePortalHealth('epads', {
-        portal_name: 'Federal EPADS Custom',
+      updatePortalHealth('epms_ppra', {
+        portal_name: 'Federal EPMS Custom',
         category: 'Federal/Regional',
         tier: 'http',
-        base_url: 'https://custom-epads.gov.pk',
-        tenders_url: 'https://custom-epads.gov.pk/tenders',
-        login_url: 'https://custom-epads.gov.pk/login',
+        base_url: 'https://custom-epms.ppra.gov.pk',
+        tenders_url: 'https://custom-epms.ppra.gov.pk/tenders',
+        login_url: 'https://custom-epms.ppra.gov.pk/login',
         access_mode: 'login_required',
         verified_status: 'online',
         session_cookies: 'test=1'
       });
 
-      const portals = getActivePortalsList('epads');
+      const portals = getActivePortalsList('epms_ppra');
       expect(portals.length).toBe(1);
-      const epads = portals[0];
-      expect(epads.name).toBe('Federal EPADS Custom');
-      expect(epads.baseUrl).toBe('https://custom-epads.gov.pk');
-      expect(epads.loginUrl).toBe('https://custom-epads.gov.pk/login');
-      expect(epads.accessMode).toBe('login_required');
-      expect((epads as any).sessionCookies).toBe('test=1');
+      const epms = portals[0];
+      expect(epms.name).toBe('Federal EPMS Custom');
+      expect(epms.baseUrl).toBe('https://custom-epms.ppra.gov.pk');
+      expect(epms.loginUrl).toBe('https://custom-epms.ppra.gov.pk/login');
+      expect(epms.accessMode).toBe('login_required');
+      expect((epms as any).sessionCookies).toBe('test=1');
     });
 
     it('handles timeout in fetchHtmlWithTolerantAgent', async () => {
@@ -1991,10 +2036,10 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
     it('Plan D: multi-portal concurrent scan isolates failing portal and writes last_error_code', async () => {
       // Keep only 2 HTTP portals enabled for a fast deterministic concurrent scan
-      db.prepare(`UPDATE portal_health SET access_mode = 'offline_broken' WHERE portal_id NOT IN ('punjab_eproc', 'epads')`).run();
+      db.prepare(`UPDATE portal_health SET access_mode = 'offline_broken' WHERE portal_id NOT IN ('punjab_eproc', 'epms_ppra')`).run();
 
       crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
-        if (url.includes('epads.gov.pk')) {
+        if (url.includes('epms.ppra.gov.pk')) {
           throw new Error('Request timed out after 15000ms (ETIMEDOUT)');
         }
         return `
@@ -2011,11 +2056,11 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(status.completedPortals).toBe(2);
 
       const portals = getPortalHealthList();
-      const epads = portals.find(p => p.portal_id === 'epads');
+      const epms = portals.find(p => p.portal_id === 'epms_ppra');
       const punjab = portals.find(p => p.portal_id === 'punjab_eproc');
 
-      expect(epads?.status).toBe('error');
-      expect(epads?.last_error_code).toBe('TIMEOUT');
+      expect(epms?.status).toBe('error');
+      expect(epms?.last_error_code).toBe('TIMEOUT');
       expect(punjab?.status).toBe('online');
       expect(punjab?.last_error_code).toBeNull();
     });

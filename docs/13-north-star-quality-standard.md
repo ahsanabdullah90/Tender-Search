@@ -223,18 +223,18 @@ These are measured by a command. Re-run the command and replace the value; never
 | Measure | Value on 2026-11-13 | Command |
 |---|---|---|
 | TypeScript errors | 0 (root + split client/server configs) | `npm run lint` |
-| Tests passing | 626 of 626, 39 files, 28.2 s | `npm run verify` |
-| Production build | Builds (`dist/` in 700 ms + `dist-server/server.mjs` in 25 ms) | `npm run build` |
+| Tests passing | 626 of 626, 39 files, 23.02 s | `npm run verify` |
+| Production build | Builds (`dist/` in 534 ms + `dist-server/server.mjs` in 17 ms) | `npm run build` |
 | `db.prepare` outside `src/server/db/` | 0 | `Get-ChildItem src/server -Recurse -Filter *.ts \| Where-Object { $_.FullName -notmatch '\\db\\' } \| Select-String 'db\.prepare'` |
 | Unparseable `closing_date` rows | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND julianday(closing_date) IS NULL;` |
 | Deadlines with no `deadline_source` | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND deadline_source IS NULL;` |
-| Expired, unflagged Inbox rows | 0 | `SELECT COUNT(*) FROM tenders WHERE pipeline_status='New Opportunity' AND is_bookmarked=0 AND needs_review=0 AND ingestion_status='ready' AND closing_date IS NOT NULL AND julianday(closing_date) < julianday('now');` |
-| Portals tracked | 10 active (18 defined; 8 deleted by operator: `gilgit`, `giz`, `kppra`, `pid`, `psda`, `sppra`, `tender_services`, `ungm`; `epads` active on `epads.gov.pk`, `punjab_eproc` expanded to `quickMaxPages: 3` / `deepMaxPages: 10`) | `SELECT COUNT(*) FROM portal_health;` |
-| Portals that returned items on their last scan | 10 of 10 | `SELECT COUNT(*) FROM portal_health WHERE last_items_found > 0;` |
+| Expired, unflagged Inbox rows | 1 (within retention grace window) | `SELECT COUNT(*) FROM tenders WHERE pipeline_status='New Opportunity' AND is_bookmarked=0 AND needs_review=0 AND ingestion_status='ready' AND closing_date IS NOT NULL AND julianday(closing_date) < julianday('now');` |
+| Portals tracked | 10 active (18 defined in `PORTAL_DEFINITIONS`; 9 retired in `deleted_portals`: `epads`, `gilgit`, `giz`, `kppra`, `pid`, `psda`, `sppra`, `tender_services`, `ungm`; `epms_ppra` active on `epms.ppra.gov.pk` replacing retired `epads`, `punjab_eproc` expanded to `quickMaxPages: 3` / `deepMaxPages: 10`) | `SELECT COUNT(*) FROM portal_health;` |
+| Portals that returned items on their last scan | 7 of 10 (`bppra`, `ignite`, `ndma` returned empty-state `online`) | `SELECT COUNT(*) FROM portal_health WHERE last_items_found > 0;` |
 | Portals shown as "checked successfully" (`HLT-4`; includes empty-state portals) | 10 of 10 | `SELECT COUNT(*) FROM portal_health WHERE status='online';` |
-| Completed full scans | 1 (`2026-11-13T04:21:24.153Z`) | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` |
-| Tenders stored (FTS5-indexed) | 401 (173 `ready`, 228 `awaiting_scope`; 401 `tenders_fts` rows) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
-| Line coverage | 84.62% lines (82.84% statements, 81.67% functions, 73.59% branches) | `npm run test:coverage` |
+| Completed full scans | Latest: `2026-11-13T10:19:19.111Z` | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` |
+| Tenders stored (FTS5-indexed) | 446 (193 `ready`, 253 `awaiting_scope`; 446 `tenders_fts` rows) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
+| Line coverage | 84.41% lines (82.63% statements, 81.13% functions, 73.4% branches) | `npm run test:coverage` |
 
 ---
 

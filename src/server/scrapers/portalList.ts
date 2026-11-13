@@ -27,19 +27,18 @@ export interface PortalDefinition {
 export const PORTAL_DEFINITIONS: PortalDefinition[] = [
   // 1. Regulatory Authorities (PPRAs)
   {
-    id: 'epads',
-    name: 'Federal PPRA (EPADS)',
+    id: 'epms_ppra',
+    name: 'Federal PPRA (EPMS)',
     category: 'Regulatory',
     tier: 'http',
-    baseUrl: 'https://epads.gov.pk',
-    tendersUrl: 'https://epads.gov.pk/',
+    baseUrl: 'https://epms.ppra.gov.pk',
+    tendersUrl: 'https://epms.ppra.gov.pk/public/tenders/active-tenders',
     fileCode: 'FPPRA',
-    loginUrl: 'https://epads.gov.pk/login',
-    description: 'Federal statutory public procurement electronic portal (EPADS public opportunities board)',
+    description: 'Federal Public Procurement Regulatory Authority open tender board (50/page + public PDFs & bid security)',
     defaultKeywords: ['construction', 'solar', 'stationery', 'education', 'tvet'],
     accessMode: 'public',
-    verifiedStatus: 'Verified open Federal EPADS opportunities table (100/page)',
-    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 3, deepMaxPages: 10 }
+    verifiedStatus: 'Verified open Federal EPMS SSR tender board (50/page + public PDFs)',
+    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 2, deepMaxPages: 5 }
   },
   {
     id: 'punjab_eproc',

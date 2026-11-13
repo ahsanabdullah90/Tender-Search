@@ -85,9 +85,9 @@ describe('Database and Repository Layer', () => {
     it('seeds portal health entries', () => {
       const portals = getPortalHealthList();
       expect(portals.length).toBeGreaterThan(0);
-      const epads = portals.find(p => p.portal_id === 'epads');
-      expect(epads).toBeDefined();
-      expect(epads?.portal_name).toContain('Federal PPRA');
+      const epms = portals.find(p => p.portal_id === 'epms_ppra');
+      expect(epms).toBeDefined();
+      expect(epms?.portal_name).toContain('Federal PPRA');
     });
   });
 
@@ -448,7 +448,7 @@ describe('Database and Repository Layer', () => {
 
   describe('Portal Health & Credentials', () => {
     it('updates portal operational health safely', () => {
-      updatePortalHealth('epads', {
+      updatePortalHealth('epms_ppra', {
         status: 'scanning',
         last_items_found: 12,
         consecutive_zero_yields: 0,
@@ -456,20 +456,20 @@ describe('Database and Repository Layer', () => {
       });
 
       const portals = getPortalHealthList();
-      const epads = portals.find(p => p.portal_id === 'epads');
-      expect(epads?.status).toBe('scanning');
-      expect(epads?.last_items_found).toBe(12);
-      expect(epads?.last_error_message).toBe('Scan running');
+      const epms = portals.find(p => p.portal_id === 'epms_ppra');
+      expect(epms?.status).toBe('scanning');
+      expect(epms?.last_items_found).toBe(12);
+      expect(epms?.last_error_message).toBe('Scan running');
     });
 
     it('saves and retrieves portal credentials', () => {
-      savePortalCredentials('epads', {
+      savePortalCredentials('epms_ppra', {
         username: 'bidder_alpha',
         password: 'secure_password_123',
         loginUrl: 'https://epms.ppra.gov.pk/login'
       });
 
-      const creds = getPortalAuthCredentials('epads');
+      const creds = getPortalAuthCredentials('epms_ppra');
       expect(creds?.username).toBe('bidder_alpha');
       expect(creds?.password).toBe('secure_password_123');
       expect(creds?.loginUrl).toBe('https://epms.ppra.gov.pk/login');
@@ -939,17 +939,17 @@ describe('Database and Repository Layer', () => {
     it('Plan C & D: builds known tender map for pagination early-stop and stores portal_health.last_error_code', () => {
       db.prepare(`
         INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url, closing_date, has_corrigendum)
-        VALUES ('t-known-1', 't-known-1', 'epads', 'Federal PPRA (EPADS)', 'Known Notice', 'FDE', 'https://epads.gov.pk/known/1', '2026-12-10T10:00:00+05:00', 0)
+        VALUES ('t-known-1', 't-known-1', 'epms_ppra', 'Federal PPRA (EPMS)', 'Known Notice', 'FDE', 'https://epms.ppra.gov.pk/known/1', '2026-12-10T10:00:00+05:00', 0)
       `).run();
 
-      const knownMap = getKnownTenderMapForPortal('epads');
-      expect(knownMap.get('https://epads.gov.pk/known/1')).toEqual({
+      const knownMap = getKnownTenderMapForPortal('epms_ppra');
+      expect(knownMap.get('https://epms.ppra.gov.pk/known/1')).toEqual({
         closing_date: '2026-12-10T10:00:00+05:00',
         has_corrigendum: 0
       });
 
-      updatePortalHealth('epads', { status: 'error', last_error_code: 'TIMEOUT', last_error_message: 'Timed out' });
-      expect(getPortalById('epads')?.last_error_code).toBe('TIMEOUT');
+      updatePortalHealth('epms_ppra', { status: 'error', last_error_code: 'TIMEOUT', last_error_message: 'Timed out' });
+      expect(getPortalById('epms_ppra')?.last_error_code).toBe('TIMEOUT');
     });
   });
 });

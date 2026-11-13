@@ -37,6 +37,24 @@ export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, in
       } catch {}
     }
 
+    // 1b. Check for EPMS PPRA ?file=<base64> pattern (e.g. tender_attachments/bidding-document_1_415.pdf)
+    try {
+      const fileParam = new URL(remoteUrl, 'https://localhost').searchParams.get('file');
+      if (fileParam && /^[A-Za-z0-9+/=]{8,}$/.test(fileParam)) {
+        const decodedPath = Buffer.from(fileParam, 'base64').toString('utf8').trim();
+        if (/^[\w./-]+$/.test(decodedPath) && /\.(pdf|docx?|xlsx?|jpe?g|png|webp)$/i.test(decodedPath)) {
+          const decodedBase = path.basename(decodedPath)
+            .replace(/\.[a-z0-9]+$/i, '')
+            .replace(/[-_]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (decodedBase.length > 2) {
+            return decodedBase;
+          }
+        }
+      }
+    } catch {}
+
     // 2. Check if raw filename is meaningful (not an opaque hash or ID)
     const baseNameWithoutExt = rawFilename.replace(/\.[a-z0-9]+$/i, '');
     const isOpaqueHash = /^[0-9a-f]{20,}$/i.test(baseNameWithoutExt) ||

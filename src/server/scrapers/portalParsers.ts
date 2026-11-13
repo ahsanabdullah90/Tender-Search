@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { BidBrief } from '../../shared/types.js';
 import { PortalDefinition } from './portalList.js';
 import { isValidReferenceNo } from '../services/deduplicator.js';
 import { parseDateString, extractDatesFromText, DATE_CANDIDATE_PATTERN } from './dateParser.js';
@@ -178,7 +179,7 @@ export function collectRowAttachments($: cheerio.CheerioAPI, el: any, portal: Po
     const aHref = $(aEl).attr('data-downloadurl') || $(aEl).attr('href');
     if (!aHref || aHref.startsWith('#') || aHref.startsWith('javascript:')) return;
 
-    if (/\.(pdf|docx?|xlsx?)(\?|$)/i.test(aHref) || /[?&]wpdmdl=\d+/i.test(aHref) || $(aEl).hasClass('wpdm-download-link')) {
+    if (/\.(pdf|docx?|xlsx?)(\?|$)/i.test(aHref) || /[?&]wpdmdl=\d+/i.test(aHref) || /\/pdf\?file=/i.test(aHref) || $(aEl).hasClass('wpdm-download-link')) {
       const absUrl = resolvePortalUrl(aHref, portal);
       if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
     } else if (/\.(jpe?g|png|webp)(\?|$)/i.test(aHref)) {
@@ -630,71 +631,88 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     if (items.length > 0) return { items: sanitizeScrapedItems(items, portal), hitlRequired: false };
   }
 
-  // 3f. Structured Federal EPADS Opportunities Table (https://epads.gov.pk/)
-  const epadsRows = $('table tbody tr').filter((_, el) => $(el).find('a[href*="/opportunities/"]').length > 0);
-  if (epadsRows.length > 0) {
-    const parseCountdownClosing = (raw: string): string | null => {
-      if (!/left\b/i.test(raw)) return null;
-      const d = Number(raw.match(/(\d+)\s*d\b/i)?.[1] || 0);
-      const h = Number(raw.match(/(\d+)\s*h\b/i)?.[1] || 0);
-      const m = Number(raw.match(/(\d+)\s*m\b/i)?.[1] || 0);
-      const totalMinutes = d * 1440 + h * 60 + m;
-      if (totalMinutes <= 0) return null;
-      return new Date(Date.now() + totalMinutes * 60_000).toISOString();
-    };
+  // 3f. Structured Federal PPRA EPMS Active Tenders Table (https://epms.ppra.gov.pk/public/tenders/active-tenders)
+  const epmsRows = $('table tbody tr').filter((_, el) => $(el).find('a[href*="/public/tenders/tender-details/"]').length > 0);
+  if (epmsRows.length > 0) {
+    epmsRows.each((_, el) => {
+      const statusText = $(el).find('td[data-label="Status"]').text().replace(/\s+/g, ' ').trim();
+      if (/^cancelled$/i.test(statusText)) return;
 
-    epadsRows.each((_, el) => {
-      const tds = $(el).children('td');
-      const infoCell = tds.length >= 2 ? $(tds[1]) : $(el);
-      const link = infoCell.find('a[href*="/opportunities/"]').first();
-      const title = (
-        link.find('span[title]').first().attr('title') ||
-        link.find('span').first().text() ||
-        link.text()
-      ).replace(/\s+/g, ' ').trim();
+      const detailLink = $(el).find('a[href*="/public/tenders/tender-details/"]').first();
+      const directUrl = resolvePortalUrl(detailLink.attr('href'), portal);
+
+      const detailsCell = $(el).find('td[data-label="Tender Details"]').first();
+      const title = (detailsCell.find('strong').first().text() || '').replace(/\s+/g, ' ').trim();
       if (!title || title.length <= 5) return;
-
-      const directUrl = resolvePortalUrl(link.attr('href'), portal);
       if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
 
-      const spansWithTitle = infoCell.find('span[data-bs-toggle="tooltip"], span[title]').filter((__, sEl) => $(sEl).closest('a').length === 0);
-      const orgRaw = (spansWithTitle.first().attr('title') || spansWithTitle.first().text() || '').replace(/\s+/g, ' ').trim();
-      const organization = orgRaw.length > 2 ? orgRaw : portal.name;
+      const tenderNoCell = $(el).find('td[data-label="Tender No"]').first();
+      const ppraRef = (tenderNoCell.find('strong').first().text() || '').replace(/\s+/g, ' ').trim();
+      const noticeMethod = (tenderNoCell.find('.badge').first().text() || '').replace(/\s+/g, ' ').trim();
 
-      let refNo: string | undefined;
-      infoCell.find('span.badge').each((__, bEl) => {
-        const txt = $(bEl).text().replace(/\s+/g, ' ').trim();
-        if (!refNo && /^P\d{3,}$/i.test(txt)) {
-          refNo = txt;
-        }
-      });
+      const snippet = (detailsCell.find('small.text-muted').first().text() || '').replace(/\s+/g, ' ').trim();
+      const detailBadges = detailsCell.find('div small.badge').map((__, b) => $(b).text().replace(/\s+/g, ' ').trim()).get().filter(Boolean);
+      const sectorBadge = detailBadges[0] || '';
+      const inquiryRef = detailBadges[1] && detailBadges[1] !== ppraRef ? detailBadges[1] : '';
 
-      const statusCell = tds.length >= 3 ? $(tds[2]) : $(el);
-      let publishDate: string | undefined;
-      let closingDate: string | null = null;
-      statusCell.find('div').filter((__, dEl) => $(dEl).children('span.badge').length === 1).each((__, dEl) => {
-        const labelTxt = $(dEl).text().replace(/\s+/g, ' ').trim();
-        const badgeTxt = $(dEl).children('span.badge').first().text().replace(/\s+/g, ' ').trim();
-        if (!badgeTxt) return;
-        if (/^Published On:/i.test(labelTxt) && !publishDate) {
-          publishDate = parseDateString(badgeTxt) || undefined;
-        } else if (/^Closing On:/i.test(labelTxt) && !closingDate) {
-          closingDate = parseDateString(badgeTxt) || parseCountdownClosing(badgeTxt);
-        }
-      });
+      const expandId = $(el).find('.cb-rt-expand').attr('data-id');
+      const expandedRow = expandId ? $(`#cb-rt-detail-${expandId}`) : $(el).next('tr.cb-rt-detail-row');
+      let organization = portal.name;
+      let location: string | undefined;
+      const detailMeta: Record<string, string> = {};
 
-      const procCell = tds.length >= 4 ? $(tds[3]).text().replace(/\s+/g, ' ').trim() : '';
-      const infoText = infoCell.text().replace(/\s+/g, ' ').trim();
+      if (expandedRow.length > 0) {
+        expandedRow.find('.cb-rt-grid > div').each((__, col) => {
+          const label = $(col).find('.cb-rt-dl').text().replace(/\s+/g, ' ').trim().toLowerCase();
+          const valEl = $(col).find('.cb-rt-dv').first();
+          if (!label || !valEl.length) return;
+          if (label === 'organization') {
+            const orgName = valEl.find('strong').first().text().replace(/\s+/g, ' ').trim();
+            const subOffice = valEl.find('.text-dark').first().text().replace(/\s+/g, ' ').trim();
+            const locTxt = valEl.find('small').first().text().replace(/\s+/g, ' ').trim();
+            if (orgName.length > 2) {
+              organization = subOffice && subOffice !== orgName ? `${orgName} (${subOffice})` : orgName;
+            }
+            if (locTxt.length > 2) {
+              location = locTxt;
+            }
+          } else {
+            detailMeta[label] = valEl.text().replace(/\s+/g, ' ').trim();
+          }
+        });
+      }
+
+      const advRaw = $(el).find('td[data-label="Advertised"]').first().text().replace(/\s+/g, ' ').trim();
+      const publishDate = parseDateString(advRaw) || undefined;
+
+      const closeCell = $(el).find('td[data-label="Closing"]').first();
+      const closeDatePart = closeCell.find('strong').first().text().replace(/\s+/g, ' ').trim();
+      const closeTimePart = closeCell.find('small').first().text().replace(/\s+/g, ' ').trim();
+      const closeRaw = closeDatePart && closeTimePart
+        ? `${closeDatePart} ${closeTimePart}`
+        : closeCell.text().replace(/\s+/g, ' ').trim();
+      const closingDate = parseDateString(closeRaw);
+
+      const metaTags = [
+        noticeMethod,
+        detailMeta['tender type'],
+        detailMeta['procurement category'],
+        sectorBadge || detailMeta['sector'],
+        detailMeta['tender nature'],
+        inquiryRef ? `Ref: ${inquiryRef}` : ''
+      ].filter(Boolean);
+      const description = [snippet, metaTags.join(' · ')].filter(Boolean).join(' — ').slice(0, 350);
 
       items.push({
-        referenceNo: refNo || extractRefFromText(title),
+        referenceNo: (ppraRef && /^[A-Z]{2}\d{5,}[A-Z0-9]*$/i.test(ppraRef) ? ppraRef : undefined) || inquiryRef || extractRefFromText(title),
         title,
         organization,
         directUrl,
         publishDate,
         closingDate,
-        description: procCell.slice(0, 350),
-        isCorrigendum: /corrigendum/i.test(infoText) || /\bcorrigendum\b/i.test(title),
+        location,
+        description,
+        isCorrigendum: /\b(?:corrigendum|amendment|addendum|extension)\b/i.test(`${title} ${snippet} ${detailMeta['tender type'] || ''}`),
         attachmentUrls: collectRowAttachments($, el, portal)
       });
     });
@@ -913,4 +931,70 @@ export function buildAspNetPostBackBody(html: string, targetPage: number): strin
   params.set('__EVENTTARGET', m[1]);
   params.set('__EVENTARGUMENT', m[2]);
   return params.toString();
+}
+
+export interface EpmsDetailMetadata {
+  description?: string;
+  location?: string;
+  bidBrief?: BidBrief;
+}
+
+/**
+ * Deterministically extracts structured BidBrief fields, city, and full tender description
+ * from an EPMS PPRA `/public/tenders/tender-details/<TS_ID>` page with zero AI API calls.
+ */
+export function parseEpmsDetailHtml(html: string): EpmsDetailMetadata | null {
+  const $ = cheerio.load(html);
+  const fields: Record<string, string> = {};
+
+  $('.list-group-item').each((_, item) => {
+    const label = $(item).find('.detail-label').first().text().replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!label) return;
+    const valEl = $(item).find('.flex-grow-1').first();
+    const val = (valEl.length ? valEl.text() : $(item).text()).replace(/\s+/g, ' ').trim();
+    if (val && val !== '-') {
+      fields[label] = val;
+    }
+  });
+
+  if (Object.keys(fields).length === 0) return null;
+
+  const bidSecRaw = fields['bid security'];
+  const bidSecurityAmount = bidSecRaw
+    ? (/^(?:PKR|Rs)/i.test(bidSecRaw) ? bidSecRaw : `PKR ${bidSecRaw}`)
+    : null;
+  const bidMethod = fields['procurement procedure'] || null;
+  const bidValidity = fields['bid validity'] || null;
+  const inquiryRef = fields['tender no / reference no / tender inquiry no'] || null;
+  const contactPerson = fields['contact person'] || null;
+  const contactEmail = fields['contact email'] || null;
+  const contactPhone = fields['contact phone'] || null;
+
+  const contactBits = [contactPerson, contactPhone, contactEmail].filter(Boolean).join(' · ');
+  const summaryParts = [
+    inquiryRef ? `Inquiry Ref: ${inquiryRef}` : '',
+    bidValidity ? `Bid Validity: ${bidValidity}` : '',
+    contactBits ? `Contact: ${contactBits}` : ''
+  ].filter(Boolean);
+
+  const deliverablesSummary = summaryParts.length > 0
+    ? summaryParts
+    : (fields['description'] ? [fields['description'].slice(0, 220)] : []);
+
+  const bidBrief: BidBrief | undefined = (bidSecurityAmount || bidMethod || deliverablesSummary.length > 0)
+    ? {
+        bidSecurityAmount,
+        tenderFee: null,
+        requiredRegistrations: [],
+        requiredExperience: null,
+        deliverablesSummary,
+        bidMethod
+      }
+    : undefined;
+
+  return {
+    description: fields['description'] || undefined,
+    location: fields['city'] || undefined,
+    bidBrief
+  };
 }

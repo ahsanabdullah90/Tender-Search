@@ -28,7 +28,7 @@ Re-capture a portal after fixing its parser: `npx tsx scripts/capture-portal-fix
 
 - `punjab_eproc/page.html`: Punjab PPRA eProcurement table structure.
 - `sppra/page.html`: Sindh PPRA listing.
-- `epads/page.html`: Federal PPRA EPADS structure.
+- `epms_ppra/page.html`: Federal PPRA (EPMS) SSR active tenders table (`table.cb-rt` + `#cb-rt-detail-*`).
 - `tender_services/page.html`: Tender Services Pakistan aggregated listing.
 - `cloudflare_challenge/page.html`: Cloudflare Turnstile challenge response.
 - `login_required/page.html`: Portal login challenge.

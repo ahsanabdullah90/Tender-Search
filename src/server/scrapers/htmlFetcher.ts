@@ -63,7 +63,7 @@ function requestHtmlWithMetadata(
     const reqOpts: https.RequestOptions = {
       agent: isHttps ? (useLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
       headers: reqHeaders,
-      timeout: 25000
+      timeout: parsedUrl.hostname.includes('epms.ppra.gov.pk') ? 35000 : 25000
     };
 
     const handleResponse = (res: http.IncomingMessage) => {

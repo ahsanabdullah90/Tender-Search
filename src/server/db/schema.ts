@@ -416,13 +416,16 @@ export function seedPortalHealth() {
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_password TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN session_cookies TEXT').run(); } catch {}
 
-  // One-time re-activation of Federal EPADS when upgrading from legacy login-walled epms.ppra.gov.pk to open epads.gov.pk
-  const EPADS_MIGRATION_KEY = 'migration_epads_v2_2026_11';
+  // One-time migration: retire legacy Federal EPADS source in favor of open Federal PPRA (EPMS)
+  // while preserving historical saved tenders in the tenders table.
+  const EPMS_MIGRATION_KEY = 'migration_epms_ppra_2026_11';
   try {
-    const migrated = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(EPADS_MIGRATION_KEY) as { value: string } | undefined;
+    const migrated = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(EPMS_MIGRATION_KEY) as { value: string } | undefined;
     if (!migrated) {
-      db.prepare("DELETE FROM deleted_portals WHERE portal_id = 'epads'").run();
-      db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(EPADS_MIGRATION_KEY, new Date().toISOString());
+      db.prepare("DELETE FROM portal_health WHERE portal_id = 'epads'").run();
+      db.prepare("INSERT OR IGNORE INTO deleted_portals (portal_id) VALUES ('epads')").run();
+      db.prepare("DELETE FROM deleted_portals WHERE portal_id = 'epms_ppra'").run();
+      db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(EPMS_MIGRATION_KEY, new Date().toISOString());
     }
   } catch {}
 
@@ -515,10 +518,6 @@ export function seedPortalHealth() {
           if (p.id === 'gilgit' && dbRow.access_mode !== p.accessMode) {
             db.prepare("UPDATE portal_health SET base_url = ?, tenders_url = ?, access_mode = ?, status = 'error', verified_status = ? WHERE portal_id = ?")
               .run(p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
-          }
-          if (p.id === 'epads' && (String(dbRow.tenders_url).includes('epms.ppra.gov.pk') || String(dbRow.base_url).includes('ppra.gov.pk'))) {
-            db.prepare("UPDATE portal_health SET portal_name = ?, tier = ?, base_url = ?, tenders_url = ?, login_url = ?, access_mode = ?, status = 'online', verified_status = ?, last_error_message = NULL WHERE portal_id = ?")
-              .run(p.name, p.tier, p.baseUrl, p.tendersUrl, p.loginUrl || null, p.accessMode, p.verifiedStatus, p.id);
           }
         }
       } catch {}

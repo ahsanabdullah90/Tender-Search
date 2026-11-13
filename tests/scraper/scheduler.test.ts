@@ -23,18 +23,18 @@ describe('scheduler and startup watchdog', () => {
 
   it('resets stuck scanning portals to error on startup (Bug B3)', () => {
     // Put a portal into 'scanning' status to simulate a crashed previous run
-    updatePortalHealth('epads', {
+    updatePortalHealth('epms_ppra', {
       status: 'scanning',
       last_error_message: undefined
     });
 
-    const before = getPortalHealthList().find(p => p.portal_id === 'epads');
+    const before = getPortalHealthList().find(p => p.portal_id === 'epms_ppra');
     expect(before?.status).toBe('scanning');
 
     // Run startup scheduler
     initStartupScheduler();
 
-    const after = getPortalHealthList().find(p => p.portal_id === 'epads');
+    const after = getPortalHealthList().find(p => p.portal_id === 'epms_ppra');
     expect(after?.status).toBe('error');
     expect(after?.last_error_message).toBe('Previous scan was interrupted');
   });
