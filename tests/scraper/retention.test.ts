@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { db, initDatabase, DOSSIERS_DIR } from '../../src/server/db.js';
-import { runRetentionCycle, getRetentionStatus } from '../../src/server/retention.js';
+import { db, initDatabase, DOSSIERS_DIR } from '../../src/server/db/index.js';
+import { runRetentionCycle, getRetentionStatus } from '../../src/server/services/retention.js';
 import { setAppSetting } from '../../src/server/db/repositories/systemRepo.js';
-import { saveTenderDocument } from '../../src/server/dossierStore.js';
+import { saveTenderDocument } from '../../src/server/services/dossierStore.js';
 import { getTenderById } from '../../src/server/db/repositories/tendersRepo.js';
 
 describe('Retention Lifecycle Daemon', () => {

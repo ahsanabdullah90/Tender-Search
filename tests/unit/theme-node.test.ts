@@ -5,7 +5,7 @@ import {
   systemPrefersDark,
   resolveDark,
   onSystemThemeChange
-} from '../../src/theme.js';
+} from '../../src/client/theme.js';
 
 describe('theme in node environment (SSR / headless without window)', () => {
   it('handles missing window/matchMedia gracefully', () => {

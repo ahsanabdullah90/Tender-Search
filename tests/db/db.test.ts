@@ -30,17 +30,25 @@ import {
   getStorageStats,
   pruneDossiersForPassed,
   clearAllTenders,
-  DATA_DIR,
   DOSSIERS_DIR,
   BACKUPS_DIR
-} from '../../src/server/db.js';
-import { findCanonicalMatch } from '../../src/server/deduplicator.js';
+} from '../../src/server/db/index.js';
+import { findCanonicalMatch } from '../../src/server/services/deduplicator.js';
 import {
   appendSecondarySource,
   slimPassedTenders,
   recordTenderSuppression,
-  isTenderSuppressed
+  isTenderSuppressed,
+  appendTenderExtractedText,
+  buildFts5PrefixQuery,
+  updateTenderFields,
+  getKnownTenderMapForPortal
 } from '../../src/server/db/repositories/tendersRepo.js';
+import {
+  getAlertsDigest,
+  getDigestSettings,
+  updateDigestSettings
+} from '../../src/server/db/repositories/systemRepo.js';
 import { runAuditCleanup } from '../../src/server/db/schema.js';
 
 describe('Database and Repository Layer', () => {
@@ -164,6 +172,38 @@ describe('Database and Repository Layer', () => {
       expect(getAllTenders({ search: 'Disaster Management' }).length).toBe(1);
       expect(getAllTenders({ search: 'Sindh SPPRA' }).length).toBe(1);
       expect(getAllTenders({ search: 'NonExistentXYZ' }).length).toBe(0);
+    });
+
+    it('indexes extracted PDF/DOCX text via SQLite FTS5 and safely handles punctuation queries', () => {
+      insertSampleTender('t-fts-1', {
+        title: 'School Rehabilitation & Clean Energy',
+        organization: 'FDE Islamabad',
+        reference_no: 'FDE-SOLAR-2026-01',
+        description: 'Annual tender notice'
+      });
+      insertSampleTender('t-fts-2', {
+        title: 'Office Consumables',
+        organization: 'Cabinet Division',
+        reference_no: 'CAB-09'
+      });
+
+      expect(appendTenderExtractedText('t-fts-1', 'Technical Specification: 50kW Hybrid Inverter with LiFePO4 battery bank and Tier-1 Bifacial PV Modules.')).toBe(true);
+      // Duplicate chunk is skipped cleanly
+      expect(appendTenderExtractedText('t-fts-1', 'Technical Specification: 50kW Hybrid Inverter with LiFePO4 battery bank and Tier-1 Bifacial PV Modules.')).toBe(false);
+
+      // Hits text stored only inside the extracted document body
+      const docMatches = getAllTenders({ search: 'LiFePO4 Bifacial' });
+      expect(docMatches.map(t => t.id)).toEqual(['t-fts-1']);
+
+      // FTS5 payload does not leak internal rowid or large extracted_text column
+      expect((docMatches[0] as any).extracted_text).toBeUndefined();
+      expect((docMatches[0] as any).rowid).toBeUndefined();
+
+      // Special punctuation never throws SQLite fts5 syntax errors
+      expect(buildFts5PrefixQuery('C++ / (2026-27) "Hybrid"*')).toBe('"C"* "2026"* "27"* "Hybrid"*');
+      expect(buildFts5PrefixQuery('---***""')).toBeNull();
+      expect(() => getAllTenders({ search: 'C++ / (Hybrid): "test"*' })).not.toThrow();
+      expect(getAllTenders({ search: 'Hybrid + "LiFePO4"*' }).map(t => t.id)).toEqual(['t-fts-1']);
     });
 
     it('filters tenders by track name', () => {
@@ -378,6 +418,31 @@ describe('Database and Repository Layer', () => {
       const rescoredTender = getTenderById('t-rescore');
       expect(rescoredTender?.domain_tracks).toContain('Solar & Clean Energy');
       expect(rescoredTender?.match_score).toBeGreaterThanOrEqual(30);
+    });
+
+    it('syncs ingestion_status when re-scoring promotes awaiting_scope or demotes unmatched Inbox tenders', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, domain_tracks, matched_keywords, match_score, pipeline_status, is_bookmarked, ingestion_status)
+        VALUES
+          ('t-promote', 't-promote', 'punjab_eproc', 'Punjab PPRA', 'REF-PROMOTE', 'Solarization of Government High School', 'School Education Department', 'https://example.com/1', '[]', '[]', 0, 'New Opportunity', 0, 'awaiting_scope'),
+          ('t-demote', 't-demote', 'punjab_eproc', 'Punjab PPRA', 'REF-DEMOTE', 'Miscellaneous Unrelated Office Widget', 'Widget Corp', 'https://example.com/2', '["Old Track"]', '["widget"]', 50, 'New Opportunity', 0, 'ready'),
+          ('t-keep-review', 't-keep-review', 'punjab_eproc', 'Punjab PPRA', 'REF-REVIEW', 'Miscellaneous Unrelated Review Widget', 'Widget Corp', 'https://example.com/3', '["Old Track"]', '["widget"]', 50, 'Under Review', 0, 'ready'),
+          ('t-keep-bookmarked', 't-keep-bookmarked', 'punjab_eproc', 'Punjab PPRA', 'REF-BOOKMARK', 'Miscellaneous Unrelated Bookmarked Widget', 'Widget Corp', 'https://example.com/4', '["Old Track"]', '["widget"]', 50, 'New Opportunity', 1, 'ready')
+      `).run();
+
+      reScoreTendersAgainstTracks();
+
+      const promoted = db.prepare('SELECT ingestion_status, domain_tracks FROM tenders WHERE id = ?').get('t-promote') as any;
+      const demoted = db.prepare('SELECT ingestion_status, domain_tracks FROM tenders WHERE id = ?').get('t-demote') as any;
+      const keptReview = db.prepare('SELECT ingestion_status FROM tenders WHERE id = ?').get('t-keep-review') as any;
+      const keptBookmarked = db.prepare('SELECT ingestion_status FROM tenders WHERE id = ?').get('t-keep-bookmarked') as any;
+
+      expect(promoted.ingestion_status).toBe('ready');
+      expect(JSON.parse(promoted.domain_tracks)).toContain('Solar & Clean Energy');
+      expect(demoted.ingestion_status).toBe('awaiting_scope');
+      expect(JSON.parse(demoted.domain_tracks)).toEqual([]);
+      expect(keptReview.ingestion_status).toBe('ready');
+      expect(keptBookmarked.ingestion_status).toBe('ready');
     });
   });
 
@@ -692,7 +757,7 @@ describe('Database and Repository Layer', () => {
     });
 
     it('deletes a portal and records it in deleted_portals to prevent re-seeding', () => {
-      const created = createPortal({
+      createPortal({
         portal_id: 'portal_to_delete',
         portal_name: 'Ephemeral Portal',
         tenders_url: 'https://ephemeral.gov.pk/tenders',
@@ -822,6 +887,69 @@ describe('Database and Repository Layer', () => {
       // Migration log recorded in app_settings
       const log = db.prepare(`SELECT value FROM app_settings WHERE key = 'migration_audit_fixes_2026_11'`).get() as any;
       expect(log).toBeDefined();
+    });
+  });
+
+  describe('Plans A–D Database Extensions', () => {
+    it('Plan A: persists and deserializes structured bid_brief JSON on tenders', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url)
+        VALUES ('tender-brief-1', 'tender-brief-1', 'epads', 'Federal PPRA (EPADS)', 'Solar Lab Equipment', 'FDE', 'https://epads.gov.pk/t/1')
+      `).run();
+
+      const updated = updateTenderFields('tender-brief-1', {
+        bid_brief: {
+          bidSecurityAmount: 'PKR 150,000 CDR',
+          tenderFee: 'PKR 2,000',
+          requiredRegistrations: ['PEC C5', 'NTN/PRA'],
+          requiredExperience: '3 years school ICT & solar works',
+          deliverablesSummary: ['50kW PV system', 'On-site training'],
+          bidMethod: 'Single Stage – Two Envelope'
+        }
+      });
+
+      expect(updated?.bid_brief?.bidSecurityAmount).toBe('PKR 150,000 CDR');
+      expect(updated?.bid_brief?.requiredRegistrations).toEqual(['PEC C5', 'NTN/PRA']);
+      expect(getTenderById('tender-brief-1')?.bid_brief?.bidMethod).toBe('Single Stage – Two Envelope');
+    });
+
+    it('Plan B: computes 48h closing digest excluding Passed/Won and persists digest settings', () => {
+      const in20Hours = new Date(Date.now() + 20 * 3600000).toISOString();
+      const in72Hours = new Date(Date.now() + 72 * 3600000).toISOString();
+
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url, closing_date, pipeline_status, ingestion_status)
+        VALUES
+          ('t-urg-active', 't-urg-active', 'epads', 'Federal PPRA', 'Urgent Solar Tender', 'FDE', 'https://epads.gov.pk/u1', ?, 'New Opportunity', 'ready'),
+          ('t-urg-passed', 't-urg-passed', 'epads', 'Federal PPRA', 'Passed Urgent Tender', 'FDE', 'https://epads.gov.pk/u2', ?, 'Passed', 'ready'),
+          ('t-later', 't-later', 'epads', 'Federal PPRA', 'Later Solar Tender', 'FDE', 'https://epads.gov.pk/u3', ?, 'Under Review', 'ready')
+      `).run(in20Hours, in20Hours, in72Hours);
+
+      const digest = getAlertsDigest(48);
+      expect(digest.closingSoonCount).toBe(1);
+      expect(digest.closingSoon[0].id).toBe('t-urg-active');
+
+      const saved = updateDigestSettings({ enabled: true, webhookUrl: 'https://hooks.example.test/digest', withinHours: 24 });
+      expect(saved.enabled).toBe(true);
+      expect(saved.webhookUrl).toBe('https://hooks.example.test/digest');
+      expect(saved.withinHours).toBe(24);
+      expect(getDigestSettings().enabled).toBe(true);
+    });
+
+    it('Plan C & D: builds known tender map for pagination early-stop and stores portal_health.last_error_code', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url, closing_date, has_corrigendum)
+        VALUES ('t-known-1', 't-known-1', 'epads', 'Federal PPRA (EPADS)', 'Known Notice', 'FDE', 'https://epads.gov.pk/known/1', '2026-12-10T10:00:00+05:00', 0)
+      `).run();
+
+      const knownMap = getKnownTenderMapForPortal('epads');
+      expect(knownMap.get('https://epads.gov.pk/known/1')).toEqual({
+        closing_date: '2026-12-10T10:00:00+05:00',
+        has_corrigendum: 0
+      });
+
+      updatePortalHealth('epads', { status: 'error', last_error_code: 'TIMEOUT', last_error_message: 'Timed out' });
+      expect(getPortalById('epads')?.last_error_code).toBe('TIMEOUT');
     });
   });
 });

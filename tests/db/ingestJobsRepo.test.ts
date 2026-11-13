@@ -23,8 +23,8 @@ import {
   refreshTenderDocFetchStatus,
   documentJobPriority,
   JOB_PRIORITY
-} from '../../src/server/db.js';
-import { findCanonicalMatch } from '../../src/server/deduplicator.js';
+} from '../../src/server/db/index.js';
+import { findCanonicalMatch } from '../../src/server/services/deduplicator.js';
 
 const minutesFromNow = (iso: string) => (new Date(iso.replace(' ', 'T') + 'Z').getTime() - Date.now()) / 60000;
 

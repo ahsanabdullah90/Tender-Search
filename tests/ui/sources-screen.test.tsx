@@ -1,9 +1,8 @@
-import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { SourcesScreen } from '../../src/components/SourcesScreen.js';
-import type { PortalHealth, DomainTrack } from '../../src/types.js';
+import { SourcesScreen } from '../../src/client/components/SourcesScreen.js';
+import type { PortalHealth, DomainTrack } from '../../src/shared/types.js';
 
 describe('SourcesScreen component', () => {
   const samplePortals: PortalHealth[] = [
@@ -650,6 +649,97 @@ describe('SourcesScreen component', () => {
     await waitFor(() => {
       expect(handleDeletePortal).toHaveBeenCalledTimes(1);
       expect(handleDeletePortal).toHaveBeenCalledWith('punjab_eproc');
+    });
+  });
+
+  it('Plan D: displays structured last_error_code chip on errored portals', async () => {
+    const user = userEvent.setup();
+    const portalsWithErrorCode = [
+      {
+        ...samplePortals[0],
+        status: 'error' as const,
+        last_error_code: 'TIMEOUT' as const,
+        last_error_message: 'Timed out after 15s'
+      }
+    ];
+
+    render(
+      <SourcesScreen
+        portals={portalsWithErrorCode}
+        tracks={sampleTracks}
+        onSaveTrack={vi.fn()}
+        onDeleteTrack={vi.fn()}
+        onClearInbox={vi.fn()}
+        onEraseAll={vi.fn()}
+        onUpdatePortal={vi.fn()}
+        onLaunchHitl={vi.fn()}
+        onVerifyHitl={vi.fn()}
+        onScanSinglePortal={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('tab', { name: /Portals/ }));
+    expect(screen.getByText('TIMEOUT')).toBeInTheDocument();
+    expect(screen.getByText('Timed out after 15s')).toBeInTheDocument();
+  });
+
+  it('Plan B: renders and saves Daily Digest & Closing Alerts settings in Data tab', async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce({ ok: true, json: async () => [] } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          total_bytes: 1024,
+          passed_bytes: 0,
+          passed_tenders: 0,
+          tenders_with_documents: 1,
+          digest: {
+            settings: { enabled: true, webhookUrl: 'https://hooks.example/test', withinHours: 48, lastSentDatePkt: null },
+            summary: { closingSoonCount: 4, unacknowledgedCorrigendaCount: 2, newMatchesLast24hCount: 5 }
+          }
+        })
+      } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, settings: { enabled: true, webhookUrl: 'https://hooks.example/updated', withinHours: 72, lastSentDatePkt: null } })
+      } as any)
+      .mockResolvedValue({ ok: true, json: async () => [] } as any);
+
+    render(
+      <SourcesScreen
+        portals={samplePortals}
+        tracks={sampleTracks}
+        onSaveTrack={vi.fn()}
+        onDeleteTrack={vi.fn()}
+        onClearInbox={vi.fn()}
+        onEraseAll={vi.fn()}
+        onUpdatePortal={vi.fn()}
+        onLaunchHitl={vi.fn()}
+        onVerifyHitl={vi.fn()}
+        onScanSinglePortal={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('tab', { name: /Data/ }));
+
+    expect(await screen.findByText(/4 closing within 48h/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 unread corrigenda/i)).toBeInTheDocument();
+
+    const webhookInput = screen.getByPlaceholderText('https://hooks.slack.com/services/...');
+    await user.clear(webhookInput);
+    await user.type(webhookInput, 'https://hooks.example/updated');
+
+    await user.click(screen.getByRole('button', { name: 'Save digest settings' }));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/system/digest/settings',
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('https://hooks.example/updated')
+        })
+      );
     });
   });
 });

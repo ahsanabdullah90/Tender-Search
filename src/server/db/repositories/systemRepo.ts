@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { db, BACKUPS_DIR, DOSSIERS_DIR } from '../connection.js';
 import { deleteTenders, NOT_STAGING_SQL } from './tendersRepo.js';
+import { DigestAlertItem, DigestSummary } from '../../../shared/types.js';
 
 export function getAppSetting(key: string): string | null {
   try {
@@ -76,6 +77,97 @@ export function getKpiStats() {
     onlinePortals,
     hitlRequiredCount
   };
+}
+
+/**
+ * Proactive closing alerts & daily digest summary (Plan B).
+ * Queries active non-Passed/non-Won tenders closing within `withinHours` (default 48h),
+ * unacknowledged corrigenda, and new matches discovered in the last 24h.
+ */
+export function getAlertsDigest(withinHours: number = 48): DigestSummary {
+  const safeHours = Math.max(1, Math.min(336, Math.floor(withinHours) || 48));
+  const nowMs = Date.now();
+
+  const closingRows = db.prepare(`
+    SELECT id, reference_no, title, organization, portal_id, portal_name,
+           pipeline_status, closing_date, closing_date_formatted, direct_url, is_bookmarked
+    FROM tenders
+    WHERE ${NOT_STAGING_SQL}
+      AND closing_date IS NOT NULL
+      AND julianday(closing_date) > julianday('now')
+      AND julianday(closing_date) <= julianday('now', ?)
+      AND pipeline_status NOT IN ('Won', 'Passed')
+    ORDER BY julianday(closing_date) ASC
+    LIMIT 50
+  `).all(`+${safeHours} hours`) as any[];
+
+  const closingSoon: DigestAlertItem[] = closingRows.map(r => {
+    const closeMs = new Date(r.closing_date).getTime();
+    const hoursRemaining = Math.max(0, Math.round(((closeMs - nowMs) / 3600000) * 10) / 10);
+    return {
+      id: r.id,
+      reference_no: r.reference_no ?? null,
+      title: r.title,
+      organization: r.organization,
+      portal_id: r.portal_id,
+      portal_name: r.portal_name,
+      pipeline_status: r.pipeline_status,
+      closing_date: r.closing_date,
+      closing_date_formatted: r.closing_date_formatted || 'Not Available',
+      hours_remaining: hoursRemaining,
+      direct_url: r.direct_url,
+      is_bookmarked: Number(r.is_bookmarked || 0)
+    };
+  });
+
+  const unackCorrigendaCount = (db.prepare(`
+    SELECT COUNT(*) as c FROM corrigendum_logs WHERE is_acknowledged = 0
+  `).get() as any).c || 0;
+
+  const newMatchesLast24hCount = (db.prepare(`
+    SELECT COUNT(*) as c FROM tenders
+    WHERE ${NOT_STAGING_SQL}
+      AND julianday(created_at) >= julianday('now', '-24 hours')
+  `).get() as any).c || 0;
+
+  return {
+    generatedAt: new Date(nowMs).toISOString(),
+    withinHours: safeHours,
+    closingSoonCount: closingSoon.length,
+    closingSoon,
+    unacknowledgedCorrigendaCount: unackCorrigendaCount,
+    newMatchesLast24hCount
+  };
+}
+
+export interface DigestSettings {
+  enabled: boolean;
+  webhookUrl: string;
+  withinHours: number;
+  lastSentDatePkt: string | null;
+}
+
+export function getDigestSettings(): DigestSettings {
+  const enabled = getAppSetting('digest_enabled') === 'true';
+  const webhookUrl = getAppSetting('digest_webhook_url') || '';
+  const hoursRaw = Number(getAppSetting('digest_within_hours') || '48');
+  const withinHours = Number.isFinite(hoursRaw) && hoursRaw >= 1 && hoursRaw <= 336 ? Math.floor(hoursRaw) : 48;
+  const lastSentDatePkt = getAppSetting('last_digest_sent_at');
+  return { enabled, webhookUrl, withinHours, lastSentDatePkt };
+}
+
+export function updateDigestSettings(input: Partial<{ enabled: boolean; webhookUrl: string; withinHours: number }>): DigestSettings {
+  if (input.enabled !== undefined) {
+    setAppSetting('digest_enabled', input.enabled ? 'true' : 'false');
+  }
+  if (input.webhookUrl !== undefined) {
+    setAppSetting('digest_webhook_url', input.webhookUrl.trim() || null);
+  }
+  if (input.withinHours !== undefined) {
+    const clamped = Math.max(1, Math.min(336, Math.floor(Number(input.withinHours) || 48)));
+    setAppSetting('digest_within_hours', String(clamped));
+  }
+  return getDigestSettings();
 }
 
 export async function backupDatabase(): Promise<{ success: boolean; path?: string; skipped?: boolean }> {

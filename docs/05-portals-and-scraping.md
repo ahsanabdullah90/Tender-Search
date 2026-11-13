@@ -4,12 +4,12 @@
 
 Tender Tracker catalogs 18 official and aggregator procurement portals across Pakistan, categorized into 5 operational sectors.
 
-These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The current database tracks 13 active portals (with 5 operator-removed portals: `epads`, `giz`, `pid`, `tender_services`, and `ungm` recorded in `deleted_portals`).
+These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The live database tracks 14 active portals (with `epads` re-enabled against open EPADS v2.0 `https://epads.gov.pk/`, and 4 operator-removed portals: `giz`, `pid`, `tender_services`, and `ungm` in `deleted_portals`).
 
 | ID | Portal Name | Category | Tier | Access Mode | Default Tenders URL | Scraping Strategy & Operational Status |
 |---|---|---|---|---|---|---|
-| `epads` | Federal PPRA (EPMS / EPADS) | Regulatory | `playwright` | `login_required` | `https://epms.ppra.gov.pk/` | Statutory federal electronic procurement portal. Main notice board is public; bidding document downloads require operator login credentials. |
-| `punjab_eproc` | Punjab PPRA | Regulatory | `http` | `public` | `http://eproc.punjab.gov.pk/ActiveTenders.aspx` | Highest volume provincial source (865+ active tenders). Scraped via Cheerio with toleration for ASP.NET postback tables. |
+| `epads` | Federal PPRA (EPADS) | Regulatory | `http` | `public` | `https://epads.gov.pk/` | Statutory federal electronic procurement portal (`epads.gov.pk`, 100 opportunities/page across paginated `?page=` pages). Open notice listings require no login. |
+| `punjab_eproc` | Punjab PPRA | Regulatory | `http` | `public` | `https://eproc.punjab.gov.pk/ActiveTenders.aspx` | Highest volume provincial source (750+ active tenders). Scraped via Cheerio RadGrid extractor (`table.rgMasterTable`) with ASP.NET `__doPostBack` pagination and legacy TLS cipher fallback. |
 | `sppra` | Sindh SPPRA | Regulatory | `playwright` | `public` | `https://portalsindh.eprocure.gov.pk` | Dynamic portal indexing 12,000+ listings. Headless Playwright context renders DOM before extraction. |
 | `kppra` | Khyber Pakhtunkhwa KPPRA | Regulatory | `playwright` | `offline_broken` | `https://kp.eprocure.gov.pk` | KP EPADS portal protected by basic-auth challenge; health probe tracks connectivity without interrupting crawls. |
 | `bppra` | Balochistan BPPRA | Regulatory | `http` | `public` | `https://bpptwo.vdc.services:5451/Tenders` | Balochistan ePPS portal (80+ active tenders). Resolved from `bppra.gob.pk` redirect; parsed via multi-row (`tr.tender-row-main` + sibling `tr.tender-row-dates`) extractor. |
@@ -96,8 +96,8 @@ When a configured `tenders_url` fails with a dead-link HTTP error (`404`, `410`,
 ## Portal Contract Test Suite (`tests/scraper/portal-contracts.test.ts`)
 
 Every portal in `PORTAL_DEFINITIONS` is accounted for in `tests/scraper/portal-contracts.test.ts`:
-- **Captured Live Fixtures (`<= 50 KB` each)**: `bppra`, `ndma`, `fde` (plus `fde_detail` exercising WordPress Download Manager `?wpdmdl=` attachment discovery), `mofept`, `pseb`, `ignite`, `psdf`, and `peef`.
-- **Synthetic Fixtures**: `punjab_eproc`, `sppra`, `epads`, `tender_services`, `cloudflare_challenge`, and `login_required`.
+- **Captured Live Fixtures (`<= 50 KB` each)**: `epads`, `bppra`, `ndma`, `fde` (plus `fde_detail` exercising WordPress Download Manager `?wpdmdl=` attachment discovery), `mofept`, `pseb`, `ignite`, `psdf`, and `peef`.
+- **Synthetic Fixtures**: `punjab_eproc`, `sppra`, `tender_services`, `cloudflare_challenge`, and `login_required`.
 - **Documented HTTP Zero-Yield / Non-Listing Portals**:
   - `psda`: Live page renders `<p><span><b>No Opening</b></span></p>` (recognized by `hasEmptyTenderTableState`).
   - `giz`: Overview page linking to external procurement portals (`ausschreibungen.giz.de`, `service.bund.de`, `ted.europa.eu`).

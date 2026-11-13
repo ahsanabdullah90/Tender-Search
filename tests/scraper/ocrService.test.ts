@@ -7,7 +7,7 @@ import {
   parseAndRepairTenderJson,
   CANDIDATE_MODELS,
   getAiClient
-} from '../../src/server/ocrService.js';
+} from '../../src/server/services/ocrService.js';
 
 const { mockGenerateContent, expectedOcr } = vi.hoisted(() => {
   const expected = {
@@ -261,6 +261,46 @@ describe('ocrService', () => {
       });
 
       expect(urls).toEqual(['https://bpptwo.vdc.services:5451/Tenders']);
+    });
+  });
+
+  describe('Plan A: Structured BidBrief extraction', () => {
+    it('parses and normalizes optional bidBrief while omitting empty bidBriefs', () => {
+      const withBrief = parseAndRepairTenderJson(JSON.stringify({
+        ...expectedOcr,
+        bidBrief: {
+          bidSecurityAmount: '2% CDR of estimated cost',
+          tenderFee: 'PKR 5,000',
+          requiredRegistrations: ['PEC C5', 'NTN/GST', ''],
+          requiredExperience: '3 years school solarization projects',
+          deliverablesSummary: ['10kW hybrid solar plant', '2-year O&M'],
+          bidMethod: 'Single Stage - Two Envelope'
+        }
+      }));
+
+      expect(withBrief?.bidBrief).toEqual({
+        bidSecurityAmount: '2% CDR of estimated cost',
+        tenderFee: 'PKR 5,000',
+        requiredRegistrations: ['PEC C5', 'NTN/GST'],
+        requiredExperience: '3 years school solarization projects',
+        deliverablesSummary: ['10kW hybrid solar plant', '2-year O&M'],
+        bidMethod: 'Single Stage - Two Envelope'
+      });
+
+      const withEmptyBrief = parseAndRepairTenderJson(JSON.stringify({
+        ...expectedOcr,
+        bidBrief: {
+          bidSecurityAmount: null,
+          tenderFee: '',
+          requiredRegistrations: [],
+          requiredExperience: null,
+          deliverablesSummary: [],
+          bidMethod: null
+        }
+      }));
+
+      expect(withEmptyBrief).toEqual(expectedOcr);
+      expect('bidBrief' in (withEmptyBrief || {})).toBe(false);
     });
   });
 });

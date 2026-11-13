@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isValidReferenceNo, normalizeReferenceNo } from '../../src/server/referenceNo.js';
+import { isValidReferenceNo, normalizeReferenceNo } from '../../src/server/services/referenceNo.js';
 
 describe('referenceNo (Procurement Reference Normalization & Validation)', () => {
   describe('isValidReferenceNo', () => {

@@ -1,13 +1,41 @@
 import http from 'http';
 import https from 'https';
-import { HUMAN_CHROME_HEADERS, sslTolerantAgent, legacySslTolerantAgent } from './baseScraper.js';
+import { HUMAN_CHROME_HEADERS, sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError } from './baseScraper.js';
 
-export function fetchHtmlWithMetadata(
+export interface HtmlFetchResult {
+  html: string;
+  finalUrl: string;
+  cookies?: string;
+}
+
+function mergeCookies(existing?: string, setCookieHeaders?: string[]): string | undefined {
+  const map = new Map<string, string>();
+  for (const part of (existing || '').split(';')) {
+    const trimmed = part.trim();
+    const eq = trimmed.indexOf('=');
+    if (eq > 0) map.set(trimmed.slice(0, eq).trim(), trimmed.slice(eq + 1).trim());
+  }
+  for (const raw of setCookieHeaders || []) {
+    const pair = raw.split(';')[0]?.trim() || '';
+    const eq = pair.indexOf('=');
+    if (eq > 0) map.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+  }
+  if (map.size === 0) return undefined;
+  return Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+function requestHtmlWithMetadata(
   url: string,
-  redirectCount: number = 0,
-  cookieStr?: string,
-  useLegacyTls: boolean = false
-): Promise<{ html: string; finalUrl: string }> {
+  options: {
+    method: 'GET' | 'POST';
+    formBody?: string;
+    cookieStr?: string;
+    redirectCount: number;
+    useLegacyTls: boolean;
+    allowHttpDowngrade: boolean;
+  }
+): Promise<HtmlFetchResult> {
+  const { method, formBody, cookieStr, redirectCount, useLegacyTls, allowHttpDowngrade } = options;
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
       return reject(new Error('Too many redirects while loading portal page'));
@@ -27,16 +55,32 @@ export function fetchHtmlWithMetadata(
     if (cookieStr) {
       reqHeaders['Cookie'] = cookieStr;
     }
+    if (method === 'POST' && formBody !== undefined) {
+      reqHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
+      reqHeaders['Content-Length'] = String(Buffer.byteLength(formBody));
+    }
 
-    const req = client.get(url, {
+    const reqOpts: https.RequestOptions = {
       agent: isHttps ? (useLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
       headers: reqHeaders,
       timeout: 25000
-    }, res => {
+    };
+
+    const handleResponse = (res: http.IncomingMessage) => {
+      const nextCookies = mergeCookies(cookieStr, res.headers?.['set-cookie']);
+
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         const nextUrl = new URL(res.headers.location, url).toString();
-        return fetchHtmlWithMetadata(nextUrl, redirectCount + 1, cookieStr, useLegacyTls).then(resolve).catch(reject);
+        // Never downgrade back to http:// if an http:// origin explicitly redirected us to https://
+        const nextAllowDowngrade = allowHttpDowngrade && !(!isHttps && nextUrl.startsWith('https:'));
+        return requestHtmlWithMetadata(nextUrl, {
+          method: 'GET',
+          cookieStr: nextCookies,
+          redirectCount: redirectCount + 1,
+          useLegacyTls,
+          allowHttpDowngrade: nextAllowDowngrade
+        }).then(resolve).catch(reject);
       }
 
       if (res.statusCode && res.statusCode >= 400) {
@@ -49,7 +93,7 @@ export function fetchHtmlWithMetadata(
             (errBody.includes('cloudflare') || errBody.includes('Just a moment') || errBody.includes('challenge'))
           ) {
             // Return challenge HTML so parsePortalHtml flags hitlRequired (Bug B4)
-            return resolve({ html: errBody, finalUrl: url });
+            return resolve({ html: errBody, finalUrl: url, cookies: nextCookies });
           }
           const httpErr: any = new Error(`HTTP ${res.statusCode} from portal server`);
           httpErr.statusCode = res.statusCode;
@@ -87,25 +131,32 @@ export function fetchHtmlWithMetadata(
         } catch {
           html = fullBuf.toString('utf8');
         }
-        resolve({ html, finalUrl: url });
+        resolve({ html, finalUrl: url, cookies: nextCookies });
       });
-    });
+    };
+
+    const req = method === 'POST'
+      ? client.request(url, { ...reqOpts, method: 'POST' }, handleResponse)
+      : client.get(url, reqOpts, handleResponse);
 
     req.on('error', (err: any) => {
       const msg = String(err?.message || '');
-      const code = String(err?.code || '');
-      // Automatic fallback 1: If server speaks plain HTTP on an HTTPS URL ("wrong version number"), retry over http://
-      if (isHttps && /wrong version number/i.test(msg)) {
-        const httpUrl = url.replace(/^https:/i, 'http:');
-        return fetchHtmlWithMetadata(httpUrl, redirectCount + 1, cookieStr, false).then(resolve).catch(() => reject(err));
+      // 1. Retry HTTPS TLS / cipher-record failures (including wrong version number) with legacySslTolerantAgent first
+      if (isHttps && !useLegacyTls && isTlsFallbackError(err)) {
+        return requestHtmlWithMetadata(url, {
+          ...options,
+          useLegacyTls: true
+        }).then(resolve).catch(() => reject(err));
       }
-      // Automatic fallback 2: If modern TLS handshake fails on legacy .gov.pk server, retry once with legacySslTolerantAgent (SECLEVEL=0, TLSv1)
-      if (
-        isHttps &&
-        !useLegacyTls &&
-        (/EPROTO|ERR_SSL|TLSV1|UNSUPPORTED_PROTOCOL|ECONNRESET|socket hang up/i.test(`${code} ${msg}`))
-      ) {
-        return fetchHtmlWithMetadata(url, redirectCount, cookieStr, true).then(resolve).catch(() => reject(err));
+      // 2. Only fall back to plain HTTP if legacy TLS already failed with wrong version number and we weren't redirected from HTTP
+      if (isHttps && useLegacyTls && allowHttpDowngrade && /wrong version number/i.test(msg)) {
+        const httpUrl = url.replace(/^https:/i, 'http:');
+        return requestHtmlWithMetadata(httpUrl, {
+          ...options,
+          redirectCount: redirectCount + 1,
+          useLegacyTls: false,
+          allowHttpDowngrade: false
+        }).then(resolve).catch(() => reject(err));
       }
       reject(err);
     });
@@ -113,6 +164,42 @@ export function fetchHtmlWithMetadata(
       req.destroy();
       reject(new Error('Connection timed out'));
     });
+
+    if (method === 'POST' && formBody !== undefined) {
+      req.write(formBody);
+      req.end();
+    }
+  });
+}
+
+export function fetchHtmlWithMetadata(
+  url: string,
+  redirectCount: number = 0,
+  cookieStr?: string,
+  useLegacyTls: boolean = false,
+  allowHttpDowngrade: boolean = true
+): Promise<HtmlFetchResult> {
+  return requestHtmlWithMetadata(url, {
+    method: 'GET',
+    cookieStr,
+    redirectCount,
+    useLegacyTls,
+    allowHttpDowngrade
+  });
+}
+
+export function postFormWithMetadata(
+  url: string,
+  formBody: string,
+  cookieStr?: string
+): Promise<HtmlFetchResult> {
+  return requestHtmlWithMetadata(url, {
+    method: 'POST',
+    formBody,
+    cookieStr,
+    redirectCount: 0,
+    useLegacyTls: false,
+    allowHttpDowngrade: false
   });
 }
 

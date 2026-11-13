@@ -47,7 +47,7 @@ Bidding dossiers (PDFs, Word documents, scanned notices) are cached in `data/dos
 
 ### Storage Pruning, Automated Retention & Dossier Reconciliation
 Over months of operation, passed and expired tenders can accumulate cached files.
-- **Automated Retention Cycle (`src/server/retention.ts`)**: Runs every 5 minutes in the background (when enabled in **Sources & Keywords > Data**):
+- **Automated Retention Cycle (`src/server/services/retention.ts`)**: Runs every 5 minutes in the background (when enabled in **Sources & Keywords > Data**):
   1. **Passed Tender Slimming**: Purges cached dossier files from disk 2 minutes after a tender is marked `Passed`, while retaining the SQLite record for 10 days post-closing so Undo and historical notes keep working.
   2. **Expired Unreviewed Cleanup**: Auto-expires unreviewed, unbookmarked, unflagged `New Opportunity` rows after the configurable grace period (default 2 days past closing) and records them in `deleted_tenders`.
   3. **Aged-Out Undated Cleanup**: Retires undated, unreviewed notices 90 days after `COALESCE(publish_date, created_at)`.

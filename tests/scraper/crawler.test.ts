@@ -9,9 +9,8 @@ import {
   updatePortalHealth,
   getAllTenders,
   getTenderById,
-  saveDomainTrack,
   DOSSIERS_DIR
-} from '../../src/server/db.js';
+} from '../../src/server/db/index.js';
 import {
   parsePortalHtml,
   extractDatesFromText,
@@ -27,7 +26,6 @@ import {
   analyzeTenderById,
   fetchDocumentsForTender,
   scoreCandidateTenderLinks,
-  healPortalConnection,
   sanitizeBaseOrigin,
   shouldTriggerAutoHeal,
   isAllowedPortalDomain,
@@ -37,13 +35,16 @@ import {
   collectRowAttachments,
   isNavigationRow,
   sanitizeScrapedItems,
+  buildAspNetPostBackBody,
   scrapePortal,
   crawlerDeps,
-  currentScanStatus
+  currentScanStatus,
+  classifyScraperError,
+  runWithConcurrency
 } from '../../src/server/scrapers/crawlerEngine.js';
 import * as cheerio from 'cheerio';
 import http from 'http';
-import * as ocrSvc from '../../src/server/ocrService.js';
+import * as ocrSvc from '../../src/server/services/ocrService.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import type { RawScrapedItem } from '../../src/server/scrapers/crawlerEngine.js';
 
@@ -53,6 +54,7 @@ const FIXTURES_DIR = path.resolve(__dirname, '..', 'fixtures', 'portals');
 
 describe('Crawler Engine & Scraper Pipeline', () => {
   const originalFetch = crawlerDeps.fetchHtml;
+  const originalPostForm = crawlerDeps.postForm;
   const originalSleep = crawlerDeps.sleep;
   const originalDownload = crawlerDeps.downloadAndCacheDossier;
   const originalFetchBuffer = crawlerDeps.fetchFileBuffer;
@@ -70,6 +72,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
   afterEach(() => {
     crawlerDeps.fetchHtml = originalFetch;
+    crawlerDeps.postForm = originalPostForm;
     crawlerDeps.sleep = originalSleep;
     crawlerDeps.downloadAndCacheDossier = originalDownload;
     crawlerDeps.fetchFileBuffer = originalFetchBuffer;
@@ -154,12 +157,49 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
       const result = parsePortalHtml(html, portal);
       expect(result.hitlRequired).toBe(false);
-      expect(result.items.length).toBe(1);
+      expect(result.items.length).toBe(5);
 
       const item = result.items[0];
-      expect(item.referenceNo).toBe('TS-554219');
-      expect(item.title).toContain('Office Stationery');
-      expect(item.closingDate).toContain('2026-05-28');
+      expect(item.referenceNo).toMatch(/^P\d+$/);
+      expect(item.title.length).toBeGreaterThan(10);
+      expect(item.organization.length).toBeGreaterThan(3);
+      expect(item.directUrl).toMatch(/^https:\/\/epads\.gov\.pk\/opportunities\//);
+      expect(item.closingDate).toBeTruthy();
+      expect(item.publishDate).toBeTruthy();
+    });
+
+    it('parses Federal EPADS countdown deadlines ("Xh Ym Left") and corrigendum indicators', () => {
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epads')!;
+      const syntheticHtml = `
+        <table><tbody>
+          <tr>
+            <td>1</td>
+            <td>
+              <a href="/opportunities/federal/procurements/199999">
+                <span data-bs-toggle="tooltip" title="Supply and Installation of Solar PV System for Government Schools">Supply and Installation of Solar PV...</span>
+              </a>
+              <br>
+              <span data-bs-toggle="tooltip" title="Federal Directorate of Education">Federal Directorate of Education</span>
+              <div><span class="badge">P199999</span><span class="badge">Under Corrigendum</span></div>
+            </td>
+            <td>
+              <div>
+                <div><span class="text-secondary">Published On:</span><span class="badge">Friday, November 6, 2026 09:00 AM</span></div>
+                <div><span class="text-secondary">Closing On:</span><span class="badge">2h 45m Left</span></div>
+              </div>
+            </td>
+            <td>Goods Single Stage-One Envelope</td>
+            <td></td>
+          </tr>
+        </tbody></table>`;
+      const result = parsePortalHtml(syntheticHtml, portal);
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].title).toBe('Supply and Installation of Solar PV System for Government Schools');
+      expect(result.items[0].organization).toBe('Federal Directorate of Education');
+      expect(result.items[0].referenceNo).toBe('P199999');
+      expect(result.items[0].isCorrigendum).toBe(true);
+      expect(result.items[0].publishDate).toBe('2026-11-06T04:00:00.000Z');
+      expect(result.items[0].closingDate).toBeTruthy();
     });
 
     it('detects Cloudflare Turnstile challenge and flags hitlRequired (Bug B4)', () => {
@@ -531,7 +571,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       });
 
       let serverPort = 0;
-      const srv = http.createServer((req, res) => {});
+      const srv = http.createServer((_req, _res) => {});
       await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => {
         serverPort = (srv.address() as any).port;
         resolve();
@@ -551,7 +591,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
     it('downloads image attachment in background and performs OCR extraction', async () => {
       let serverPort = 0;
-      const srv = http.createServer((req, res) => {
+      const srv = http.createServer((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'image/jpeg' });
         res.end(Buffer.from('fake image content'));
       });
@@ -604,7 +644,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
     it('handles OCR extraction errors gracefully in background', async () => {
       let serverPort = 0;
-      const srv = http.createServer((req, res) => {
+      const srv = http.createServer((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'image/jpeg' });
         res.end(Buffer.from('fake image content'));
       });
@@ -1168,7 +1208,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         is_active: 1
       }];
 
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, label) => {
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, _label) => {
         const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
         fs.mkdirSync(tenderDir, { recursive: true });
         fs.writeFileSync(path.resolve(tenderDir, 'Cloud-Procurement.pdf'), 'fake-pdf-content');
@@ -1226,7 +1266,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         is_active: 1
       }];
 
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, label) => {
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, _label) => {
         const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
         fs.mkdirSync(tenderDir, { recursive: true });
         fs.writeFileSync(path.resolve(tenderDir, 'RFP-for-Purchase-of-Stationery.pdf'), 'fake-pdf-content');
@@ -1438,7 +1478,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
     // Finding 2
     it('keeps undated and still-recent suppression records through retention cleanup', async () => {
-      const { cleanExpiredDeletedTenderRecords } = await import('../../src/server/db.js');
+      const { cleanExpiredDeletedTenderRecords } = await import('../../src/server/db/index.js');
       const iso = (offsetDays: number) => new Date(Date.now() + offsetDays * DAY).toISOString();
       const ins = db.prepare(`INSERT INTO deleted_tenders (id, canonical_id, closing_date, deleted_at) VALUES (?, ?, ?, datetime('now', ?))`);
       ins.run('undated-old', 'undated-old', null, '-30 days');          // previously purged after 7 days
@@ -1452,7 +1492,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     });
 
     it('does not resurrect a user-deleted undated tender after the retention cycle runs', async () => {
-      const { deleteTenders: repoDelete, cleanExpiredDeletedTenderRecords } = await import('../../src/server/db.js');
+      const { deleteTenders: repoDelete, cleanExpiredDeletedTenderRecords } = await import('../../src/server/db/index.js');
       const item: RawScrapedItem = {
         title: 'Cloud Servers Procurement Notice',
         organization: 'PSEB',
@@ -1474,7 +1514,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
     // Finding 3
     it('suppresses tenders deleted from a later pipeline stage so they are not re-imported', async () => {
-      const { deleteTenders: repoDelete } = await import('../../src/server/db.js');
+      const { deleteTenders: repoDelete } = await import('../../src/server/db/index.js');
       const item: RawScrapedItem = {
         title: 'Cloud Servers Under Review',
         organization: 'PSEB',
@@ -1533,7 +1573,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(queued.doc_fetch_status).toBe('pending');
 
       // The background worker reads it; the older, past date must not delete the tender
-      const { processDocumentQueue } = await import('../../src/server/ingestWorker.js');
+      const { processDocumentQueue } = await import('../../src/server/services/ingestWorker.js');
       const report = await processDocumentQueue(5);
       expect(report.claimed).toBe(1);
       expect(ocrSpy).toHaveBeenCalled();
@@ -1775,6 +1815,209 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(fetchedUrls[1]).toContain('page=2');
       expect(fetchedUrls[2]).toContain('page=3');
       expect(res.pagesScanned).toBe(2);
+    });
+
+    it('parses Punjab eProc Telerik RadGrid rows inside <form id="aspnetForm"> and follows postback pagination', async () => {
+      const punjabDef = getActivePortalsList('punjab_eproc')[0];
+      expect(punjabDef.pagination?.kind).toBe('postback');
+
+      const makeRadGridPage = (pageNum: number, rowsHtml: string) => `
+        <html><body>
+          <form id="aspnetForm" action="./ActiveTenders.aspx">
+            <input type="hidden" name="__EVENTTARGET" value="" />
+            <input type="hidden" name="__EVENTARGUMENT" value="" />
+            <input type="hidden" name="__VIEWSTATE" value="VS_PAGE_${pageNum}" />
+            <table id="ctl00_ContentPlaceHolderSRIS_rdgrdManageTender_ctl00" class="rgMasterTable">
+              <thead>
+                <tr><th>Procurement Title</th><th>Procurement Name</th><th>Type</th><th>Publish Date</th><th>Close Date</th><th>Department</th><th>Status</th><th>Tender Notice</th><th>Bidding Document</th></tr>
+              </thead>
+              <tbody>
+                <tr class="rgPager">
+                  <td colspan="9">
+                    <div class="rgNumPart">
+                      <a href="javascript:__doPostBack('ctl00$ContentPlaceHolderSRIS$rdgrdManageTender$ctl00$ctl03$ctl01$ctl05','')">1</a>
+                      <a href="javascript:__doPostBack('ctl00$ContentPlaceHolderSRIS$rdgrdManageTender$ctl00$ctl03$ctl01$ctl07','')">2</a>
+                    </div>
+                  </td>
+                </tr>
+                ${rowsHtml}
+              </tbody>
+            </table>
+          </form>
+        </body></html>
+      `;
+
+      const page1Html = makeRadGridPage(1, `
+        <tr class="rgRow">
+          <td>Corrigendum</td>
+          <td>CIVIL, MEP AND HVAC WORKS FOR MODULAR OT (PRO-231-2026) (<a href="ActiveTendersDetail.aspx?id=258296">View Tender Detail</a>)</td>
+          <td>Work</td>
+          <td>12 Nov 2026</td>
+          <td>20 Nov 2026</td>
+          <td>Pakistan Kidney Liver Institute</td>
+          <td>&nbsp;</td>
+          <td><a href="Tenders/5048/12112026_notice.pdf"><img src="images/icon_view.gif"></a></td>
+          <td><a href="BiddingDocuments/5048/12112026_bidding.pdf"><img src="images/icon_view.gif"></a></td>
+        </tr>
+        <tr class="rgAltRow">
+          <td>Tender Notice</td>
+          <td>Supply of Lab Furniture Items (Tender No. 886.16.2026)</td>
+          <td>Goods</td>
+          <td>12 Nov 2026</td>
+          <td>04 Dec 2026</td>
+          <td>Government College University Faisalabad</td>
+          <td>&nbsp;</td>
+          <td><a href="Tenders/5048/12112026_gcuf.pdf"><img src="images/icon_view.gif"></a></td>
+          <td><a href="BiddingDocuments/5048/12112026_gcuf_bd.pdf"><img src="images/icon_view.gif"></a></td>
+        </tr>
+      `);
+
+      const page2Html = makeRadGridPage(2, `
+        <tr class="rgRow">
+          <td>Tender Notice</td>
+          <td>Rehabilitation of School Buildings Under PEIMA</td>
+          <td>Work</td>
+          <td>11 Nov 2026</td>
+          <td>01 Dec 2026</td>
+          <td>Punjab Education Initiatives Management Authority</td>
+          <td>&nbsp;</td>
+          <td><a href="Tenders/5048/11112026_peima.pdf"><img src="images/icon_view.gif"></a></td>
+          <td><a href="BiddingDocuments/5048/11112026_peima_bd.pdf"><img src="images/icon_view.gif"></a></td>
+        </tr>
+      `);
+
+      // Direct parser check on Page 1
+      const parsed1 = parsePortalHtml(page1Html, punjabDef);
+      expect(parsed1.items).toHaveLength(2);
+      expect(parsed1.items[0].title).toBe('CIVIL, MEP AND HVAC WORKS FOR MODULAR OT (PRO-231-2026)');
+      expect(parsed1.items[0].isCorrigendum).toBe(true);
+      expect(parsed1.items[0].referenceNo).toBe('PRO-231-2026');
+      expect(parsed1.items[0].organization).toBe('Pakistan Kidney Liver Institute');
+      expect(parsed1.items[0].directUrl).toBe('https://eproc.punjab.gov.pk/ActiveTendersDetail.aspx?id=258296');
+      expect(parsed1.items[0].publishDate).toContain('2026-11-12');
+      expect(parsed1.items[0].closingDate).toContain('2026-11-20');
+      expect(parsed1.items[0].attachmentUrls).toEqual([
+        'https://eproc.punjab.gov.pk/Tenders/5048/12112026_notice.pdf',
+        'https://eproc.punjab.gov.pk/BiddingDocuments/5048/12112026_bidding.pdf'
+      ]);
+
+      // Row without View Tender Detail falls back directUrl to its Tender Notice PDF
+      expect(parsed1.items[1].isCorrigendum).toBe(false);
+      expect(parsed1.items[1].directUrl).toBe('https://eproc.punjab.gov.pk/Tenders/5048/12112026_gcuf.pdf');
+      expect(parsed1.items[1].organization).toBe('Government College University Faisalabad');
+
+      // Postback payload extraction check
+      const postBody = buildAspNetPostBackBody(page1Html, 2);
+      expect(postBody).toContain('__EVENTTARGET=ctl00%24ContentPlaceHolderSRIS%24rdgrdManageTender%24ctl00%24ctl03%24ctl01%24ctl07');
+      expect(postBody).toContain('__VIEWSTATE=VS_PAGE_1');
+
+      // Full scrapePortal postback pagination check
+      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(page1Html);
+      crawlerDeps.postForm = vi.fn().mockResolvedValue({ html: page2Html, finalUrl: punjabDef.tendersUrl, cookies: 'ASP.NET_SessionId=abc' });
+
+      const scraped = await scrapePortal(punjabDef);
+      expect(scraped.items).toHaveLength(3);
+      expect(scraped.pagesScanned).toBe(2);
+      expect(crawlerDeps.postForm).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Plans C & D: Two-Speed Pagination, Early-Stop, Bounded Concurrency & Error Taxonomy', () => {
+    it('Plan C: respects quickMaxPages vs deepMaxPages and stops early on page >= 2 when all items match known DB tenders', async () => {
+      const def = {
+        ...PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!,
+        pagination: {
+          kind: 'query' as const,
+          param: 'page',
+          maxPages: 3,
+          quickMaxPages: 3,
+          deepMaxPages: 4
+        }
+      };
+
+      const makePage = (nums: number[]) =>
+        `<table><tr><th>Title</th><th>Closing</th></tr>${nums
+          .map(n => `<tr><td><a href="https://eproc.punjab.gov.pk/t/${n}">School Solar Item ${n}</a></td><td>20-12-2026</td></tr>`)
+          .join('')}</table>`;
+
+      // Pre-seed items 3 and 4 as already known with matching closing date
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url, closing_date, has_corrigendum)
+        VALUES
+          ('t-k-3', 't-k-3', 'punjab_eproc', 'Punjab', 'School Solar Item 3', 'Org', 'https://eproc.punjab.gov.pk/t/3', '2026-12-20T00:00:00+05:00', 0),
+          ('t-k-4', 't-k-4', 'punjab_eproc', 'Punjab', 'School Solar Item 4', 'Org', 'https://eproc.punjab.gov.pk/t/4', '2026-12-20T00:00:00+05:00', 0)
+      `).run();
+
+      const fetched: string[] = [];
+      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
+        fetched.push(url);
+        if (url.includes('page=2')) return makePage([3, 4]);
+        if (url.includes('page=3')) return makePage([5, 6]);
+        if (url.includes('page=4')) return makePage([7, 8]);
+        return makePage([1, 2]);
+      });
+
+      // Quick scan stops at page=2 because page 2 has 100% known unchanged items (does NOT fetch page 3)
+      const quickRes = await scrapePortal(def, { depth: 'quick' });
+      expect(fetched).toHaveLength(2);
+      expect(quickRes.pagesScanned).toBe(2);
+
+      // Deep scan ignores early-stop and scans up to deepMaxPages (4 pages)
+      fetched.length = 0;
+      const deepRes = await scrapePortal(def, { depth: 'deep' });
+      expect(fetched).toHaveLength(4);
+      expect(deepRes.pagesScanned).toBe(4);
+      expect(deepRes.items).toHaveLength(8);
+    });
+
+    it('Plan D: classifies scraper error codes deterministically and bounds concurrent worker pool', async () => {
+      expect(classifyScraperError(new Error('ETIMEDOUT socket timed out'))).toBe('TIMEOUT');
+      expect(classifyScraperError(new Error('SSL routines:ssl3_get_record:wrong version number'))).toBe('TLS_ERROR');
+      expect(classifyScraperError(new Error('Cloudflare Turnstile challenge detected'))).toBe('CLOUDFLARE_HITL');
+      expect(classifyScraperError(Object.assign(new Error('Not Found'), { statusCode: 404 }))).toBe('HTTP_4XX_5XX');
+      expect(classifyScraperError(new Error('ENOTFOUND host unreachable'))).toBe('NETWORK_UNREACHABLE');
+
+      let running = 0;
+      let peakRunning = 0;
+      await runWithConcurrency([1, 2, 3, 4, 5, 6], 3, async () => {
+        running++;
+        peakRunning = Math.max(peakRunning, running);
+        await new Promise(r => setTimeout(r, 15));
+        running--;
+      });
+      expect(peakRunning).toBeGreaterThan(1);
+      expect(peakRunning).toBeLessThanOrEqual(3);
+    });
+
+    it('Plan D: multi-portal concurrent scan isolates failing portal and writes last_error_code', async () => {
+      // Keep only 2 HTTP portals enabled for a fast deterministic concurrent scan
+      db.prepare(`UPDATE portal_health SET access_mode = 'offline_broken' WHERE portal_id NOT IN ('punjab_eproc', 'epads')`).run();
+
+      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('epads.gov.pk')) {
+          throw new Error('Request timed out after 15000ms (ETIMEDOUT)');
+        }
+        return `
+          <table>
+            <tr><th>Title</th><th>Closing</th></tr>
+            <tr><td><a href="https://eproc.punjab.gov.pk/ok/1">Government School Solar Systems</a></td><td>20-12-2026</td></tr>
+          </table>
+        `;
+      });
+
+      const status = await startCrawlerScan(undefined, true);
+      expect(status.isScanning).toBe(false);
+      expect(status.activePortals).toEqual([]);
+      expect(status.completedPortals).toBe(2);
+
+      const portals = getPortalHealthList();
+      const epads = portals.find(p => p.portal_id === 'epads');
+      const punjab = portals.find(p => p.portal_id === 'punjab_eproc');
+
+      expect(epads?.status).toBe('error');
+      expect(epads?.last_error_code).toBe('TIMEOUT');
+      expect(punjab?.status).toBe('online');
+      expect(punjab?.last_error_code).toBeNull();
     });
   });
 });

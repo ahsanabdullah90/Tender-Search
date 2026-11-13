@@ -1,5 +1,5 @@
 import { db, safeJsonParse } from '../connection.js';
-import { DomainTrack, CorrigendumLog } from '../../../types.js';
+import { DomainTrack, CorrigendumLog } from '../../../shared/types.js';
 import { containsKeyword } from '../../scrapers/trackMatcher.js';
 import {
   buildTrackEmbeddingText,
@@ -9,7 +9,7 @@ import {
   serializeEmbedding,
   EMBEDDING_BLOB_BYTES,
   MINILM_BLOB_HEADER_HEX
-} from '../../embeddingService.js';
+} from '../../services/embeddingService.js';
 
 export interface TrackEmbeddingBackfillRow {
   id: string;
@@ -100,10 +100,10 @@ export function reScoreTendersAgainstTracks() {
     })
   }));
 
-  const tenders = db.prepare('SELECT id, title, description, organization, reference_no, embedding FROM tenders').all() as any[];
+  const tenders = db.prepare('SELECT id, title, description, organization, reference_no, embedding, portal_id, pipeline_status, is_bookmarked, ingestion_status FROM tenders').all() as any[];
 
   const updateStmt = db.prepare(`
-    UPDATE tenders SET domain_tracks = ?, matched_keywords = ?, match_score = ?, semantic_score = ?, embedding = COALESCE(embedding, ?) WHERE id = ?
+    UPDATE tenders SET domain_tracks = ?, matched_keywords = ?, match_score = ?, semantic_score = ?, embedding = COALESCE(embedding, ?), ingestion_status = ? WHERE id = ?
   `);
 
   const updateTx = db.transaction(() => {
@@ -154,12 +154,26 @@ export function reScoreTendersAgainstTracks() {
         matchScore = Math.max(...semanticDiscoveryScores);
       }
 
+      let nextIngestionStatus = tender.ingestion_status;
+      if (tender.ingestion_status === 'awaiting_scope' && matchedTracks.length > 0) {
+        nextIngestionStatus = 'ready';
+      } else if (
+        (tender.ingestion_status ?? 'ready') === 'ready' &&
+        matchedTracks.length === 0 &&
+        tender.pipeline_status === 'New Opportunity' &&
+        !tender.is_bookmarked &&
+        tender.portal_id !== 'manual'
+      ) {
+        nextIngestionStatus = 'awaiting_scope';
+      }
+
       updateStmt.run(
         JSON.stringify(matchedTracks),
         JSON.stringify(allMatchedKeywords),
         matchScore,
         Math.round(maxSemanticSim * 1000) / 1000,
         tenderEmbedBuf,
+        nextIngestionStatus,
         tender.id
       );
     }

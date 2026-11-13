@@ -1,6 +1,6 @@
 # 13. Quality Standard & Requirements Register
 
-**Last updated:** 2026-11-11 · **Applies to:** v1.5.0
+**Last updated:** 2026-11-13 · **Applies to:** v1.9.0
 
 ## 1. Purpose and authority
 
@@ -202,14 +202,14 @@ Every requirement below exists to protect one of these.
 | UI-1 | Inbox and Pipeline both show a badge saying where each deadline came from. (G3) | `InboxScreen.tsx`, `PipelineScreen.tsx` `deadlineProvenance` | `tests/ui/inbox-screen.test.tsx` | Tested for Inbox; Pipeline untested by name |
 | UI-2 | Tenders with `needs_review = 1` sort to the top and offer Confirm and Pass actions. | `InboxScreen.tsx`, `PipelineScreen.tsx` | `tests/ui/inbox-screen.test.tsx`, `pipeline-screen.test.tsx` | Tested |
 | UI-3 | When an action finds a tender has expired, the row is removed at once and a message says why. | `InboxScreen.tsx` | `tests/ui/inbox-screen.test.tsx` | Tested |
-| UI-4 | Every modal and slide-over closes on `Escape` and has ARIA roles and labels. | `src/ui/index.tsx` | `tests/ui/ui-primitives.test.tsx` | Tested for `Escape`; ARIA coverage untested |
-| UI-5 | Text meets WCAG AA contrast in light and dark themes. | `src/index.css`, `src/theme.ts` | `tests/ui/theme.test.ts` | Tested |
+| UI-4 | Every modal and slide-over closes on `Escape` and has ARIA roles and labels. | `src/client/ui/index.tsx` | `tests/ui/ui-primitives.test.tsx` | Tested for `Escape`; ARIA coverage untested |
+| UI-5 | Text meets WCAG AA contrast in light and dark themes. | `src/client/index.css`, `src/client/theme.ts` | `tests/ui/theme.test.ts` | Tested |
 
 ### 3.15 Tests and documentation (`QA`)
 
 | ID | Requirement | Enforced in | Proven by | Status |
 |---|---|---|---|---|
-| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested (598 passing across 39 suites, ~24 s) |
+| QA-1 | The whole suite passes in under 25 seconds. | `vitest.config.ts` | `npm run verify` | Tested (626 passing across 39 suites, ~25–28 s) |
 | QA-2 | Line coverage across `src/` is ≥ 80% (measured: 84.6% overall, 93.5% repositories, 90.5% deduplicator, 86.6% scrapers, 98.6% dateParser). | `vitest.config.ts` | `npm run test:coverage` | Tested |
 | QA-3 | No automated test needs a live internet connection. | `tests/fixtures/` | `npm run verify` | Tested |
 | QA-4 | Every file path, test count and portal count written in `docs/` matches the repository. | `tests/unit/docs-consistency.test.ts` | `tests/unit/docs-consistency.test.ts` | Tested |
@@ -220,20 +220,20 @@ Every requirement below exists to protect one of these.
 
 These are measured by a command. Re-run the command and replace the value; never type in an estimate.
 
-| Measure | Value on 2026-11-12 | Command |
+| Measure | Value on 2026-11-13 | Command |
 |---|---|---|
-| TypeScript errors | 0 | `npm run lint` |
-| Tests passing | 601 of 601, 39 files, 38 s | `npm run verify` |
-| Production build | Builds | `npm run build` |
+| TypeScript errors | 0 (root + split client/server configs) | `npm run lint` |
+| Tests passing | 626 of 626, 39 files, 28.2 s | `npm run verify` |
+| Production build | Builds (`dist/` in 700 ms + `dist-server/server.mjs` in 25 ms) | `npm run build` |
 | `db.prepare` outside `src/server/db/` | 0 | `Get-ChildItem src/server -Recurse -Filter *.ts \| Where-Object { $_.FullName -notmatch '\\db\\' } \| Select-String 'db\.prepare'` |
 | Unparseable `closing_date` rows | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND julianday(closing_date) IS NULL;` |
 | Deadlines with no `deadline_source` | 0 | `SELECT COUNT(*) FROM tenders WHERE closing_date IS NOT NULL AND deadline_source IS NULL;` |
 | Expired, unflagged Inbox rows | 0 | `SELECT COUNT(*) FROM tenders WHERE pipeline_status='New Opportunity' AND is_bookmarked=0 AND needs_review=0 AND ingestion_status='ready' AND closing_date IS NOT NULL AND julianday(closing_date) < julianday('now');` |
-| Portals tracked | 13 active (18 defined; 5 deleted by operator: `epads`, `giz`, `pid`, `tender_services`, `ungm`) | `SELECT COUNT(*) FROM portal_health;` |
-| Portals that returned items on their last scan | 9 of 13 | `SELECT COUNT(*) FROM portal_health WHERE last_items_found > 0;` |
-| Portals shown as "checked successfully" (`HLT-4`; includes one that returned 0 items) | 8 of 13 | `SELECT COUNT(*) FROM portal_health WHERE status='online';` |
-| Completed full scans | 1 (`2026-11-11T09:19:17.565Z`) | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` |
-| Tenders stored | 76 (75 `ready`, 1 `awaiting_scope`) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
+| Portals tracked | 10 active (18 defined; 8 deleted by operator: `gilgit`, `giz`, `kppra`, `pid`, `psda`, `sppra`, `tender_services`, `ungm`; `epads` active on `epads.gov.pk`, `punjab_eproc` expanded to `quickMaxPages: 3` / `deepMaxPages: 10`) | `SELECT COUNT(*) FROM portal_health;` |
+| Portals that returned items on their last scan | 10 of 10 | `SELECT COUNT(*) FROM portal_health WHERE last_items_found > 0;` |
+| Portals shown as "checked successfully" (`HLT-4`; includes empty-state portals) | 10 of 10 | `SELECT COUNT(*) FROM portal_health WHERE status='online';` |
+| Completed full scans | 1 (`2026-11-13T04:21:24.153Z`) | `SELECT value FROM app_settings WHERE key='last_full_scan_at';` |
+| Tenders stored (FTS5-indexed) | 401 (173 `ready`, 228 `awaiting_scope`; 401 `tenders_fts` rows) | `SELECT ingestion_status, COUNT(*) FROM tenders GROUP BY 1;` |
 | Line coverage | 84.62% lines (82.84% statements, 81.67% functions, 73.59% branches) | `npm run test:coverage` |
 
 ---

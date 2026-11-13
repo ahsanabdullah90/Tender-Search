@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getAppSetting } from '../db/repositories/systemRepo.js';
+import { ScanDepth } from '../../shared/types.js';
 import {
   startCrawlerScan,
   currentScanStatus,
@@ -7,15 +8,22 @@ import {
   removeProgressListener
 } from '../scrapers/crawlerEngine.js';
 
+export const scanRouteDeps = {
+  startCrawlerScan: (portalId?: string, awaitCompletion?: boolean, options?: { depth?: ScanDepth }) =>
+    startCrawlerScan(portalId, awaitCompletion, options)
+};
+
 export const scanRouter = Router();
 
 scanRouter.post('/start', async (req, res) => {
   const portalId = req.body?.portalId || (req.query?.portalId as string | undefined);
-  const status = await startCrawlerScan(portalId);
+  const rawDepth = req.body?.depth || (req.query?.depth as string | undefined);
+  const depth = rawDepth === 'deep' || rawDepth === 'quick' ? rawDepth : undefined;
+  const status = await scanRouteDeps.startCrawlerScan(portalId, false, depth ? { depth } : undefined);
   res.json(status);
 });
 
-scanRouter.get('/status', (req, res) => {
+scanRouter.get('/status', (_req, res) => {
   const fullScanAt = getAppSetting('last_full_scan_at') || null;
   res.json({ ...currentScanStatus, lastFullScanTimestamp: fullScanAt });
 });

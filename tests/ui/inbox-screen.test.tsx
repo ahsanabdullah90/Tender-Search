@@ -1,9 +1,8 @@
-import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { InboxScreen, asList } from '../../src/components/InboxScreen.js';
-import type { Tender, DomainTrack } from '../../src/types.js';
+import { InboxScreen, asList } from '../../src/client/components/InboxScreen.js';
+import type { Tender, DomainTrack } from '../../src/shared/types.js';
 
 describe('InboxScreen component', () => {
   const sampleTracks: DomainTrack[] = [
@@ -913,7 +912,7 @@ describe('InboxScreen component', () => {
     };
 
     it('labels where each deadline came from', async () => {
-      const { deadlineProvenance } = await import('../../src/components/InboxScreen.js');
+      const { deadlineProvenance } = await import('../../src/client/components/InboxScreen.js');
       expect(deadlineProvenance({ closing_date: '2026-12-01T09:00:00Z', deadline_source: 'primary_doc', deadline_confidence: 'high' }).label).toBe('Document verified');
       expect(deadlineProvenance({ closing_date: '2026-12-01T09:00:00Z', deadline_source: 'corrigendum_doc', deadline_confidence: 'high' }).label).toBe('Verified from corrigendum');
       expect(deadlineProvenance({ closing_date: '2026-12-01T09:00:00Z', deadline_source: 'primary_doc', deadline_confidence: 'medium' }).tone).toBe('warn');
@@ -922,7 +921,7 @@ describe('InboxScreen component', () => {
     });
 
     it('turns review reasons into sentences', async () => {
-      const { humanReviewReason } = await import('../../src/components/InboxScreen.js');
+      const { humanReviewReason } = await import('../../src/client/components/InboxScreen.js');
       expect(humanReviewReason('deadline_moved_earlier: 15 Dec 2026 → 05 Dec 2026')).toBe('A corrigendum moved the deadline earlier (15 Dec 2026 → 05 Dec 2026).');
       expect(humanReviewReason('corrigendum_cancelled: x')).toMatch(/cancelled or withdrawn/);
       expect(humanReviewReason(null)).toBe('Please check this tender.');
@@ -978,6 +977,48 @@ describe('InboxScreen component', () => {
       expect(fetchMock).toHaveBeenCalledWith('/api/tenders/tender-1/retry-documents', { method: 'POST' });
       expect(screen.getByText(/Fetching documents in the background/)).toBeInTheDocument();
       vi.unstubAllGlobals();
+    });
+
+    it('Plan A & B: filters Inbox by Closing <=48h toggle and renders collapsible Go / No-Go Bid Brief', async () => {
+      const user = userEvent.setup();
+      const urgentTender: Tender = {
+        ...sampleTenders[0],
+        id: 't-urg-ui',
+        title: 'Urgent School Solar Tender',
+        closing_date: new Date(Date.now() + 18 * 3600000).toISOString(),
+        bid_brief: {
+          bidSecurityAmount: '2% CDR',
+          tenderFee: 'PKR 3,000',
+          requiredRegistrations: ['PEC C5', 'NTN'],
+          requiredExperience: '3 years school solarization',
+          deliverablesSummary: ['10kW rooftop PV', '2-year warranty'],
+          bidMethod: 'Single Stage – Two Envelope'
+        }
+      };
+      const laterTender: Tender = {
+        ...sampleTenders[0],
+        id: 't-later-ui',
+        title: 'Later Textbook Printing Tender',
+        closing_date: new Date(Date.now() + 14 * 86400000).toISOString(),
+        bid_brief: null
+      };
+
+      const { container } = render(<InboxScreen {...baseProps} tenders={[urgentTender, laterTender]} />);
+
+      // Closing <=48h toggle filters list to urgent item only
+      const urgentBtn = screen.getByRole('button', { name: /Closing (?:≤|<=)48h/i });
+      expect(urgentBtn).toHaveTextContent('(1)');
+      await user.click(urgentBtn);
+
+      const visibleIds = Array.from(container.querySelectorAll('[data-tender-id]')).map(el => el.getAttribute('data-tender-id'));
+      expect(visibleIds).toEqual(['t-urg-ui']);
+
+      // Go / No-Go Bid Brief card renders structured qualification fields
+      await user.click(screen.getAllByText('Urgent School Solar Tender')[0]);
+      expect(screen.getByText(/Go \/ No-Go Bid Brief/i)).toBeInTheDocument();
+      expect(screen.getByText('2% CDR')).toBeInTheDocument();
+      expect(screen.getByText('PEC C5')).toBeInTheDocument();
+      expect(screen.getByText(/10kW rooftop PV/)).toBeInTheDocument();
     });
   });
 });

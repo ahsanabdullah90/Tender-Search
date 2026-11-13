@@ -1,9 +1,8 @@
-import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { PortalCredentialsModal } from '../../src/components/PortalCredentialsModal.js';
-import type { PortalHealth } from '../../src/types.js';
+import { PortalCredentialsModal } from '../../src/client/components/PortalCredentialsModal.js';
+import type { PortalHealth } from '../../src/shared/types.js';
 
 describe('PortalCredentialsModal component', () => {
   const samplePortal: PortalHealth = {

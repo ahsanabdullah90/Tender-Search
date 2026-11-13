@@ -1,8 +1,8 @@
 import crypto from 'crypto';
-import { Tender, CachedDossier } from '../../types.js';
+import { Tender, CachedDossier } from '../../shared/types.js';
 import { RawScrapedItem } from './portalParsers.js';
 import { PortalDefinition } from './portalList.js';
-import { normalizeText, findCanonicalMatch } from '../deduplicator.js';
+import { normalizeText, findCanonicalMatch } from '../services/deduplicator.js';
 import {
   formatClosingDate,
   normalizeExtractedDate,
@@ -24,17 +24,17 @@ import {
   recordTenderSuppression,
   getGeminiApiKey,
   UNDATED_MAX_AGE_DAYS
-} from '../db.js';
+} from '../db/index.js';
 import {
   enqueueDocumentJobs,
   refreshTenderDocFetchStatus,
   documentJobPriority
 } from '../db/repositories/ingestJobsRepo.js';
 import { matchTracks, applyDocumentScopeToTracks } from './trackMatcher.js';
-import { embedTextToBlobAsync, buildTenderEmbeddingText } from '../embeddingService.js';
-import { purgeTenderFiles } from '../dossierStore.js';
-import { deriveDossierLabel } from '../dossierManager.js';
-import { extractFromDocument, DocumentExtractionResult } from '../documentExtractor.js';
+import { embedTextToBlobAsync, buildTenderEmbeddingText } from '../services/embeddingService.js';
+import { purgeTenderFiles } from '../services/dossierStore.js';
+import { deriveDossierLabel } from '../services/dossierManager.js';
+import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import {
   INGEST_DEFAULTS,
   getActiveScanBudget,
@@ -42,7 +42,7 @@ import {
   maxFileBytes,
   noteDeferredDocuments,
   tryConsumeScanVision
-} from '../ingestBudget.js';
+} from '../services/ingestBudget.js';
 import { crawlerDeps } from './crawlerDeps.js';
 import { readCachedDossier } from './tenderAnalysis.js';
 

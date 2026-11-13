@@ -5,8 +5,21 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// Root of project is three levels up from src/server/db
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
+
+function findProjectRoot(startDir: string): string {
+  let dir = startDir;
+  for (let i = 0; i < 6; i++) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.resolve(startDir, '..', '..', '..');
+}
+
+const PROJECT_ROOT = findProjectRoot(__dirname);
 
 // Ensure required data directories exist relative to project root
 export const DATA_DIR = process.env.TENDER_DATA_DIR
@@ -17,8 +30,9 @@ export const DOSSIERS_DIR = path.resolve(DATA_DIR, 'dossiers');
 export const SESSIONS_DIR = path.resolve(DATA_DIR, 'sessions');
 export const MODELS_DIR = path.resolve(DATA_DIR, 'models');
 export const LOGS_DIR = path.resolve(DATA_DIR, 'logs');
+export const TESSDATA_DIR = path.resolve(DATA_DIR, 'tessdata');
 
-for (const dir of [DATA_DIR, BACKUPS_DIR, DOSSIERS_DIR, SESSIONS_DIR, MODELS_DIR, LOGS_DIR]) {
+for (const dir of [DATA_DIR, BACKUPS_DIR, DOSSIERS_DIR, SESSIONS_DIR, MODELS_DIR, LOGS_DIR, TESSDATA_DIR]) {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }

@@ -106,7 +106,7 @@ This document catalogs the 13 architectural and operational defects identified i
 ### Bug B13: Sub-Minute Time Synchronization
 - **Symptom**: In-memory countdown clocks on tender deadlines lagged or jumped when client timers drifted.
 - **Root Cause**: Inconsistent tick intervals in React state.
-- **Solution**: Unified time interval hook `useTick(60_000)` in `src/components/inbox/Detail.tsx` (re-exported by `InboxScreen.tsx`) and `PipelineScreen.tsx`, driving synchronized deadline rendering across all open cards.
+- **Solution**: Unified time interval hook `useTick(60_000)` in `src/client/components/inbox/Detail.tsx` (re-exported by `InboxScreen.tsx`) and `PipelineScreen.tsx`, driving synchronized deadline rendering across all open cards.
 - **Test File**: `tests/ui/inbox-screen.test.tsx`.
 
 ---

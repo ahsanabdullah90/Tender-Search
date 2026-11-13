@@ -4,20 +4,7 @@
  *
  * Run: npm run probe:portals
  */
-import https from 'node:https';
-import http from 'node:http';
-import { PORTAL_DEFINITIONS, PortalDefinition } from '../src/server/scrapers/portalList.js';
-
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-  keepAlive: true,
-  timeout: 10000
-});
-
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  timeout: 10000
-});
+import { PORTAL_DEFINITIONS } from '../src/server/scrapers/portalList.js';
 
 interface ProbeResult {
   id: string;
@@ -32,7 +19,6 @@ interface ProbeResult {
 async function probeUrl(url: string): Promise<{ status: number | string; latency: number; bodyPreview: string; error?: string }> {
   const start = Date.now();
   try {
-    const isHttps = url.startsWith('https:');
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
 

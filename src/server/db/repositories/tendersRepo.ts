@@ -1,7 +1,7 @@
 import { db, safeJsonParse } from '../connection.js';
-import { Tender } from '../../../types.js';
-import { purgeTenderFiles } from '../../dossierStore.js';
-import { normalizeReferenceNo } from '../../referenceNo.js';
+import { Tender, BidBrief } from '../../../shared/types.js';
+import { purgeTenderFiles } from '../../services/dossierStore.js';
+import { normalizeReferenceNo } from '../../services/referenceNo.js';
 import {
   buildTenderEmbeddingText,
   computeFastSemanticEmbedding,
@@ -9,7 +9,7 @@ import {
   serializeEmbedding,
   EMBEDDING_BLOB_BYTES,
   MINILM_BLOB_HEADER_HEX
-} from '../../embeddingService.js';
+} from '../../services/embeddingService.js';
 
 /**
  * Rows in 'staging' are mid-ingest (documents still being checked) and must not be visible as
@@ -144,15 +144,58 @@ export function countTenderEmbeddingsBySpace(): { totalTenders: number; indexedT
 }
 
 function mapTenderRow(row: any): Tender {
-  const { embedding, ...rest } = row;
+  const { rowid: _rowid, embedding, extracted_text: _extractedText, ...rest } = row;
   return {
     ...rest,
     secondary_sources: safeJsonParse(row.secondary_sources, []),
     domain_tracks: safeJsonParse(row.domain_tracks, []),
     matched_keywords: safeJsonParse(row.matched_keywords, []),
     cached_dossiers: safeJsonParse(row.cached_dossiers, []),
-    attachment_urls: safeJsonParse(row.attachment_urls, [])
+    attachment_urls: safeJsonParse(row.attachment_urls, []),
+    bid_brief: safeJsonParse<BidBrief | null>(row.bid_brief, null)
   };
+}
+
+/**
+ * Converts a raw operator search string into a safe FTS5 prefix query (`"tok1"* "tok2"*`).
+ * Strips FTS5 syntax characters (`"`, `-`, `*`, `(`, `)`, `:`, `+`, etc.) so punctuation-heavy
+ * inputs never trigger SQLite `fts5: syntax error`. Returns `null` when no alphanumeric tokens exist.
+ */
+export function buildFts5PrefixQuery(rawSearch: string): string | null {
+  const tokens = rawSearch.match(/[\p{L}\p{N}_]+/gu);
+  if (!tokens || tokens.length === 0) return null;
+  return tokens
+    .slice(0, 16)
+    .map(tok => `"${tok}"*`)
+    .join(' ');
+}
+
+const MAX_EXTRACTED_TEXT_CHARS = 120_000;
+
+/**
+ * Stores or appends normalized extracted document text on `tenders.extracted_text` (automatically
+ * indexed by `tenders_fts` triggers for full-text Inbox search). Skips duplicate chunks and caps
+ * per-tender text at 120 KB so multi-document tenders stay compact.
+ */
+export function appendTenderExtractedText(id: string, text: string): boolean {
+  const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return false;
+
+  const existingRow = db.prepare('SELECT extracted_text FROM tenders WHERE id = ?').get(id) as { extracted_text?: string | null } | undefined;
+  if (!existingRow) return false;
+
+  const existing = existingRow.extracted_text || '';
+  const signature = cleaned.slice(0, 200);
+  if (signature.length >= 20 && existing.includes(signature)) {
+    return false;
+  }
+
+  const combined = existing
+    ? `${existing}\n${cleaned}`.slice(0, MAX_EXTRACTED_TEXT_CHARS)
+    : cleaned.slice(0, MAX_EXTRACTED_TEXT_CHARS);
+
+  if (combined === existing) return false;
+  return db.prepare('UPDATE tenders SET extracted_text = ? WHERE id = ?').run(combined, id).changes > 0;
 }
 
 export function getAllTenders(filters?: {
@@ -165,7 +208,7 @@ export function getAllTenders(filters?: {
   unreadOnly?: boolean;
   excludeExpired?: boolean;
 }): Tender[] {
-  let query = `SELECT * FROM tenders WHERE ${NOT_STAGING_SQL}`;
+  let query = `SELECT rowid, * FROM tenders WHERE ${NOT_STAGING_SQL}`;
   const params: any[] = [];
 
   if (filters?.status && filters.status !== 'All') {
@@ -208,13 +251,30 @@ export function getAllTenders(filters?: {
     const rawSearch = filters.search.trim();
     const lowerSearch = rawSearch.toLowerCase();
 
+    const ftsQuery = buildFts5PrefixQuery(rawSearch);
+    const ftsMatchedRowIds = new Set<number>();
+    if (ftsQuery) {
+      try {
+        const hits = db.prepare('SELECT rowid FROM tenders_fts WHERE tenders_fts MATCH ?').all(ftsQuery) as { rowid: number }[];
+        for (const h of hits) ftsMatchedRowIds.add(h.rowid);
+      } catch {
+        // Safe fallback to substring/semantic filters on exotic inputs
+      }
+    }
+
     rows = rows.filter(row => {
+      if (typeof row.rowid === 'number' && ftsMatchedRowIds.has(row.rowid)) {
+        return true;
+      }
+
       const titleMatch = (row.title || '').toLowerCase().includes(lowerSearch);
       const orgMatch = (row.organization || '').toLowerCase().includes(lowerSearch);
       const refMatch = (row.reference_no || '').toLowerCase().includes(lowerSearch);
       const portalMatch = (row.portal_name || '').toLowerCase().includes(lowerSearch);
+      const descMatch = (row.description || '').toLowerCase().includes(lowerSearch);
+      const docMatch = (row.extracted_text || '').toLowerCase().includes(lowerSearch);
 
-      if (titleMatch || orgMatch || refMatch || portalMatch) {
+      if (titleMatch || orgMatch || refMatch || portalMatch || descMatch || docMatch) {
         return true;
       }
 
@@ -338,6 +398,7 @@ export function slimPassedTenders(tenderIds: string[]): { slimmedCount: number; 
         UPDATE tenders
         SET cached_dossiers = '[]',
             description = '',
+            extracted_text = '',
             matched_keywords = '[]',
             estimated_value = NULL,
             location = NULL,
@@ -584,6 +645,7 @@ export function updateTenderFields(
     has_corrigendum: number;
     deadline_source?: string | null;
     deadline_confidence?: string | null;
+    bid_brief?: BidBrief | null;
   }>
 ): Tender | null {
   const existing = getTenderById(id);
@@ -634,6 +696,7 @@ export function updateTenderFields(
         location = ?,
         cached_dossiers = ?,
         has_corrigendum = ?,
+        bid_brief = ?,
         embedding = ?,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
@@ -651,12 +714,35 @@ export function updateTenderFields(
     fields.location !== undefined ? fields.location : existing.location,
     fields.cached_dossiers !== undefined ? JSON.stringify(fields.cached_dossiers) : JSON.stringify(existing.cached_dossiers || []),
     fields.has_corrigendum !== undefined ? fields.has_corrigendum : existing.has_corrigendum,
+    fields.bid_brief !== undefined
+      ? (fields.bid_brief ? JSON.stringify(fields.bid_brief) : null)
+      : (existing.bid_brief ? JSON.stringify(existing.bid_brief) : null),
     embeddingBuf,
     id
   );
   if (fields.reference_no !== undefined) syncReferenceNorm(id);
 
   return getTenderById(id);
+}
+
+/**
+ * Lookup map of known tender links/titles for a portal (used by pagination early-stop in crawlerEngine).
+ */
+export function getKnownTenderMapForPortal(portalId: string): Map<string, { closing_date: string | null; has_corrigendum: number }> {
+  const rows = db.prepare(`
+    SELECT direct_url, title, closing_date, has_corrigendum
+    FROM tenders
+    WHERE portal_id = ?
+  `).all(portalId) as { direct_url: string | null; title: string; closing_date: string | null; has_corrigendum: number }[];
+
+  const map = new Map<string, { closing_date: string | null; has_corrigendum: number }>();
+  for (const r of rows) {
+    const key = (r.direct_url || r.title || '').toLowerCase();
+    if (key) {
+      map.set(key, { closing_date: r.closing_date ?? null, has_corrigendum: Number(r.has_corrigendum || 0) });
+    }
+  }
+  return map;
 }
 
 /** Recomputes `reference_norm` from `reference_no` (one normalisation for every write path). */

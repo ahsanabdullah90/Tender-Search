@@ -7,7 +7,7 @@ import {
   updatePortalHealth,
   savePortalCredentials,
   getPortalAuthCredentials
-} from '../db.js';
+} from '../db/index.js';
 import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
 import { authenticatePortal } from '../scrapers/portalAuth.js';
 import { healPortalConnection, getActivePortalsList } from '../scrapers/crawlerEngine.js';
@@ -15,7 +15,7 @@ import { launchLocalBrowserHITL, verifyAndResumePortal } from '../scrapers/playw
 
 export const portalsRouter = Router();
 
-portalsRouter.get('/', (req, res) => {
+portalsRouter.get('/', (_req, res) => {
   const portals = getPortalHealthList();
   res.json(portals);
 });

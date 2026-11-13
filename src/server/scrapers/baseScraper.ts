@@ -17,13 +17,29 @@ export const sslTolerantAgent = new https.Agent({
   timeout: 25000
 });
 
+/**
+ * Legacy cipher list excluding ECDHE-RSA-AES256-SHA384 / ECDHE-RSA-AES256-GCM-SHA384,
+ * which trigger record-layer failures (ERR_SSL_WRONG_VERSION_NUMBER / ECONNRESET)
+ * on older IIS 7.5 endpoints such as eproc.punjab.gov.pk.
+ */
+export const LEGACY_TLS_CIPHERS = 'DEFAULT:!ECDHE-RSA-AES256-SHA384:!ECDHE-RSA-AES256-GCM-SHA384:@SECLEVEL=0';
+
 export const legacySslTolerantAgent = new https.Agent({
   rejectUnauthorized: false,
-  ciphers: 'DEFAULT:@SECLEVEL=0',
+  ciphers: LEGACY_TLS_CIPHERS,
   minVersion: 'TLSv1',
   keepAlive: false,
   timeout: 25000
 });
+
+/**
+ * Returns true when an HTTPS error indicates a TLS handshake or record-layer cipher mismatch
+ * that should be retried with legacySslTolerantAgent.
+ */
+export function isTlsFallbackError(err: any): boolean {
+  const info = `${err?.code || ''} ${err?.message || ''}`;
+  return /wrong version number|EPROTO|ERR_SSL|TLSV1|UNSUPPORTED_PROTOCOL|ECONNRESET|socket hang up/i.test(info);
+}
 
 export const HUMAN_CHROME_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',

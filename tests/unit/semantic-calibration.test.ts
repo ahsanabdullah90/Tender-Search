@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { computeTextSemanticSimilarity, buildTrackEmbeddingText } from '../../src/server/embeddingService.js';
+import { computeTextSemanticSimilarity } from '../../src/server/services/embeddingService.js';
 import { matchTracks } from '../../src/server/scrapers/crawlerEngine.js';
-import { calculateStringSimilarity, titlesAreDistinguishable } from '../../src/server/deduplicator.js';
+import { calculateStringSimilarity, titlesAreDistinguishable } from '../../src/server/services/deduplicator.js';
 import { TRACK_MATCH_CALIBRATION_SET } from '../fixtures/calibration/trackMatchPairs.js';
 import { DUPLICATE_CALIBRATION_SET } from '../fixtures/calibration/duplicatePairs.js';
 
@@ -89,8 +89,6 @@ describe('Semantic Similarity Calibration & Metric Verification (MATCH-5 & DED-7
 
       const falseMergeRate = fp / (fp + tn);
       const precision = tp / (tp + fp) || 0;
-      const recall = tp / (tp + fn) || 0;
-      const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
 
       console.log('\n--- DED-7 Duplicate Detection Evaluation Summary ---');
       console.log(`- Evaluated Pairs: ${DUPLICATE_CALIBRATION_SET.length} (15 Duplicates, 15 Distinct)`);

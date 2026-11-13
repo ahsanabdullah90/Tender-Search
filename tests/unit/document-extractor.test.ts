@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as ocrSvc from '../../src/server/ocrService.js';
-import { initDatabase, setAppSetting } from '../../src/server/db.js';
+import * as ocrSvc from '../../src/server/services/ocrService.js';
+import { initDatabase, setAppSetting } from '../../src/server/db/index.js';
 import {
   extractDocumentText,
   extractFromDocument,
@@ -8,7 +8,8 @@ import {
   findReferenceNumber,
   findEstimatedValue,
   findScopeText
-} from '../../src/server/documentExtractor.js';
+} from '../../src/server/services/documentExtractor.js';
+import { localOcrDeps, hasValidImageMagicBytes, extractTextWithLocalOcr } from '../../src/server/services/localOcrService.js';
 import { makePdf, makeMultiPagePdf, makeDocx, FILLER } from '../fixtures/documents/buildFixtures.js';
 
 const pkt = (iso: string) => new Date(iso).toISOString();
@@ -223,6 +224,56 @@ describe('documentExtractor (Phase 2)', () => {
       expect(r.closingDateISO).toBeNull();
       expect(r.confidence).toBe('low');
       expect(r.canAutoExpire).toBe(false);
+    });
+  });
+
+  describe('Plan F (#9): Offline Local OCR fallback', () => {
+    it('validates image magic bytes and falls back to local_ocr when Gemini key or Vision quota is unavailable', async () => {
+      expect(hasValidImageMagicBytes(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]))).toBe(true);
+      expect(hasValidImageMagicBytes(Buffer.from('fake png'))).toBe(false);
+
+      const origRecognize = localOcrDeps.recognizeImage;
+      const origRasterize = localOcrDeps.rasterizePdf;
+      const ocrSampleText = [
+        'GOVERNMENT OF PAKISTAN FEDERAL DIRECTORATE OF EDUCATION',
+        'Tender No. FDE-SOLAR-2026-88',
+        'Estimated Cost: Rs. 12,500,000',
+        'Procurement of 50kW hybrid solar photovoltaic systems for ICT schools.',
+        'Last date for submission of bids: 28-12-2026 at 11:00 AM',
+        ...FILLER
+      ].join('\n');
+
+      localOcrDeps.recognizeImage = vi.fn().mockResolvedValue(ocrSampleText);
+      localOcrDeps.rasterizePdf = vi.fn().mockResolvedValue([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])]);
+
+      try {
+        // 1. Scanned image with no Gemini key -> falls back to local_ocr, indexes FTS text, never auto-expires (DL-7/AI-3)
+        const imgRes = await extractFromDocument(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]), 'image/jpeg', 'newspaper-clipping.jpg');
+        expect(imgRes.extractionMethod).toBe('local_ocr');
+        expect(imgRes.needsVision).toBe(false);
+        expect(imgRes.referenceNo).toBe('FDE-SOLAR-2026-88');
+        expect(imgRes.estimatedValue).toBe('PKR 12,500,000');
+        expect(imgRes.closingDateISO).toBe(pkt('2026-12-28T11:00:00+05:00'));
+        expect(imgRes.extractedText).toContain('50kW hybrid solar photovoltaic systems');
+        expect(imgRes.canAutoExpire).toBe(false);
+
+        // 2. Scanned PDF over Vision budget -> rasterizes PDF pages and runs local_ocr
+        setAppSetting('gemini_api_key', 'test-key');
+        const pdfRes = await extractFromDocument(makePdf([]), 'application/pdf', 'scanned-rfp.pdf', { allowVisionCall: () => false });
+        expect(localOcrDeps.rasterizePdf).toHaveBeenCalled();
+        expect(pdfRes.extractionMethod).toBe('local_ocr');
+        expect(pdfRes.closingDateISO).toBe(pkt('2026-12-28T11:00:00+05:00'));
+        expect(pdfRes.canAutoExpire).toBe(false);
+
+        // 3. Disabled via app_settings -> skips local OCR cleanly
+        setAppSetting('local_ocr_enabled', 'false');
+        const disabled = await extractTextWithLocalOcr(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0, 0, 0, 0, 0]), 'image/png');
+        expect(disabled).toBeNull();
+      } finally {
+        setAppSetting('local_ocr_enabled', 'true');
+        localOcrDeps.recognizeImage = origRecognize;
+        localOcrDeps.rasterizePdf = origRasterize;
+      }
     });
   });
 });

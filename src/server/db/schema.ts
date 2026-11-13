@@ -144,14 +144,63 @@ export function initDatabase() {
   try { db.prepare('ALTER TABLE tenders ADD COLUMN slimmed_at TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE tenders ADD COLUMN embedding BLOB').run(); } catch {}
   try { db.prepare('ALTER TABLE tenders ADD COLUMN semantic_score REAL DEFAULT 0').run(); } catch {}
+  try { db.prepare("ALTER TABLE tenders ADD COLUMN extracted_text TEXT DEFAULT ''").run(); } catch {}
+  try { db.prepare('ALTER TABLE tenders ADD COLUMN bid_brief TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE domain_tracks ADD COLUMN embedding BLOB').run(); } catch {}
+  try { db.prepare('ALTER TABLE portal_health ADD COLUMN last_error_code TEXT').run(); } catch {}
 
   migrateIngestionProvenanceColumns();
 
   seedDefaultDomainTracks();
   seedPortalHealth();
   migrateAuditFixColumns();
+  initTendersFts();
   runAuditCleanupOnce();
+}
+
+/**
+ * External-content SQLite FTS5 index over tenders + extracted PDF/DOCX text (`tenders_fts`).
+ * Triggers keep inserts, updates, and deletes synchronized automatically regardless of write path.
+ */
+function initTendersFts(): void {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS tenders_fts USING fts5(
+      title,
+      organization,
+      reference_no,
+      portal_name,
+      description,
+      extracted_text,
+      content='tenders',
+      content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS tenders_fts_ai AFTER INSERT ON tenders BEGIN
+      INSERT INTO tenders_fts(rowid, title, organization, reference_no, portal_name, description, extracted_text)
+      VALUES (new.rowid, new.title, new.organization, new.reference_no, new.portal_name, new.description, new.extracted_text);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS tenders_fts_ad AFTER DELETE ON tenders BEGIN
+      INSERT INTO tenders_fts(tenders_fts, rowid, title, organization, reference_no, portal_name, description, extracted_text)
+      VALUES ('delete', old.rowid, old.title, old.organization, old.reference_no, old.portal_name, old.description, old.extracted_text);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS tenders_fts_au
+    AFTER UPDATE OF title, organization, reference_no, portal_name, description, extracted_text ON tenders BEGIN
+      INSERT INTO tenders_fts(tenders_fts, rowid, title, organization, reference_no, portal_name, description, extracted_text)
+      VALUES ('delete', old.rowid, old.title, old.organization, old.reference_no, old.portal_name, old.description, old.extracted_text);
+      INSERT INTO tenders_fts(rowid, title, organization, reference_no, portal_name, description, extracted_text)
+      VALUES (new.rowid, new.title, new.organization, new.reference_no, new.portal_name, new.description, new.extracted_text);
+    END;
+  `);
+
+  const KEY = 'migration_tenders_fts_v1_2026_11';
+  const done = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(KEY) as { value: string } | undefined;
+  if (!done) {
+    db.exec(`INSERT INTO tenders_fts(tenders_fts) VALUES('rebuild');`);
+    db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(KEY, new Date().toISOString());
+  }
 }
 
 /**
@@ -367,6 +416,16 @@ export function seedPortalHealth() {
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_password TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE portal_health ADD COLUMN session_cookies TEXT').run(); } catch {}
 
+  // One-time re-activation of Federal EPADS when upgrading from legacy login-walled epms.ppra.gov.pk to open epads.gov.pk
+  const EPADS_MIGRATION_KEY = 'migration_epads_v2_2026_11';
+  try {
+    const migrated = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(EPADS_MIGRATION_KEY) as { value: string } | undefined;
+    if (!migrated) {
+      db.prepare("DELETE FROM deleted_portals WHERE portal_id = 'epads'").run();
+      db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(EPADS_MIGRATION_KEY, new Date().toISOString());
+    }
+  } catch {}
+
   const deletedRows = (db.prepare('SELECT portal_id FROM deleted_portals').all() || []) as { portal_id: string }[];
   const deletedSet = new Set(deletedRows.map(r => r.portal_id));
   const activeDefinitions = PORTAL_DEFINITIONS.filter(p => !deletedSet.has(p.id));
@@ -444,13 +503,22 @@ export function seedPortalHealth() {
             db.prepare("UPDATE portal_health SET base_url = ?, tenders_url = ?, access_mode = ?, status = 'error', verified_status = ? WHERE portal_id = ?")
               .run(p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
           }
-          if (p.id === 'punjab_eproc' && String(dbRow.base_url).startsWith('https:')) {
-            db.prepare("UPDATE portal_health SET base_url = 'http://eproc.punjab.gov.pk' WHERE portal_id = ?")
-              .run(p.id);
+          if (
+            p.id === 'punjab_eproc' &&
+            (String(dbRow.base_url).startsWith('http://') ||
+              String(dbRow.base_url).includes('ppra.punjab.gov.pk') ||
+              String(dbRow.tenders_url).startsWith('http://'))
+          ) {
+            db.prepare('UPDATE portal_health SET base_url = ?, tenders_url = ? WHERE portal_id = ?')
+              .run(p.baseUrl, p.tendersUrl, p.id);
           }
           if (p.id === 'gilgit' && dbRow.access_mode !== p.accessMode) {
             db.prepare("UPDATE portal_health SET base_url = ?, tenders_url = ?, access_mode = ?, status = 'error', verified_status = ? WHERE portal_id = ?")
               .run(p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
+          }
+          if (p.id === 'epads' && (String(dbRow.tenders_url).includes('epms.ppra.gov.pk') || String(dbRow.base_url).includes('ppra.gov.pk'))) {
+            db.prepare("UPDATE portal_health SET portal_name = ?, tier = ?, base_url = ?, tenders_url = ?, login_url = ?, access_mode = ?, status = 'online', verified_status = ?, last_error_message = NULL WHERE portal_id = ?")
+              .run(p.name, p.tier, p.baseUrl, p.tendersUrl, p.loginUrl || null, p.accessMode, p.verifiedStatus, p.id);
           }
         }
       } catch {}

@@ -15,13 +15,13 @@ import {
   clearTenderReviewFlag,
   requeueFailedJobs,
   refreshTenderDocFetchStatus
-} from '../db.js';
-import { processDocumentQueue } from '../ingestWorker.js';
-import { TENDER_STATUSES } from '../../types.js';
+} from '../db/index.js';
+import { processDocumentQueue } from '../services/ingestWorker.js';
+import { TENDER_STATUSES } from '../../shared/types.js';
 import { analyzeTenderById, fetchDocumentsForTender, matchTracks, parseDateString, formatClosingDate } from '../scrapers/crawlerEngine.js';
-import { saveManualDossier } from '../dossierManager.js';
-import { extractTenderFromImage } from '../ocrService.js';
-import { getGeminiApiKey } from '../db.js';
+import { saveManualDossier } from '../services/dossierManager.js';
+import { extractTenderFromImage } from '../services/ocrService.js';
+import { getGeminiApiKey } from '../db/index.js';
 
 export const tendersRouter = Router();
 
@@ -45,7 +45,7 @@ tendersRouter.get('/', (req, res) => {
   }
 });
 
-tendersRouter.get('/portal-summary', (req, res) => {
+tendersRouter.get('/portal-summary', (_req, res) => {
   try {
     const summary = getPortalTenderSummary();
     res.json(summary);

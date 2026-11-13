@@ -1,5 +1,5 @@
 import { PORTAL_DEFINITIONS } from './portalList.js';
-import { buildTrackEmbeddingText, computeTextSemanticSimilarity } from '../embeddingService.js';
+import { buildTrackEmbeddingText, computeTextSemanticSimilarity } from '../services/embeddingService.js';
 
 /**
  * Track matching: decides which domain tracks a tender belongs to (keywords first, then semantic

@@ -9,12 +9,13 @@ export default defineConfig({
       reporter: ['text', 'lcov', 'html'],
       include: ['src/**/*.ts', 'src/**/*.tsx', 'server.ts'],
       exclude: [
-        'src/main.tsx',
-        'src/types.ts',
+        'src/client/main.tsx',
+        'src/shared/types.ts',
         'vite.config.ts',
         'vitest.config.ts',
         'tests/**',
         'dist/**',
+        'dist-server/**',
         'data*/**',
         'scripts/seed-sample.ts'
       ],

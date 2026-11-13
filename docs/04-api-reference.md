@@ -275,10 +275,11 @@ Validates whether active session cookies exist in `data/sessions/` after HITL co
 ## 5. Crawling & Scanning
 
 ### `POST /api/scan/start`
-Initiates a crawl across all portals or a targeted portal.
+Initiates a crawl across all portals or a targeted portal. Multi-portal scans run HTTP portals concurrently (pool of 3) and Playwright portals sequentially (pool of 1).
 - **Request Body**:
-  - `portalId` *(optional)*: Scan a single portal rather than all 18.
-- **Response**: `200 OK` snapshot of initial scan status.
+  - `portalId` *(optional)*: Scan a single portal rather than all active portals.
+  - `depth` *(optional, `'quick' | 'deep'`, default `'quick'`)*: Controls pagination budgets (`quickMaxPages` with DB early-stop vs `deepMaxPages`).
+- **Response**: `200 OK` snapshot of initial scan status (`activePortals`, `scanDepth`, `currentPortal`, etc.).
 
 ### `GET /api/scan/status`
 Returns immediate snapshot of crawler status.
@@ -351,3 +352,7 @@ Lists the last 3 retained session execution logs or retrieves/downloads (`?downl
 
 ### `GET /api/backups` & `POST /api/backups`
 Lists all available SQLite backups with filenames, creation timestamps, and byte sizes, or generates an immediate SQLite online backup (`db.backup()`) in `data/backups/`.
+
+### `GET /api/system/digest` & `POST /api/system/digest/settings`
+- `GET /api/system/digest` *(alias `/api/digest`, optional `?hours=48`)*: Returns the proactive alert summary (`closingSoon`, `closingSoonCount`, `unacknowledgedCorrigendaCount`, `newMatchesLast24hCount`) plus current `settings` (`enabled`, `webhookUrl`, `withinHours`, `lastSentDatePkt`).
+- `POST /api/system/digest/settings` *(alias `/api/digest/settings`)*: Updates opt-in daily digest webhook configuration (`enabled`, `webhookUrl`, `withinHours`) in `app_settings`.

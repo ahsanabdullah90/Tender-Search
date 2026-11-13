@@ -5,7 +5,7 @@ import {
   upsertScrapedTender,
   updateTenderStatus,
   updateTenderNotes
-} from '../../src/server/db.js';
+} from '../../src/server/db/index.js';
 import type { UpsertScrapedTenderInput } from '../../src/server/db/repositories/tendersRepo.js';
 import {
   computeTenderId,
@@ -17,7 +17,6 @@ import {
   holdForDocumentScope
 } from '../../src/server/scrapers/ingestPipeline.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
-import type { Tender } from '../../src/types.js';
 
 function makeTestTender(overrides: Partial<UpsertScrapedTenderInput> & { id: string; title: string }): UpsertScrapedTenderInput {
   return {

@@ -48,8 +48,10 @@ erDiagram
         text estimated_value
         text location
         text description
+        text bid_brief
         text cached_dossiers
         text attachment_urls
+        text extracted_text
         integer has_corrigendum
         text pipeline_status
         text status_notes
@@ -130,6 +132,7 @@ erDiagram
         integer consecutive_zero_yields
         integer pages_scanned
         text last_error_message
+        text last_error_code
         text access_mode
         text verified_status
     }
@@ -185,6 +188,7 @@ The primary entity representing scraped, matched, and tracked procurement opport
 | `estimated_value` | `TEXT` | `NULL` | Estimated tender budget (e.g., `"PKR 45,000,000"`). |
 | `location` | `TEXT` | `NULL` | Work/delivery station (e.g., `"Islamabad"`). |
 | `description` | `TEXT` | `DEFAULT ''` | Detailed scope or AI First-Look brief extracted from notice. |
+| `bid_brief` | `TEXT` | `NULL` | Optional JSON `BidBrief` (`bidSecurityAmount`, `tenderFee`, `requiredRegistrations`, `requiredExperience`, `deliverablesSummary`, `bidMethod`). |
 | `cached_dossiers` | `TEXT` | `DEFAULT '[]'` | JSON array of downloaded bidding document metadata `{label, localPath, originalUrl, mimeType, sha256, sizeBytes, downloadedAt}`. |
 | `attachment_urls` | `TEXT` | `DEFAULT '[]'` | JSON array of discovered document URLs persisted at ingest so attachments can be backfilled or re-queued (`P1-1`). |
 | `embedding` | `BLOB` | `NULL` | Tagged 384-dimensional float32 vector (`model`-tagged `all-MiniLM-L6-v2` or `fast`-tagged fallback). |
@@ -295,6 +299,7 @@ Maintains operational health, credentials, and scan metrics for each of the 18 p
 | `pages_scanned` | `INTEGER`| `DEFAULT 1` | Number of pagination pages crawled during latest run. |
 | `consecutive_zero_yields` | `INTEGER`| `DEFAULT 0` | Counter for consecutive runs yielding 0 items. |
 | `last_error_message` | `TEXT` | `NULL` | Error details or failure diagnostics. |
+| `last_error_code` | `TEXT` | `NULL` | Structured `ScraperErrorCode` (`TIMEOUT`, `TLS_ERROR`, `CLOUDFLARE_HITL`, `LOGIN_REQUIRED`, `HTTP_4XX_5XX`, `PARSE_EMPTY`, `NETWORK_UNREACHABLE`). |
 | `access_mode` | `TEXT` | `DEFAULT 'public'`| `'public'`, `'login_required'`, `'cloudflare'`, `'offline_broken'`. |
 | `verified_status`| `TEXT` | `NULL` | Informational status badge for UI. |
 
@@ -321,3 +326,10 @@ Key-value storage for application configuration managed directly via the UI:
   - `reason`: Provenance of deletion (`'user'`, `'auto-expired'`, `'no-track-match'`, `'legacy'`).
   - Suppression expiry & unblocking: Undated suppressions expire after 120 days. Auto-expired suppressions are automatically lifted if a re-scan finds a new future closing date (`F4`). User-initiated deletions are never unblocked.
 - **`pending_file_purges`**: Retry queue (`id`, `tender_id`, `target_path`, `reason`, `attempts`, `last_error`, `created_at`) for dossier folders locked by Windows file handles at deletion time (`dossierStore.ts`).
+
+---
+
+### 8. `tenders_fts` (SQLite FTS5 Virtual Table)
+External-content full-text search index (`content='tenders'`, `content_rowid='rowid'`, `tokenize='unicode61 remove_diacritics 2'`) indexing `title`, `organization`, `reference_no`, `portal_name`, `description`, and `extracted_text` (text extracted from downloaded digital PDFs, DOCX files, and OCR summaries).
+- Maintained automatically on all inserts, deletes, and updates via SQLite triggers (`tenders_fts_ai`, `tenders_fts_ad`, `tenders_fts_au`).
+- Queried safely through `buildFts5PrefixQuery` in `src/server/db/repositories/tendersRepo.ts`, with substring and MiniLM semantic similarity fallbacks so punctuation-heavy queries (`C++`, `2026-27`) never fail.

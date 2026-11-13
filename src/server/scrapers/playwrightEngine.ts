@@ -1,7 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
-import { updatePortalHealth, getPortalHealthList, SESSIONS_DIR } from '../db.js';
+import { updatePortalHealth, getPortalHealthList, SESSIONS_DIR } from '../db/index.js';
 import { PORTAL_DEFINITIONS } from './portalList.js';
 
 if (!fs.existsSync(SESSIONS_DIR)) {

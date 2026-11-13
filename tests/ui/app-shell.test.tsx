@@ -1,9 +1,8 @@
-import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { AppShell } from '../../src/components/AppShell.js';
-import type { ScanStatus } from '../../src/types.js';
+import { AppShell } from '../../src/client/components/AppShell.js';
+import type { ScanStatus } from '../../src/shared/types.js';
 
 describe('AppShell component', () => {
   const idleScan: ScanStatus = {
@@ -197,5 +196,51 @@ describe('AppShell component', () => {
     // Indicator dot should carry bg-danger for stale scans (>= 24h)
     const dangerDot = container.querySelector('.bg-danger');
     expect(dangerDot).toBeInTheDocument();
+  });
+
+  it('Plan C & D: triggers deep scan and displays active parallel worker portals', async () => {
+    const user = userEvent.setup();
+    const handleRunDeepScan = vi.fn();
+
+    const { rerender } = render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        onRunDeepScan={handleRunDeepScan}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    const deepBtn = screen.getByRole('button', { name: /Run deep multi-page scan/i });
+    await user.click(deepBtn);
+    expect(handleRunDeepScan).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...idleScan,
+          isScanning: true,
+          currentPortal: 'Punjab PPRA',
+          activePortals: ['punjab_eproc', 'epads', 'kp_ppra'],
+          progressPercent: 35
+        }}
+        onRunScan={vi.fn()}
+        onRunDeepScan={handleRunDeepScan}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByTestId('active-workers')).toHaveTextContent('Workers (3): punjab_eproc, epads, kp_ppra');
+    expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toBeDisabled();
   });
 });

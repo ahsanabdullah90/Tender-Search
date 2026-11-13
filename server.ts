@@ -6,15 +6,17 @@ import {
   initDatabase,
   reScoreTendersAgainstTracks,
   db
-} from './src/server/db.js';
-import { initStartupScheduler, stopStartupScheduler } from './src/server/scheduler.js';
-import { initEmbeddingModel } from './src/server/embeddingService.js';
-import { backfillModelEmbeddings } from './src/server/embeddingBackfill.js';
+} from './src/server/db/index.js';
+import { initStartupScheduler, stopStartupScheduler } from './src/server/services/scheduler.js';
+import { initEmbeddingModel } from './src/server/services/embeddingService.js';
+import { backfillModelEmbeddings } from './src/server/services/embeddingBackfill.js';
 import { apiRouter } from './src/server/routes/index.js';
-import { initSessionLogger, closeSessionLogger, requestLoggerMiddleware } from './src/server/logger.js';
+import { initSessionLogger, closeSessionLogger, requestLoggerMiddleware } from './src/server/services/logger.js';
+import { terminateLocalOcrWorker } from './src/server/services/localOcrService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const projectRoot = path.basename(__dirname) === 'dist-server' ? path.resolve(__dirname, '..') : __dirname;
 
 export function createApp(): express.Express {
   const app = express();
@@ -43,7 +45,9 @@ export async function startServer() {
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   const HOST = process.env.HOST || '127.0.0.1';
 
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
+
+  if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -52,7 +56,7 @@ export async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(__dirname, 'dist');
+    const distPath = path.resolve(projectRoot, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       if (req.path.startsWith('/api/')) {
@@ -70,6 +74,7 @@ export async function startServer() {
   const handleExit = () => {
     console.log('\n[Tender Tracker] Shutting down cleanly...');
     stopStartupScheduler();
+    void terminateLocalOcrWorker();
     try {
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.close();
@@ -91,7 +96,8 @@ const isDirectRun = Boolean(
   process.argv[1] &&
   (fileURLToPath(import.meta.url) === path.resolve(process.argv[1]) ||
    process.argv[1].endsWith('server.ts') ||
-   process.argv[1].endsWith('server.js'))
+   process.argv[1].endsWith('server.js') ||
+   process.argv[1].endsWith('server.mjs'))
 );
 
 /* v8 ignore next 3 - direct execution branch is impossible by construction when imported by Vitest */

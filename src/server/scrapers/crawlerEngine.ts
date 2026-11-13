@@ -6,27 +6,28 @@ import {
   getPortalHealthList,
   getAppSetting,
   setAppSetting,
-  seedSampleTendersIfEmpty
-} from '../db.js';
+  seedSampleTendersIfEmpty,
+  getKnownTenderMapForPortal
+} from '../db/index.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { getHumanJitterDelay, HUMAN_CHROME_HEADERS } from './baseScraper.js';
-import { ScanStatus } from '../../types.js';
-import { extractTenderListFromHtmlWithAI } from '../ocrService.js';
+import { ScanStatus, ScraperErrorCode, ScanDepth, DomainTrack } from '../../shared/types.js';
+import { extractTenderListFromHtmlWithAI } from '../services/ocrService.js';
 import {
   beginScanBudget,
   endScanBudget,
   getActiveScanBudget
-} from '../ingestBudget.js';
+} from '../services/ingestBudget.js';
 import {
   formatClosingDate,
   extractDatesFromText
 } from './dateParser.js';
 import {
   crawlerDeps,
-  fetchHtmlSmart
+  fetchHtmlSmart,
+  postFormSmart
 } from './crawlerDeps.js';
 import {
-  RawScrapedItem,
   ScrapeResult,
   parsePortalHtml,
   sanitizeScrapedItems,
@@ -34,7 +35,8 @@ import {
   hasProcurementSignals,
   compactHtmlForAiExtraction,
   isGenericListingUrl,
-  resolvePortalUrl
+  resolvePortalUrl,
+  buildAspNetPostBackBody
 } from './portalParsers.js';
 import {
   shouldTriggerAutoHeal,
@@ -85,7 +87,8 @@ export {
   parsePortalHtml,
   compactHtmlForAiExtraction,
   hasEmptyTenderTableState,
-  hasProcurementSignals
+  hasProcurementSignals,
+  buildAspNetPostBackBody
 } from './portalParsers.js';
 
 export {
@@ -134,6 +137,8 @@ export {
 export let currentScanStatus: ScanStatus = {
   isScanning: false,
   currentPortal: null,
+  activePortals: [],
+  scanDepth: 'quick',
   progressPercent: 0,
   completedPortals: 0,
   totalPortals: PORTAL_DEFINITIONS.length,
@@ -189,7 +194,8 @@ export function getActivePortalsList(targetPortalId?: string): PortalDefinition[
         verifiedStatus: dbP.verified_status || def?.verifiedStatus || 'Active',
         sessionCookies: dbP.session_cookies || undefined,
         description: def?.description || '',
-        defaultKeywords: def?.defaultKeywords || []
+        defaultKeywords: def?.defaultKeywords || [],
+        pagination: def?.pagination
       };
     });
   } else {
@@ -203,23 +209,175 @@ export function getActivePortalsList(targetPortalId?: string): PortalDefinition[
   return list;
 }
 
+export const HTTP_PORTAL_CONCURRENCY = 3;
+export const PLAYWRIGHT_PORTAL_CONCURRENCY = 1;
+
 /**
- * Executes a full scan across all active portals or a single target portal
+ * Classifies an uncaught scraper failure into a compact diagnostic category for portal_health.last_error_code.
  */
-export async function startCrawlerScan(targetPortalId?: string, awaitCompletion: boolean = false): Promise<ScanStatus> {
+export function classifyScraperError(err: any): ScraperErrorCode {
+  const status = Number(err?.statusCode ?? err?.status ?? 0);
+  const msg = `${err?.code ?? ''} ${err?.name ?? ''} ${err?.message ?? err ?? ''}`;
+
+  if (/\b(timeout|timed out|ETIMEDOUT|ESOCKETTIMEDOUT|AbortError)\b/i.test(msg)) {
+    return 'TIMEOUT';
+  }
+  if (/ssl|tls|CERT_|ERR_TLS|wrong version number|unable to verify|self[- ]signed|handshake/i.test(msg)) {
+    return 'TLS_ERROR';
+  }
+  if (/cloudflare|turnstile|captcha|just a moment|verification challenge/i.test(msg)) {
+    return 'CLOUDFLARE_HITL';
+  }
+  if (/login|unauthorized|credentials|authentication required/i.test(msg)) {
+    return 'LOGIN_REQUIRED';
+  }
+  if ((status >= 400 && status < 600) || /\b(?:HTTP|status(?: code)?)\s*[45]\d{2}\b/i.test(msg)) {
+    return 'HTTP_4XX_5XX';
+  }
+  if (/parse|selector|empty|0 tenders/i.test(msg)) {
+    return 'PARSE_EMPTY';
+  }
+  return 'NETWORK_UNREACHABLE';
+}
+
+/**
+ * Runs work across `items` with a bounded pool of `concurrency` async workers.
+ * Each item runs inside its own worker invocation so failures should be handled per item.
+ */
+export async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return;
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  let nextIdx = 0;
+
+  const runners = Array.from({ length: limit }, async () => {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= items.length) break;
+      await worker(items[idx]);
+    }
+  });
+
+  await Promise.all(runners);
+}
+
+function updateActivePortalsState(activeSet: Set<string>) {
+  const active = Array.from(activeSet);
+  currentScanStatus.activePortals = active;
+  currentScanStatus.currentPortal = active[0] ?? null;
+  broadcastProgress();
+}
+
+async function scanSinglePortal(
+  portal: PortalDefinition,
+  activeTracks: DomainTrack[],
+  depth: ScanDepth,
+  activeSet: Set<string>,
+  totalPortals: number
+): Promise<void> {
+  activeSet.add(portal.name);
+  updateActivePortalsState(activeSet);
+  updatePortalHealth(portal.id, { status: 'scanning' });
+
+  try {
+    const scrapeResult = await scrapePortal(portal, { depth });
+
+    if (scrapeResult.hitlRequired) {
+      updatePortalHealth(portal.id, {
+        status: 'hitl_required',
+        last_scan_at: new Date().toISOString(),
+        last_error_code: scrapeResult.isLoginRequired ? 'LOGIN_REQUIRED' : 'CLOUDFLARE_HITL',
+        last_error_message: scrapeResult.isLoginRequired
+          ? 'Login credentials or active session required'
+          : 'Verification challenge detected (Cloudflare Turnstile or CAPTCHA)'
+      });
+    } else {
+      const rawItems = scrapeResult.items;
+      let itemsMatched = 0;
+      const budgetNow = getActiveScanBudget();
+      if (budgetNow) {
+        currentScanStatus.documentsDeferred = budgetNow.documentsDeferred;
+        currentScanStatus.visionDeferred = budgetNow.visionDeferred;
+      }
+
+      for (const item of rawItems) {
+        try {
+          const result = await processAndSaveTender(item, portal, activeTracks);
+          if (result.isNew) currentScanStatus.newTendersFound++;
+          if (result.hasCorrigendum) currentScanStatus.corrigendaFound++;
+          if (result.matched) itemsMatched++;
+          if (result.awaitingScope) currentScanStatus.heldForScope = (currentScanStatus.heldForScope || 0) + 1;
+        } catch (itemErr: any) {
+          console.warn(`[Crawler] Failed saving item from ${portal.id}:`, itemErr.message);
+        }
+      }
+
+      // Consecutive zero yields tracks raw items count (website structure/selector failure), not keyword match rate
+      const health = getPortalById(portal.id);
+      const currentZeros = health?.consecutive_zero_yields || 0;
+      const newZeros = rawItems.length === 0 ? currentZeros + 1 : 0;
+      const nextStatus = newZeros >= 3 ? 'selector_broken' : 'online';
+
+      const nowIso = new Date().toISOString();
+      updatePortalHealth(portal.id, {
+        status: nextStatus,
+        last_scan_at: nowIso,
+        last_success_at: nowIso,
+        last_items_found: itemsMatched,
+        consecutive_zero_yields: newZeros,
+        pages_scanned: scrapeResult.pagesScanned || 1,
+        last_error_code: rawItems.length === 0 ? 'PARSE_EMPTY' : null,
+        last_error_message: rawItems.length === 0
+          ? '0 tenders found on page — check website URL manually if active tenders are expected'
+          : null
+      });
+    }
+  } catch (err: any) {
+    console.error(`[Crawler] Error scanning portal ${portal.id}:`, err.message || err);
+    updatePortalHealth(portal.id, {
+      status: 'error',
+      last_scan_at: new Date().toISOString(),
+      last_items_found: 0,
+      last_error_code: classifyScraperError(err),
+      last_error_message: err.message || 'Scrape connection failure'
+    });
+  } finally {
+    activeSet.delete(portal.name);
+    currentScanStatus.completedPortals++;
+    currentScanStatus.progressPercent = Math.round((currentScanStatus.completedPortals / Math.max(1, totalPortals)) * 100);
+    updateActivePortalsState(activeSet);
+  }
+}
+
+/**
+ * Executes a full scan across all active portals or a single target portal.
+ * Multi-portal scans run HTTP portals concurrently (up to HTTP_PORTAL_CONCURRENCY)
+ * and Playwright portals sequentially (PLAYWRIGHT_PORTAL_CONCURRENCY) for stability.
+ */
+export async function startCrawlerScan(
+  targetPortalId?: string,
+  awaitCompletion: boolean = false,
+  options?: { depth?: ScanDepth }
+): Promise<ScanStatus> {
   if (currentScanStatus.isScanning) {
     return currentScanStatus;
   }
 
+  const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
   const allPortals = getActivePortalsList(targetPortalId);
   // In automated full scans, skip offline_broken portals unless explicitly triggered individually
-  const portalsToScan = targetPortalId 
-    ? allPortals 
+  const portalsToScan = targetPortalId
+    ? allPortals
     : allPortals.filter(p => p.accessMode !== 'offline_broken');
 
   currentScanStatus = {
     isScanning: true,
     currentPortal: null,
+    activePortals: [],
+    scanDepth: depth,
     progressPercent: 0,
     completedPortals: 0,
     totalPortals: portalsToScan.length,
@@ -233,99 +391,44 @@ export async function startCrawlerScan(targetPortalId?: string, awaitCompletion:
   const scanExecution = async () => {
     // Per-scan document budget: time for upfront fetches and a Gemini Vision call cap (docs/13 §3.2).
     beginScanBudget();
+    const activeSet = new Set<string>();
     try {
       const activeTracks = getAllDomainTracks().filter(t => t.is_active === 1);
+      const total = portalsToScan.length;
 
-      for (let i = 0; i < portalsToScan.length; i++) {
-        const portal = portalsToScan[i];
-        currentScanStatus.currentPortal = portal.name;
-        currentScanStatus.progressPercent = Math.round((i / portalsToScan.length) * 100);
-        broadcastProgress();
-
-        // Update portal state to scanning
-        updatePortalHealth(portal.id, { status: 'scanning' });
-
-        try {
-          const scrapeResult = await scrapePortal(portal);
-
-          if (scrapeResult.hitlRequired) {
-            updatePortalHealth(portal.id, {
-              status: 'hitl_required',
-              last_scan_at: new Date().toISOString(),
-              last_error_message: scrapeResult.isLoginRequired
-                ? 'Login credentials or active session required'
-                : 'Verification challenge detected (Cloudflare Turnstile or CAPTCHA)'
-            });
-          } else {
-            const rawItems = scrapeResult.items;
-            let itemsMatched = 0;
-            const budgetNow = getActiveScanBudget();
-            if (budgetNow) {
-              currentScanStatus.documentsDeferred = budgetNow.documentsDeferred;
-              currentScanStatus.visionDeferred = budgetNow.visionDeferred;
-            }
-
-            for (const item of rawItems) {
-              try {
-                const result = await processAndSaveTender(item, portal, activeTracks);
-                if (result.isNew) currentScanStatus.newTendersFound++;
-                if (result.hasCorrigendum) currentScanStatus.corrigendaFound++;
-                if (result.matched) itemsMatched++;
-                if (result.awaitingScope) currentScanStatus.heldForScope = (currentScanStatus.heldForScope || 0) + 1;
-              } catch (itemErr: any) {
-                console.warn(`[Crawler] Failed saving item from ${portal.id}:`, itemErr.message);
-              }
-            }
-
-            // Consecutive zero yields tracks raw items count (website structure/selector failure), not keyword match rate
-            const health = getPortalById(portal.id);
-            const currentZeros = health?.consecutive_zero_yields || 0;
-            const newZeros = rawItems.length === 0 ? currentZeros + 1 : 0;
-            const nextStatus = newZeros >= 3 ? 'selector_broken' : 'online';
-
-            const nowIso = new Date().toISOString();
-            updatePortalHealth(portal.id, {
-              status: nextStatus,
-              last_scan_at: nowIso,
-              last_success_at: nowIso,
-              last_items_found: itemsMatched,
-              consecutive_zero_yields: newZeros,
-              pages_scanned: scrapeResult.pagesScanned || 1,
-              last_error_message: rawItems.length === 0
-                ? '0 tenders found on page — check website URL manually if active tenders are expected'
-                : null
-            });
-          }
-        } catch (err: any) {
-          console.error(`[Crawler] Error scanning portal ${portal.id}:`, err.message || err);
-          updatePortalHealth(portal.id, {
-            status: 'error',
-            last_scan_at: new Date().toISOString(),
-            last_items_found: 0,
-            last_error_message: err.message || 'Scrape connection failure'
-          });
+      if (portalsToScan.length <= 1) {
+        for (const portal of portalsToScan) {
+          await scanSinglePortal(portal, activeTracks, depth, activeSet, total);
         }
+      } else {
+        const httpPortals = portalsToScan.filter(p => p.tier !== 'playwright');
+        const pwPortals = portalsToScan.filter(p => p.tier === 'playwright');
 
-        currentScanStatus.completedPortals = i + 1;
-        currentScanStatus.progressPercent = Math.round(((i + 1) / portalsToScan.length) * 100);
-        broadcastProgress();
-
-        // Human-like pause before next portal if more remain
-        if (i < portalsToScan.length - 1) {
-          const delay = getHumanJitterDelay(2000, 4500);
-          await crawlerDeps.sleep(delay);
-        }
+        await Promise.all([
+          runWithConcurrency(httpPortals, HTTP_PORTAL_CONCURRENCY, async portal => {
+            await scanSinglePortal(portal, activeTracks, depth, activeSet, total);
+            await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
+          }),
+          runWithConcurrency(pwPortals, PLAYWRIGHT_PORTAL_CONCURRENCY, async portal => {
+            await scanSinglePortal(portal, activeTracks, depth, activeSet, total);
+            await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
+          })
+        ]);
       }
     } finally {
       const budget = endScanBudget();
       currentScanStatus.documentsDeferred = budget?.documentsDeferred ?? 0;
       currentScanStatus.visionDeferred = budget?.visionDeferred ?? 0;
       currentScanStatus.isScanning = false;
+      currentScanStatus.activePortals = [];
       currentScanStatus.currentPortal = null;
       currentScanStatus.lastScanTimestamp = new Date().toISOString();
       currentScanStatus.progressPercent = 100;
       if (!targetPortalId) {
         setAppSetting('last_full_scan_at', currentScanStatus.lastScanTimestamp);
+        if (depth === 'deep') {
+          setAppSetting('last_deep_scan_at', currentScanStatus.lastScanTimestamp);
+        }
       }
       broadcastProgress();
     }
@@ -340,14 +443,25 @@ export async function startCrawlerScan(targetPortalId?: string, awaitCompletion:
   }
 }
 
+function normalizeClosingDayForEarlyStop(value?: string | null): string {
+  if (!value) return '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  const formatted = formatClosingDate(value);
+  return formatted && /^\d{4}-\d{2}-\d{2}/.test(formatted) ? formatted.slice(0, 10) : value.trim().toLowerCase();
+}
+
 /**
  * Scrapes a portal via Playwright headless (if tier === 'playwright') with fallback to tolerant HTTP/Cheerio (Bug B1),
  * enhanced with Self-Healing Phase 2 (Adaptive AI Layout Extraction) and strictly gated Phase 3 (Auto-Healer on dead links only).
  */
-export async function scrapePortal(portal: PortalDefinition & { sessionCookies?: string }): Promise<ScrapeResult> {
+export async function scrapePortal(
+  portal: PortalDefinition & { sessionCookies?: string },
+  options?: { depth?: ScanDepth }
+): Promise<ScrapeResult> {
   let html: string | null = null;
   let fetchError: any = null;
   let redirectedUrl: string | null = null;
+  let responseCookies: string | undefined = portal.sessionCookies;
   let playwrightError: Error | null = null;
 
   if (portal.tier === 'playwright') {
@@ -359,7 +473,8 @@ export async function scrapePortal(portal: PortalDefinition & { sessionCookies?:
         try {
           browser = await playwright.chromium
             .launch({ headless: true, channel: 'chromium' })
-            .catch(() => playwright.chromium.launch({ headless: true }));
+            .catch(() => playwright.chromium.launch({ headless: true }))
+            .catch(() => playwright.chromium.launch({ headless: true, channel: 'msedge' }));
           const context = await browser.newContext({
             ignoreHTTPSErrors: true,
             userAgent: HUMAN_CHROME_HEADERS['User-Agent']
@@ -393,6 +508,7 @@ export async function scrapePortal(portal: PortalDefinition & { sessionCookies?:
       try {
         const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies);
         html = fetched.html;
+        if (fetched.cookies) responseCookies = fetched.cookies;
         if (fetched.finalUrl && fetched.finalUrl !== portal.tendersUrl) {
           redirectedUrl = fetched.finalUrl;
         }
@@ -455,14 +571,24 @@ export async function scrapePortal(portal: PortalDefinition & { sessionCookies?:
     }
   }
 
-  // Pagination loop (docs/15 F1): read subsequent listing pages up to maxPages
+  // Two-speed pagination (quick vs deep) + DB early-stop when page >= 2 repeats already-known unchanged notices
+  const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
+  const maxPages = portal.pagination
+    ? (depth === 'deep'
+        ? (portal.pagination.deepMaxPages ?? portal.pagination.maxPages)
+        : (portal.pagination.quickMaxPages ?? portal.pagination.maxPages))
+    : 1;
   let pagesScanned = 1;
-  if (portal.pagination && portal.pagination.maxPages > 1 && !result.hitlRequired && result.items.length > 0) {
-    const maxPages = portal.pagination.maxPages;
+  if (portal.pagination && maxPages > 1 && !result.hitlRequired && result.items.length > 0) {
     const seenUrls = new Set(result.items.map(it => (it.directUrl || it.title).toLowerCase()));
+    const knownMap = depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null;
+    let currentPageHtml = html;
+    let currentCookies = responseCookies;
 
     for (let page = 2; page <= maxPages; page++) {
-      let pageUrl: string;
+      let pageUrl = portal.tendersUrl;
+      let postBody: string | null = null;
+
       if (portal.pagination.kind === 'query') {
         try {
           const u = new URL(portal.tendersUrl);
@@ -473,14 +599,21 @@ export async function scrapePortal(portal: PortalDefinition & { sessionCookies?:
         }
       } else if (portal.pagination.kind === 'path') {
         pageUrl = (portal.pagination.pathPattern || `${portal.tendersUrl}/{page}`).replace('{page}', String(page));
+      } else if (portal.pagination.kind === 'postback') {
+        postBody = buildAspNetPostBackBody(currentPageHtml, page);
+        if (!postBody) break;
       } else {
         break;
       }
 
       try {
         await crawlerDeps.sleep(getHumanJitterDelay(1500, 3000));
-        const pageFetched = await fetchHtmlSmart(pageUrl, portal.sessionCookies);
+        const pageFetched = postBody
+          ? await postFormSmart(pageUrl, postBody, currentCookies)
+          : await fetchHtmlSmart(pageUrl, currentCookies);
         if (!pageFetched.html) break;
+        currentPageHtml = pageFetched.html;
+        if (pageFetched.cookies) currentCookies = pageFetched.cookies;
 
         const pageParsed = parsePortalHtml(pageFetched.html, portal);
         const cleanPageItems = sanitizeScrapedItems(pageParsed.items, portal);
@@ -490,6 +623,7 @@ export async function scrapePortal(portal: PortalDefinition & { sessionCookies?:
         }
 
         let newOnThisPage = 0;
+        let allKnownAndUnchanged = Boolean(knownMap && knownMap.size > 0);
         for (const item of cleanPageItems) {
           const key = (item.directUrl || item.title).toLowerCase();
           if (!seenUrls.has(key)) {
@@ -497,12 +631,28 @@ export async function scrapePortal(portal: PortalDefinition & { sessionCookies?:
             result.items.push(item);
             newOnThisPage++;
           }
+          if (allKnownAndUnchanged && knownMap) {
+            const known = knownMap.get(key);
+            if (!known || item.isCorrigendum) {
+              allKnownAndUnchanged = false;
+            } else {
+              const incomingClosing = normalizeClosingDayForEarlyStop(item.closingDate);
+              const storedClosing = normalizeClosingDayForEarlyStop(known.closing_date);
+              if (incomingClosing !== storedClosing) {
+                allKnownAndUnchanged = false;
+              }
+            }
+          }
         }
 
         if (newOnThisPage === 0) {
           break; // Stop when page yields only items already seen
         }
         pagesScanned++;
+        if (allKnownAndUnchanged) {
+          // Quick scan caught up to already-indexed unchanged pages in SQLite
+          break;
+        }
       } catch {
         // A network or parse error on subsequent pages must not fail the entire scrape
         break;
@@ -578,7 +728,7 @@ export function seedRealisticTenders() {
       organization: 'Punjab Energy Department / Punjab eProc',
       portalId: 'punjab_eproc',
       portalName: 'Punjab PPRA (eproc.punjab.gov.pk)',
-      directUrl: 'http://eproc.punjab.gov.pk/ActiveTenders.aspx',
+      directUrl: 'https://eproc.punjab.gov.pk/ActiveTenders.aspx',
       closingDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000 + 4 * 3600 * 1000).toISOString(),
       estimatedValue: 'PKR 85,000,000',
       location: 'Multan & Bahawalpur, Punjab',

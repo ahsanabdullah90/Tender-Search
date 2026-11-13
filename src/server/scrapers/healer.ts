@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
-import { updatePortalHealth } from '../db.js';
-import { discoverTenderLinkWithAI, extractTenderListFromHtmlWithAI } from '../ocrService.js';
+import { updatePortalHealth } from '../db/index.js';
+import { discoverTenderLinkWithAI, extractTenderListFromHtmlWithAI } from '../services/ocrService.js';
 import {
   RawScrapedItem,
   ScrapeResult,

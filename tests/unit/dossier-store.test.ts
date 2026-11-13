@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { db, initDatabase, DOSSIERS_DIR } from '../../src/server/db.js';
+import { db, initDatabase, DOSSIERS_DIR } from '../../src/server/db/index.js';
 import {
   inferDocType,
   deriveRefSlug,
@@ -12,7 +12,7 @@ import {
   retryPendingFilePurges,
   reconcileDossiers,
   TRASH_DIR
-} from '../../src/server/dossierStore.js';
+} from '../../src/server/services/dossierStore.js';
 
 describe('dossierStore', () => {
   const testTenderId = 'tender-dossier-store-test-1';

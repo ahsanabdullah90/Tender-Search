@@ -59,7 +59,7 @@
 - **Context**: Code and live database audits (archived in `docs/archive/15-fundamental-logic-issues.md` and `docs/archive/16-deep-audit-logic-flaws.md`) identified critical vulnerabilities: re-scans switching pipeline tenders to staging and deleting them (A1), lone dates treated as deadlines (A6), fake reference collisions merging unrelated tenders (F3), generic tenders discarded before reading attachments (F2), and portal single-page limits missing opportunities (F1).
 - **Decision**:
   1. **Identity & Re-scan Safety**: Check deterministic `tenderId` before deduplication. Existing rows take the re-scan path: never re-staged, never deleted, pipeline stages/notes preserved unconditionally. Deadline changes route exclusively through `applyRescannedDeadline` (extensions log corrigenda; earlier dates set `needs_review = 1`).
-  2. **Strict Reference Validation & Deduplication**: Centralize reference rules in `src/server/referenceNo.ts` with column `reference_norm`. Strip dates/URLs/generic words. Deduplication Tier 1 requires corroboration unless references are long and structured. Tier 2 excludes own portal and enforces `titlesAreDistinguishable` (1–2 differing key words prevent merge).
+  2. **Strict Reference Validation & Deduplication**: Centralize reference rules in `src/server/services/referenceNo.ts` with column `reference_norm`. Strip dates/URLs/generic words. Deduplication Tier 1 requires corroboration unless references are long and structured. Tier 2 excludes own portal and enforces `titlesAreDistinguishable` (1–2 differing key words prevent merge).
   3. **Hold-for-Scope (`awaiting_scope`)**: Unmatched listings containing document candidates are held as `awaiting_scope` while the background worker reads up to 2 documents. If positive track keywords match, they are released to `ready`; otherwise suppressed.
   4. **Multi-Page Pagination & Safe Retries**: Add pagination configs to `portalList.ts`. Loop pages up to `maxPages`, stop on empty or known items, record `pages_scanned`. On fetch timeouts, retry up to 2 times with backoff (30s, 2m) and never trigger Auto-Heal.
   5. **Standardized Limits**: Unified 90-day undated ageing limit (`UNDATED_MAX_AGE_DAYS = 90`). 120-day suppression expiry with automatic lift if future deadline reappears. Daily AI text budget (`ingest_ai_text_calls_per_day = 150`).
@@ -76,10 +76,10 @@
      - `src/server/scrapers/ingestPipeline.ts`: Deterministic ID generation, deduplication, rescan handling, staging/scope holds, and upfront verification.
      - Keep `crawlerEngine.ts` as a thin orchestrator (434 lines) and public facade re-exporting all existing symbols.
   2. **Frontend UI Decomposition**: Decompose `InboxScreen.tsx` into modular UI components:
-     - `src/components/inbox/Detail.tsx`: Slideover/detail pane managing countdowns, provenance badges, AI extraction, note auto-saving, attachment previews.
-     - `src/components/inbox/AddTenderModal.tsx`: Dedicated modal for AI-assisted file extraction and manual tender creation.
-     - `src/components/inbox/TenderRow.tsx`: Self-contained inbox card row.
-     - `src/components/inbox/index.ts`: Unified barrel exports.
+     - `src/client/components/inbox/Detail.tsx`: Slideover/detail pane managing countdowns, provenance badges, AI extraction, note auto-saving, attachment previews.
+     - `src/client/components/inbox/AddTenderModal.tsx`: Dedicated modal for AI-assisted file extraction and manual tender creation.
+     - `src/client/components/inbox/TenderRow.tsx`: Self-contained inbox card row.
+     - `src/client/components/inbox/index.ts`: Unified barrel exports.
      - Retain re-exports of `{ Detail, deadlineProvenance, humanReviewReason, asList, useTick }` from `InboxScreen.tsx` for zero regressions in `PipelineScreen` and UI tests.
 - **Consequences**: Architectural design score elevated to 9.7/10. 100% backward compatibility, zero breaking changes, all 525 Vitest tests and Vite build passing.
 
@@ -87,7 +87,7 @@
 - **Context**: Track matching and duplicate detection use 384-dimensional `all-MiniLM-L6-v2` embeddings. Default cosine similarity thresholds (0.58 for track match, 0.88 for duplicate grouping) required calibration on labeled evaluation datasets to satisfy `MATCH-5` and `DED-7`. Furthermore, procurement packages from the same agency divided into distinct Lots (e.g., `Lot 1: Laptops` vs `Lot 2: Switches`) shared high semantic similarity ($0.913$) risking accidental false-merging.
 - **Decision**:
   1. **Labeled Calibration Sets**: Created `tests/fixtures/calibration/trackMatchPairs.ts` (50 labeled tender↔track pairs across 6 domains + negative cross-domain pairs) and `tests/fixtures/calibration/duplicatePairs.ts` (30 labeled tender pairs).
-  2. **Multi-Lot Distinguishability Guard**: Updated `titlesAreDistinguishable` in `src/server/deduplicator.ts` to detect differing lot, package, phase, or part identifiers via regex (`/\b(?:lot|package|pkg|phase|part)\s*[-:]?\s*([0-9a-z]+)\b/gi`), strictly marking multi-lot contracts as distinguishable regardless of high semantic similarity.
+  2. **Multi-Lot Distinguishability Guard**: Updated `titlesAreDistinguishable` in `src/server/services/deduplicator.ts` to detect differing lot, package, phase, or part identifiers via regex (`/\b(?:lot|package|pkg|phase|part)\s*[-:]?\s*([0-9a-z]+)\b/gi`), strictly marking multi-lot contracts as distinguishable regardless of high semantic similarity.
   3. **Verification**: Proved in `tests/unit/semantic-calibration.test.ts`:
      - `MATCH-5`: Track matching achieved $\text{Precision} = 100.0\%$, $\text{Recall} = 92.0\%$, and $\mathbf{\text{F1} = 95.83\%}$ (exceeding $\ge 90.0\%$ standard), with 0 false positives.
      - `DED-7`: Duplicate detection achieved $\mathbf{\text{False-Merge Rate} = 0.00\%}$ and $\text{Precision} = 100.0\%$.
@@ -144,7 +144,7 @@
 - **Deep Audit & Fundamental Ingest Logic Resolution**:
   - Resolved all 23 deep audit logic flaws (A1–A11, B1–B8, C1–C4) and all 7 fundamental issues (F1–F7) (archived in `docs/archive/`).
   - Implemented dedicated re-scan path preventing pipeline status and notes corruption.
-  - Implemented strict reference validation (`src/server/referenceNo.ts`), `reference_norm` column, and strict deduplication distinction guards (`deduplicator.ts`).
+  - Implemented strict reference validation (`src/server/services/referenceNo.ts`), `reference_norm` column, and strict deduplication distinction guards (`deduplicator.ts`).
   - Added multi-page crawler pagination (`portalList.ts`, `crawlerEngine.ts`) with `pages_scanned` and `last_success_at` metrics.
   - Implemented `awaiting_scope` workflow for document-scoped opportunity discovery.
   - Added token-boundary keyword matching (`trackMatcher.ts`) with plural inflection support.
@@ -166,7 +166,7 @@
 ### Version 1.3.0 (November 4, 2026)
 - **Self-Healing Scraper & 5-Step Autonomous URL Discovery**:
   - Implemented `healPortalConnection()`, `scoreCandidateTenderLinks()`, `compactHtmlForAiExtraction()`, and `fetchHtmlWithMetadata()` in `src/server/scrapers/crawlerEngine.ts`.
-  - Added `extractTenderListFromHtmlWithAI()` and `discoverTenderLinkWithAI()` in `src/server/ocrService.ts`.
+  - Added `extractTenderListFromHtmlWithAI()` and `discoverTenderLinkWithAI()` in `src/server/services/ocrService.ts`.
   - Added BPPRA ePPS multi-row (`tr.tender-row-main` + sibling `tr.tender-row-dates`) table extractor and updated BPPRA to its live portal (`https://bpptwo.vdc.services:5451/Tenders`).
   - Expanded date parser (`DATE_CANDIDATE_PATTERN` and `closingLabelRegex`) to support hyphenated named-month dates (`04-Nov-2026`) and spaced `"Dead Line:"` labels.
 - **Portals UI Simplification & Error Diagnostics**:

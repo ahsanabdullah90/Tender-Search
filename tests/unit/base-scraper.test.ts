@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, HUMAN_CHROME_HEADERS } from '../../src/server/scrapers/baseScraper.js';
+import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, LEGACY_TLS_CIPHERS, isTlsFallbackError, HUMAN_CHROME_HEADERS } from '../../src/server/scrapers/baseScraper.js';
 
 describe('baseScraper utility module', () => {
   afterEach(() => {
@@ -56,8 +56,19 @@ describe('baseScraper utility module', () => {
 
       expect(legacySslTolerantAgent).toBeDefined();
       expect((legacySslTolerantAgent as any).options.rejectUnauthorized).toBe(false);
-      expect((legacySslTolerantAgent as any).options.ciphers).toBe('DEFAULT:@SECLEVEL=0');
+      expect((legacySslTolerantAgent as any).options.ciphers).toBe(LEGACY_TLS_CIPHERS);
+      expect(LEGACY_TLS_CIPHERS).toContain('!ECDHE-RSA-AES256-SHA384');
+      expect(LEGACY_TLS_CIPHERS).toContain('!ECDHE-RSA-AES256-GCM-SHA384');
       expect((legacySslTolerantAgent as any).options.minVersion).toBe('TLSv1');
+    });
+  });
+
+  describe('isTlsFallbackError', () => {
+    it('detects wrong version number and TLS handshake errors', () => {
+      expect(isTlsFallbackError({ code: 'ERR_SSL_WRONG_VERSION_NUMBER', message: 'ssl3_get_record:wrong version number' })).toBe(true);
+      expect(isTlsFallbackError(new Error('EPROTO handshake failure'))).toBe(true);
+      expect(isTlsFallbackError(new Error('socket hang up'))).toBe(true);
+      expect(isTlsFallbackError(new Error('HTTP 404 Not Found'))).toBe(false);
     });
   });
 

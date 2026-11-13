@@ -1,12 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import { db, initDatabase, DOSSIERS_DIR, backupNow, getAllTenders } from '../src/server/db.js';
+import { db, initDatabase, DOSSIERS_DIR, backupNow } from '../src/server/db/index.js';
 import {
   generateCanonicalFilename,
   getPortalFileCode,
   inferDocType,
   reconcileDossiers
-} from '../src/server/dossierStore.js';
+} from '../src/server/services/dossierStore.js';
 import { slimPassedTenders } from '../src/server/db/repositories/tendersRepo.js';
 
 async function main() {

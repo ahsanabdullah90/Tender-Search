@@ -11,14 +11,17 @@ import {
   pruneDossiersForPassed,
   getGeminiApiKey,
   setAppSetting,
+  getAlertsDigest,
+  getDigestSettings,
+  updateDigestSettings,
   DOSSIERS_DIR
-} from '../db.js';
-import { CANDIDATE_MODELS, extractTenderFromImage } from '../ocrService.js';
-import { getEmbeddingEngineStatus } from '../embeddingService.js';
-import { listSessionLogs, readSessionLog, getCurrentSessionFilename } from '../logger.js';
-import { getRetentionStatus, runRetentionCycle } from '../retention.js';
-import { reconcileDossiers } from '../dossierStore.js';
-import { getIngestBudgetSettings, updateIngestBudgetSettings } from '../ingestBudget.js';
+} from '../db/index.js';
+import { CANDIDATE_MODELS, extractTenderFromImage } from '../services/ocrService.js';
+import { getEmbeddingEngineStatus } from '../services/embeddingService.js';
+import { listSessionLogs, readSessionLog, getCurrentSessionFilename } from '../services/logger.js';
+import { getRetentionStatus, runRetentionCycle } from '../services/retention.js';
+import { reconcileDossiers } from '../services/dossierStore.js';
+import { getIngestBudgetSettings, updateIngestBudgetSettings } from '../services/ingestBudget.js';
 
 export const systemRouter = Router();
 
@@ -118,32 +121,37 @@ systemRouter.get('/export/csv', (req, res) => {
 });
 
 // 3. Backups & Storage
-systemRouter.get('/backups', (req, res) => res.json(listBackups()));
+systemRouter.get('/backups', (_req, res) => res.json(listBackups()));
 
-systemRouter.post('/backups', async (req, res) => {
+systemRouter.post('/backups', async (_req, res) => {
   const backup = await backupNow();
   if (!backup) return res.status(500).json({ error: 'Backup failed' });
   res.json(backup);
 });
 
-systemRouter.get('/storage', (req, res) => {
+systemRouter.get('/storage', (_req, res) => {
   const key = getGeminiApiKey();
   const maskedKey = key
     ? key.length > 8
       ? `${key.slice(0, 4)}••••${key.slice(-4)}`
       : '••••••••'
     : null;
+  const digestSettings = getDigestSettings();
   res.json({
     ...getStorageStats(),
     ai_configured: Boolean(key),
     ai_masked_key: maskedKey,
     session_logs: listSessionLogs(),
     retention: getRetentionStatus(),
-    ingest_budgets: getIngestBudgetSettings()
+    ingest_budgets: getIngestBudgetSettings(),
+    digest: {
+      settings: digestSettings,
+      summary: getAlertsDigest(digestSettings.withinHours)
+    }
   });
 });
 
-systemRouter.post('/dossiers/prune-passed', (req, res) => res.json(pruneDossiersForPassed()));
+systemRouter.post('/dossiers/prune-passed', (_req, res) => res.json(pruneDossiersForPassed()));
 
 // 3b. Ingest & Vision Budgets Configuration
 const handleGetIngestBudgets = (_req: any, res: any) => {
@@ -161,7 +169,7 @@ systemRouter.post('/ingest-budgets', handleUpdateIngestBudgets);
 systemRouter.post('/system/ingest-budgets', handleUpdateIngestBudgets);
 
 // 4. Google AI Studio (Gemini API) Configuration & Extraction Routes
-systemRouter.get('/ai/status', (req, res) => {
+systemRouter.get('/ai/status', (_req, res) => {
   const key = getGeminiApiKey();
   const maskedKey = key
     ? key.length > 8
@@ -212,7 +220,7 @@ systemRouter.post('/ai/extract-file', async (req, res) => {
 });
 
 // 5. Local Hybrid Embedding Engine Status
-systemRouter.get('/system/embedding-status', (req, res) => {
+systemRouter.get('/system/embedding-status', (_req, res) => {
   const engineStatus = getEmbeddingEngineStatus();
   let counts = { totalTenders: 0, indexedTenders: 0, modelIndexedTenders: 0 };
   try {
@@ -226,7 +234,7 @@ systemRouter.get('/system/embedding-status', (req, res) => {
 });
 
 // 6. Session Execution Logs (Strict Last 3 Retained)
-const handleListLogs = (req: any, res: any) => {
+const handleListLogs = (_req: any, res: any) => {
   res.json({
     currentSession: getCurrentSessionFilename(),
     sessions: listSessionLogs()
@@ -255,7 +263,7 @@ systemRouter.get('/logs/:filename', handleGetLogFile);
 systemRouter.get('/system/logs/:filename', handleGetLogFile);
 
 // 7. Automated Retention & Dossier Reconciliation
-const handleGetRetention = (req: any, res: any) => {
+const handleGetRetention = (_req: any, res: any) => {
   res.json(getRetentionStatus());
 };
 
@@ -287,3 +295,26 @@ systemRouter.post('/retention/settings', handleUpdateRetentionSettings);
 systemRouter.post('/system/retention/settings', handleUpdateRetentionSettings);
 systemRouter.post('/dossiers/reconcile', handleReconcileDossiers);
 systemRouter.post('/system/dossiers/reconcile', handleReconcileDossiers);
+
+// 8. Proactive 48h Closing Alerts & Daily Digest (Plan B)
+const handleGetDigest = (req: any, res: any) => {
+  const settings = getDigestSettings();
+  const hoursParam = req.query?.hours ? Number(req.query.hours) : settings.withinHours;
+  const summary = getAlertsDigest(Number.isFinite(hoursParam) ? hoursParam : 48);
+  res.json({ ...summary, settings });
+};
+
+const handleUpdateDigestSettings = (req: any, res: any) => {
+  const { enabled, webhookUrl, withinHours } = req.body || {};
+  const updated = updateDigestSettings({
+    ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {}),
+    ...(typeof webhookUrl === 'string' ? { webhookUrl } : {}),
+    ...(withinHours !== undefined ? { withinHours: Number(withinHours) } : {})
+  });
+  res.json({ success: true, settings: updated });
+};
+
+systemRouter.get('/digest', handleGetDigest);
+systemRouter.get('/system/digest', handleGetDigest);
+systemRouter.post('/digest/settings', handleUpdateDigestSettings);
+systemRouter.post('/system/digest/settings', handleUpdateDigestSettings);

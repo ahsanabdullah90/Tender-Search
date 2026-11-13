@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-server/
 coverage/
 .DS_Store
 *.log
@@ -15,6 +16,7 @@ data/dossiers/
 data/sessions/
 data/logs/
 data/models/
+data/tessdata/
 
 # Sample data for redesign work
 data-sample/

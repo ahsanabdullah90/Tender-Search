@@ -20,12 +20,21 @@ if %errorlevel% equ 0 (
     exit /b 0
 )
 
+:: Build production client + compiled server bundle if missing
+if not exist "dist\index.html" (
+    echo Building production UI and server bundle...
+    call npm run build
+) else if not exist "dist-server\server.mjs" (
+    echo Building compiled server bundle...
+    call npm run build:server
+)
+
 echo Starting server...
 :: Spawn background browser waiter that opens the tab as soon as port 3000 responds
 start "" powershell -WindowStyle Hidden -Command "$url = 'http://127.0.0.1:3000'; for ($i=0; $i -lt 30; $i++) { try { $r = [System.Net.WebRequest]::Create($url); $r.Timeout = 800; $resp = $r.GetResponse(); $resp.Close(); Start-Process $url; break } catch { Start-Sleep -Milliseconds 500 } }"
 
-:: Start application with live console output
-call npm run dev
+:: Start production server (use npm run dev for interactive development)
+call npm start
 
 if %errorlevel% neq 0 (
     echo.

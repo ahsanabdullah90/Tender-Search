@@ -1,14 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { createApp } from '../../server.js';
-import { db, initDatabase, LOGS_DIR } from '../../src/server/db.js';
+import { db, initDatabase } from '../../src/server/db/index.js';
 import { getPortalHealthList, savePortalCredentials } from '../../src/server/db/repositories/portalsRepo.js';
-import { tryConsumeDailyAiText, getDailyAiTextUsage } from '../../src/server/ingestBudget.js';
+import { tryConsumeDailyAiText, getDailyAiTextUsage } from '../../src/server/services/ingestBudget.js';
 import { setAppSetting, getAppSetting } from '../../src/server/db/repositories/systemRepo.js';
 import { findDedupCandidates } from '../../src/server/db/repositories/tendersRepo.js';
-import { findCanonicalMatch } from '../../src/server/deduplicator.js';
-import { processDocumentQueue } from '../../src/server/ingestWorker.js';
+import { processDocumentQueue } from '../../src/server/services/ingestWorker.js';
 import { currentScanStatus } from '../../src/server/scrapers/crawlerEngine.js';
 import { hasProcurementSignals } from '../../src/server/scrapers/portalParsers.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
@@ -58,7 +56,7 @@ describe('System Governance, Security & Operational Invariants', () => {
     });
 
     it('request logger middleware logs only method, path, status, and duration without headers or request body', async () => {
-      const loggerSource = fs.readFileSync(path.resolve(__dirname, '../../src/server/logger.ts'), 'utf8');
+      const loggerSource = fs.readFileSync(path.resolve(__dirname, '../../src/server/services/logger.ts'), 'utf8');
       // Verifies format: [HTTP] ${req.method} ${url} ${status} (${duration}ms)
       expect(loggerSource).toContain('[HTTP] ${req.method} ${url} ${status} (${duration}ms)');
       // Logger middleware must never serialize req.body or req.headers into the log line
@@ -161,6 +159,19 @@ describe('System Governance, Security & Operational Invariants', () => {
       expect(scriptContent).toContain('TenderTrackerAutoStart');
       expect(scriptContent).toContain('-AtLogOn');
       expect(scriptContent).toContain('launch.cmd');
+    });
+
+    it('Plan E (#6): production launchers build dist/ + dist-server/ and run compiled npm start rather than npm run dev', () => {
+      const launchCmd = fs.readFileSync(path.resolve(__dirname, '../../scripts/launch.cmd'), 'utf8');
+      const rootBat = fs.readFileSync(path.resolve(__dirname, '../../start-tender-tracker.bat'), 'utf8');
+      const serverTs = fs.readFileSync(path.resolve(__dirname, '../../server.ts'), 'utf8');
+
+      expect(launchCmd).toContain('npm start');
+      expect(launchCmd).not.toContain('call npm run dev');
+      expect(rootBat).toContain('npm start');
+      expect(rootBat).not.toContain('call npm run dev');
+      expect(serverTs).toContain("path.basename(__dirname) === 'dist-server'");
+      expect(serverTs).toContain("process.argv.includes('--production')");
     });
   });
 });

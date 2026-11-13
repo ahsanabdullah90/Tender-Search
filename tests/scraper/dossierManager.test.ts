@@ -1,15 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
+import https from 'https';
+import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
 import {
   downloadAndCacheDossier,
   deriveDossierLabel,
   isHtmlContent,
-  detectExtensionAndMime
-} from '../../src/server/dossierManager.js';
+  detectExtensionAndMime,
+  fetchFileBuffer
+} from '../../src/server/services/dossierManager.js';
 import { fetchHtmlWithMetadata } from '../../src/server/scrapers/crawlerEngine.js';
-import { DOSSIERS_DIR } from '../../src/server/db.js';
+import { sslTolerantAgent, legacySslTolerantAgent } from '../../src/server/scrapers/baseScraper.js';
+import { DOSSIERS_DIR } from '../../src/server/db/index.js';
 
 describe('dossierManager', () => {
   let server: http.Server;
@@ -261,6 +265,87 @@ describe('dossierManager', () => {
       expect(res.html).toContain('ٹیلی کام ٹینڈرز');
       // No Unicode replacement character (\uFFFD)
       expect(res.html).not.toContain('\uFFFD');
+    });
+
+    it('retries HTTPS with legacySslTolerantAgent on ERR_SSL_WRONG_VERSION_NUMBER without http:// redirect loops', async () => {
+      const agentsUsed: any[] = [];
+      const httpSpy = vi.spyOn(http, 'get').mockImplementation((_url: any, _opts: any, cb: any) => {
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        const res = new EventEmitter() as any;
+        res.statusCode = 302;
+        res.headers = { location: 'https://eproc.example.gov.pk/ActiveTenders.aspx' };
+        res.resume = vi.fn();
+        setImmediate(() => cb(res));
+        return req;
+      });
+      const httpsSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, opts: any, cb: any) => {
+        agentsUsed.push(opts.agent);
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        if (opts.agent === sslTolerantAgent) {
+          setImmediate(() => {
+            const err: any = new Error('ssl3_get_record:wrong version number');
+            err.code = 'ERR_SSL_WRONG_VERSION_NUMBER';
+            req.emit('error', err);
+          });
+        } else {
+          const res = new EventEmitter() as any;
+          res.statusCode = 200;
+          res.headers = { 'content-type': 'text/html; charset=utf-8' };
+          setImmediate(() => {
+            cb(res);
+            res.emit('data', Buffer.from('<html><body>OK via legacy TLS</body></html>'));
+            res.emit('end');
+          });
+        }
+        return req;
+      });
+
+      try {
+        const result = await fetchHtmlWithMetadata('http://eproc.example.gov.pk/ActiveTenders.aspx');
+        expect(result.html).toContain('OK via legacy TLS');
+        expect(result.finalUrl).toBe('https://eproc.example.gov.pk/ActiveTenders.aspx');
+        expect(httpSpy).toHaveBeenCalledTimes(1);
+        expect(agentsUsed).toEqual([sslTolerantAgent, legacySslTolerantAgent]);
+      } finally {
+        httpSpy.mockRestore();
+        httpsSpy.mockRestore();
+      }
+    });
+
+    it('fetchFileBuffer retries HTTPS PDF downloads with legacySslTolerantAgent on ERR_SSL_WRONG_VERSION_NUMBER', async () => {
+      const agentsUsed: any[] = [];
+      const httpsSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, opts: any, cb: any) => {
+        agentsUsed.push(opts.agent);
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        if (opts.agent === sslTolerantAgent) {
+          setImmediate(() => {
+            const err: any = new Error('ssl3_get_record:wrong version number');
+            err.code = 'ERR_SSL_WRONG_VERSION_NUMBER';
+            req.emit('error', err);
+          });
+        } else {
+          const res = new EventEmitter() as any;
+          res.statusCode = 200;
+          res.headers = { 'content-type': 'application/pdf' };
+          setImmediate(() => {
+            cb(res);
+            res.emit('data', Buffer.from('%PDF-1.4 Legacy TLS PDF'));
+            res.emit('end');
+          });
+        }
+        return req;
+      });
+
+      try {
+        const buf = await fetchFileBuffer('https://eproc.example.gov.pk/Tenders/doc.pdf');
+        expect(buf.toString()).toContain('%PDF-1.4 Legacy TLS PDF');
+        expect(agentsUsed).toEqual([sslTolerantAgent, legacySslTolerantAgent]);
+      } finally {
+        httpsSpy.mockRestore();
+      }
     });
   });
 });

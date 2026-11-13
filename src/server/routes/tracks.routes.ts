@@ -6,11 +6,11 @@ import {
   getKpiStats,
   getUnacknowledgedCorrigenda,
   acknowledgeCorrigendum
-} from '../db.js';
+} from '../db/index.js';
 
 export const tracksRouter = Router();
 
-tracksRouter.get('/', (req, res) => {
+tracksRouter.get('/', (_req, res) => {
   const tracks = getAllDomainTracks();
   res.json(tracks);
 });
@@ -34,13 +34,13 @@ tracksRouter.delete('/:id', (req, res) => {
 });
 
 export const kpisRouter = Router();
-kpisRouter.get('/', (req, res) => {
+kpisRouter.get('/', (_req, res) => {
   const stats = getKpiStats();
   res.json(stats);
 });
 
 export const corrigendaRouter = Router();
-corrigendaRouter.get('/', (req, res) => {
+corrigendaRouter.get('/', (_req, res) => {
   const corrigenda = getUnacknowledgedCorrigenda();
   res.json(corrigenda);
 });

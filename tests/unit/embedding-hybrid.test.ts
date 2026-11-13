@@ -10,16 +10,16 @@ import {
   deserializeEmbedding,
   initEmbeddingModel,
   getEmbeddingEngineStatus
-} from '../../src/server/embeddingService.js';
+} from '../../src/server/services/embeddingService.js';
 import { matchTracks } from '../../src/server/scrapers/crawlerEngine.js';
-import { findCanonicalMatch, calculateStringSimilarity } from '../../src/server/deduplicator.js';
+import { findCanonicalMatch, calculateStringSimilarity } from '../../src/server/services/deduplicator.js';
 import {
   db,
   initDatabase,
   getAllTenders,
   saveDomainTrack,
   createManualTender
-} from '../../src/server/db.js';
+} from '../../src/server/db/index.js';
 import { createApp } from '../../server.js';
 
 describe('Local Hybrid Semantic & Keyword Engine', () => {

@@ -2,8 +2,7 @@ import { Agent as UndiciAgent } from 'undici';
 const sslTolerantDispatcher = new UndiciAgent({ connect: { rejectUnauthorized: false } });
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { updatePortalHealth, getPortalAuthCredentials, SESSIONS_DIR } from '../db.js';
+import { updatePortalHealth, SESSIONS_DIR } from '../db/index.js';
 
 export interface AuthResult {
   success: boolean;

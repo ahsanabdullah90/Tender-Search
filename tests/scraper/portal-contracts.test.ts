@@ -2,10 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { db, initDatabase, getAllTenders, setAppSetting } from '../../src/server/db.js';
+import { db, initDatabase, getAllTenders, setAppSetting } from '../../src/server/db/index.js';
 import { parsePortalHtml, processAndSaveTender, crawlerDeps, orderDocumentCandidates, fetchDocumentsForTender, hasEmptyTenderTableState } from '../../src/server/scrapers/crawlerEngine.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
-import { getPortalFileCode } from '../../src/server/dossierStore.js';
+import { getPortalFileCode } from '../../src/server/services/dossierStore.js';
 
 /**
  * Portal contract tests (docs/13-ingestion-pipeline-plan.md, §4.2). Every fixture captured by
@@ -38,7 +38,7 @@ const captured = fs.readdirSync(FIXTURES)
     expected: JSON.parse(fs.readFileSync(path.join(FIXTURES, d, 'expected.json'), 'utf8')) as Expected
   }));
 
-const synthetic = ['epads', 'punjab_eproc', 'sppra', 'tender_services'].filter(d => fs.existsSync(path.join(FIXTURES, d, 'page.html')));
+const synthetic = ['punjab_eproc', 'sppra', 'tender_services'].filter(d => fs.existsSync(path.join(FIXTURES, d, 'page.html')));
 
 /** Portals with no fixture, and why. */
 const NOT_COVERED: Record<string, string> = {

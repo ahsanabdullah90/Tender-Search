@@ -9,16 +9,14 @@ import {
   stripAnsi,
   formatSessionFilename,
   formatLogEntry,
-  writeToSessionLog,
   pruneOldSessionLogs,
   listSessionLogs,
   readSessionLog,
   getCurrentSessionFilename,
-  requestLoggerMiddleware,
-  MAX_RETAINED_SESSIONS
-} from '../../src/server/logger.js';
+  requestLoggerMiddleware
+} from '../../src/server/services/logger.js';
 
-describe('Session Logger (src/server/logger.ts)', () => {
+describe('Session Logger (src/server/services/logger.ts)', () => {
   let tempLogsDir: string;
 
   beforeEach(() => {

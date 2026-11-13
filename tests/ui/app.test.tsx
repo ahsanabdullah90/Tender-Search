@@ -1,8 +1,7 @@
-import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import App from '../../src/App.js';
+import App from '../../src/client/App.js';
 
 let lastEventSource: any = null;
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import request from 'supertest';
-import * as ocrSvc from '../../src/server/ocrService.js';
+import * as ocrSvc from '../../src/server/services/ocrService.js';
 import {
   db,
   initDatabase,
@@ -15,11 +15,11 @@ import {
   backfillExistingTenderDocumentJobs,
   requeueFailedJobs,
   pruneOldDailyVisionCounters
-} from '../../src/server/db.js';
+} from '../../src/server/db/index.js';
 import { processAndSaveTender, crawlerDeps, currentScanStatus, orderDocumentCandidates } from '../../src/server/scrapers/crawlerEngine.js';
-import { processDocumentQueue } from '../../src/server/ingestWorker.js';
-import { beginScanBudget, endScanBudget } from '../../src/server/ingestBudget.js';
-import { findSubmissionDeadlines } from '../../src/server/documentExtractor.js';
+import { processDocumentQueue } from '../../src/server/services/ingestWorker.js';
+import { beginScanBudget, endScanBudget } from '../../src/server/services/ingestBudget.js';
+import { findSubmissionDeadlines } from '../../src/server/services/documentExtractor.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { createApp } from '../../server.js';
 import { makePdf, FILLER } from '../fixtures/documents/buildFixtures.js';

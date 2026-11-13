@@ -6,7 +6,7 @@ import {
   resolveDark,
   applyDarkClass,
   onSystemThemeChange
-} from '../../src/theme.js';
+} from '../../src/client/theme.js';
 
 describe('theme management', () => {
   beforeEach(() => {

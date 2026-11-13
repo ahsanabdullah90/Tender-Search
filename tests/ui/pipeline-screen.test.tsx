@@ -1,9 +1,8 @@
-import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { PipelineScreen } from '../../src/components/PipelineScreen.js';
-import type { Tender } from '../../src/types.js';
+import { PipelineScreen } from '../../src/client/components/PipelineScreen.js';
+import type { Tender } from '../../src/shared/types.js';
 
 describe('PipelineScreen component', () => {
   const samplePipelineTenders: Tender[] = [

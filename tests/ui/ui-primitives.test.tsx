@@ -1,4 +1,3 @@
-import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -12,7 +11,7 @@ import {
   Dialog,
   SlideOver,
   Popover
-} from '../../src/ui/index.js';
+} from '../../src/client/ui/index.js';
 
 describe('UI Primitives (src/ui/index.tsx)', () => {
   describe('Button', () => {

@@ -11,7 +11,7 @@ import {
   getTenderById,
   getAllDomainTracks,
   DOSSIERS_DIR
-} from '../../src/server/db.js';
+} from '../../src/server/db/index.js';
 
 describe('Server API Routes', () => {
   const app = createApp();
@@ -690,7 +690,7 @@ describe('Server API Routes', () => {
 
   describe('Auto-expire responses & expired-tender visibility (Phase 0)', () => {
     it('fetch-documents reports expired:true (not a fake Deleted tender) when the document deadline has passed', async () => {
-      const ocrSvc = await import('../../src/server/ocrService.js');
+      const ocrSvc = await import('../../src/server/services/ocrService.js');
       const origBuf = crawlerDeps.fetchFileBuffer;
       crawlerDeps.fetchFileBuffer = vi.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake'));
       vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
@@ -756,7 +756,7 @@ describe('Server API Routes', () => {
     });
 
     it('returns 500 when backup creation fails', async () => {
-      const dbModule = await import('../../src/server/db.js');
+      const dbModule = await import('../../src/server/db/index.js');
       const orig = dbModule.db.backup;
       (dbModule.db as any).backup = vi.fn().mockRejectedValue(new Error('fail'));
 
@@ -832,7 +832,7 @@ describe('Server API Routes', () => {
 
     it('executes graceful shutdown on SIGINT', async () => {
       const { startServer } = await import('../../server.js');
-      const dbModule = await import('../../src/server/db.js');
+      const dbModule = await import('../../src/server/db/index.js');
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
       process.env.NODE_ENV = 'production';
@@ -866,6 +866,60 @@ describe('Server API Routes', () => {
       exitSpy.mockRestore();
       process.env.NODE_ENV = prevEnv;
       process.env.PORT = prevPort;
+    });
+  });
+
+  describe('Plans B & C API Endpoints (Digest & Two-Speed Scan Depth)', () => {
+    it('GET /api/system/digest returns closing alerts and POST /api/system/digest/settings updates config', async () => {
+      const in12Hours = new Date(Date.now() + 12 * 3600000).toISOString();
+      insertTestTender('t-api-urg', {
+        title: 'Closing Tomorrow Tender',
+        closing_date: in12Hours,
+        pipeline_status: 'New Opportunity'
+      });
+
+      const updRes = await request(app)
+        .post('/api/system/digest/settings')
+        .send({ enabled: true, webhookUrl: 'https://example.test/webhook', withinHours: 36 });
+      expect(updRes.status).toBe(200);
+      expect(updRes.body.settings.enabled).toBe(true);
+      expect(updRes.body.settings.withinHours).toBe(36);
+
+      const getRes = await request(app).get('/api/system/digest?hours=48');
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.closingSoonCount).toBeGreaterThanOrEqual(1);
+      expect(getRes.body.closingSoon.some((t: any) => t.id === 't-api-urg')).toBe(true);
+      expect(getRes.body.settings.enabled).toBe(true);
+    });
+
+    it('POST /api/scan/start accepts optional depth parameter', async () => {
+      const { scanRouteDeps } = await import('../../src/server/routes/scan.routes.js');
+      const origStart = scanRouteDeps.startCrawlerScan;
+      const startSpy = vi.fn().mockResolvedValue({
+        isScanning: true,
+        currentPortal: null,
+        activePortals: [],
+        scanDepth: 'deep',
+        progressPercent: 0,
+        completedPortals: 0,
+        totalPortals: 1,
+        newTendersFound: 0,
+        corrigendaFound: 0,
+        lastScanTimestamp: null
+      });
+      scanRouteDeps.startCrawlerScan = startSpy;
+
+      try {
+        const res = await request(app)
+          .post('/api/scan/start')
+          .send({ portalId: 'epads', depth: 'deep' });
+
+        expect(res.status).toBe(200);
+        expect(res.body.scanDepth).toBe('deep');
+        expect(startSpy).toHaveBeenCalledWith('epads', false, { depth: 'deep' });
+      } finally {
+        scanRouteDeps.startCrawlerScan = origStart;
+      }
     });
   });
 });

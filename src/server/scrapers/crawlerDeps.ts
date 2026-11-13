@@ -1,9 +1,10 @@
-import { fetchHtmlWithTolerantAgent, fetchHtmlWithMetadata } from './htmlFetcher.js';
+import { fetchHtmlWithTolerantAgent, fetchHtmlWithMetadata, postFormWithMetadata, HtmlFetchResult } from './htmlFetcher.js';
 import { sleep } from './baseScraper.js';
-import { downloadAndCacheDossier, deriveDossierLabel, fetchFileBuffer, DownloadDossierOptions } from '../dossierManager.js';
+import { downloadAndCacheDossier, deriveDossierLabel, fetchFileBuffer, DownloadDossierOptions } from '../services/dossierManager.js';
 
 export const crawlerDeps = {
   fetchHtml: fetchHtmlWithTolerantAgent,
+  postForm: postFormWithMetadata,
   sleep: (ms: number) => sleep(ms),
   downloadAndCacheDossier: (tenderId: string, url: string, label?: string, options?: DownloadDossierOptions) =>
     downloadAndCacheDossier(tenderId, url, label || deriveDossierLabel(url, 'Tender Document'), undefined, undefined, options),
@@ -11,14 +12,21 @@ export const crawlerDeps = {
 };
 
 /**
- * Helper that fetches HTML and returns { html, finalUrl }.
+ * Helper that fetches HTML and returns { html, finalUrl, cookies }.
  * Uses crawlerDeps.fetchHtml when mocked in tests, or fetchHtmlWithMetadata in live production runs
  * so cross-origin 301/302 redirects (e.g. bppra.gob.pk -> bpptwo.vdc.services:5451) are accurately tracked.
  */
-export async function fetchHtmlSmart(url: string, cookieStr?: string): Promise<{ html: string; finalUrl: string }> {
+export async function fetchHtmlSmart(url: string, cookieStr?: string): Promise<HtmlFetchResult> {
   if (crawlerDeps.fetchHtml !== fetchHtmlWithTolerantAgent) {
     const html = await crawlerDeps.fetchHtml(url, 0, cookieStr);
-    return { html, finalUrl: url };
+    return { html, finalUrl: url, cookies: cookieStr };
   }
   return fetchHtmlWithMetadata(url, 0, cookieStr);
+}
+
+/**
+ * Submits an x-www-form-urlencoded POST (e.g. ASP.NET __doPostBack pagination).
+ */
+export async function postFormSmart(url: string, formBody: string, cookieStr?: string): Promise<HtmlFetchResult> {
+  return crawlerDeps.postForm(url, formBody, cookieStr);
 }

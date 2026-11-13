@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import { PortalDefinition } from './portalList.js';
-import { isValidReferenceNo } from '../deduplicator.js';
+import { isValidReferenceNo } from '../services/deduplicator.js';
 import { parseDateString, extractDatesFromText, DATE_CANDIDATE_PATTERN } from './dateParser.js';
 
 export interface RawScrapedItem {
@@ -24,7 +24,7 @@ export interface ScrapeResult {
   pagesScanned?: number;
 }
 
-const GENERIC_LINK_LABELS = /^(download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click\s+to\s+view|view(?:\s+details|\s+file)?|details|advertisement|bidding\s+document|nit\s+document|boq\s+document|rfq\s+document|bid\s+document|evaluation\s+report|tender\s+document|read\s+more|open|apply|corrigendum|asset\s+register|o&m\s+manuals|drawings)$/i;
+const GENERIC_LINK_LABELS = /^(download(?:\s+rfp|\s+specs|\s+doc|\s+file)?|click\s+to\s+view|view(?:\s+tender\s+details?|\s+details?|\s+file)?|details|advertisement|bidding\s+document|nit\s+document|boq\s+document|rfq\s+document|bid\s+document|evaluation\s+report|tender\s+document|read\s+more|open|apply|corrigendum|asset\s+register|o&m\s+manuals|drawings)$/i;
 
 export function resolvePortalUrl(href: string | undefined, portal: PortalDefinition): string {
   if (!href || href.startsWith('#') || href.startsWith('javascript:')) return portal.tendersUrl;
@@ -568,6 +568,139 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     if (items.length > 0) return { items, hitlRequired: false };
   }
 
+  // 3e. Structured ASP.NET Telerik RadGrid table (Punjab eProc: table.rgMasterTable inside <form id="aspnetForm">)
+  const radGridRows = $('table.rgMasterTable tbody > tr.rgRow, table.rgMasterTable tbody > tr.rgAltRow');
+  if (radGridRows.length > 0) {
+    radGridRows.each((_, el) => {
+      const tds = $(el).children('td');
+      if (tds.length < 6) return;
+
+      const procType = $(tds[0]).text().replace(/\s+/g, ' ').trim();
+      const nameCell = $(tds[1]);
+      let detailHref: string | undefined;
+      nameCell.find('a[href]').each((__, aEl) => {
+        const href = $(aEl).attr('href');
+        if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+          detailHref = href;
+          return false;
+        }
+      });
+
+      const nameClone = nameCell.clone();
+      nameClone.find('a').each((__, aEl) => {
+        const aText = $(aEl).text().replace(/\s+/g, ' ').trim();
+        if (GENERIC_LINK_LABELS.test(aText)) {
+          $(aEl).remove();
+        }
+      });
+      const title = nameClone
+        .text()
+        .replace(/\(\s*\)\s*$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!title || title.length <= 5) return;
+
+      const typeText = $(tds[2]).text().replace(/\s+/g, ' ').trim();
+      const publishDate = parseDateString($(tds[3]).text().trim()) || undefined;
+      const closingDate = parseDateString($(tds[4]).text().trim());
+      const deptText = $(tds[5]).text().replace(/\s+/g, ' ').trim();
+      const statusText = tds.length > 6 ? $(tds[6]).text().replace(/\s+/g, ' ').trim() : '';
+
+      const attachmentUrls = collectRowAttachments($, el, portal);
+      const detailUrl = detailHref ? resolvePortalUrl(detailHref, portal) : null;
+      const nonImageDoc = attachmentUrls.find(u => !/\.(jpe?g|png|webp)(\?|$)/i.test(u));
+      const directUrl = detailUrl || nonImageDoc || portal.tendersUrl;
+
+      if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
+
+      const summaryParts = [procType, typeText, statusText].filter(Boolean);
+
+      items.push({
+        referenceNo: extractRefFromText(title),
+        title,
+        organization: deptText || portal.name,
+        directUrl,
+        publishDate,
+        closingDate,
+        description: summaryParts.join(' | ').slice(0, 350),
+        isCorrigendum: /corrigendum/i.test(procType),
+        attachmentUrls
+      });
+    });
+    if (items.length > 0) return { items: sanitizeScrapedItems(items, portal), hitlRequired: false };
+  }
+
+  // 3f. Structured Federal EPADS Opportunities Table (https://epads.gov.pk/)
+  const epadsRows = $('table tbody tr').filter((_, el) => $(el).find('a[href*="/opportunities/"]').length > 0);
+  if (epadsRows.length > 0) {
+    const parseCountdownClosing = (raw: string): string | null => {
+      if (!/left\b/i.test(raw)) return null;
+      const d = Number(raw.match(/(\d+)\s*d\b/i)?.[1] || 0);
+      const h = Number(raw.match(/(\d+)\s*h\b/i)?.[1] || 0);
+      const m = Number(raw.match(/(\d+)\s*m\b/i)?.[1] || 0);
+      const totalMinutes = d * 1440 + h * 60 + m;
+      if (totalMinutes <= 0) return null;
+      return new Date(Date.now() + totalMinutes * 60_000).toISOString();
+    };
+
+    epadsRows.each((_, el) => {
+      const tds = $(el).children('td');
+      const infoCell = tds.length >= 2 ? $(tds[1]) : $(el);
+      const link = infoCell.find('a[href*="/opportunities/"]').first();
+      const title = (
+        link.find('span[title]').first().attr('title') ||
+        link.find('span').first().text() ||
+        link.text()
+      ).replace(/\s+/g, ' ').trim();
+      if (!title || title.length <= 5) return;
+
+      const directUrl = resolvePortalUrl(link.attr('href'), portal);
+      if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
+
+      const spansWithTitle = infoCell.find('span[data-bs-toggle="tooltip"], span[title]').filter((__, sEl) => $(sEl).closest('a').length === 0);
+      const orgRaw = (spansWithTitle.first().attr('title') || spansWithTitle.first().text() || '').replace(/\s+/g, ' ').trim();
+      const organization = orgRaw.length > 2 ? orgRaw : portal.name;
+
+      let refNo: string | undefined;
+      infoCell.find('span.badge').each((__, bEl) => {
+        const txt = $(bEl).text().replace(/\s+/g, ' ').trim();
+        if (!refNo && /^P\d{3,}$/i.test(txt)) {
+          refNo = txt;
+        }
+      });
+
+      const statusCell = tds.length >= 3 ? $(tds[2]) : $(el);
+      let publishDate: string | undefined;
+      let closingDate: string | null = null;
+      statusCell.find('div').filter((__, dEl) => $(dEl).children('span.badge').length === 1).each((__, dEl) => {
+        const labelTxt = $(dEl).text().replace(/\s+/g, ' ').trim();
+        const badgeTxt = $(dEl).children('span.badge').first().text().replace(/\s+/g, ' ').trim();
+        if (!badgeTxt) return;
+        if (/^Published On:/i.test(labelTxt) && !publishDate) {
+          publishDate = parseDateString(badgeTxt) || undefined;
+        } else if (/^Closing On:/i.test(labelTxt) && !closingDate) {
+          closingDate = parseDateString(badgeTxt) || parseCountdownClosing(badgeTxt);
+        }
+      });
+
+      const procCell = tds.length >= 4 ? $(tds[3]).text().replace(/\s+/g, ' ').trim() : '';
+      const infoText = infoCell.text().replace(/\s+/g, ' ').trim();
+
+      items.push({
+        referenceNo: refNo || extractRefFromText(title),
+        title,
+        organization,
+        directUrl,
+        publishDate,
+        closingDate,
+        description: procCell.slice(0, 350),
+        isCorrigendum: /corrigendum/i.test(infoText) || /\bcorrigendum\b/i.test(title),
+        attachmentUrls: collectRowAttachments($, el, portal)
+      });
+    });
+    if (items.length > 0) return { items: sanitizeScrapedItems(items, portal), hitlRequired: false };
+  }
+
   // 4. Standard & Drupal / NinjaTable / GridView rows
   const selector = [
     'table tbody tr',
@@ -750,4 +883,34 @@ export function hasProcurementSignals(html: string): boolean {
     if (rx.test(text)) matchedCount++;
   }
   return matchedCount >= 2;
+}
+
+/**
+ * Extracts an ASP.NET __doPostBack form payload from an HTML page for navigating to `targetPage`.
+ */
+export function buildAspNetPostBackBody(html: string, targetPage: number): string | null {
+  const $ = cheerio.load(html);
+  const pagerLink = $('.rgNumPart a, .pagination a, a[href*="__doPostBack"]')
+    .filter((_, a) => $(a).text().replace(/\s+/g, ' ').trim() === String(targetPage))
+    .first();
+  if (!pagerLink.length) return null;
+
+  const rawJs = `${pagerLink.attr('href') || ''} ${pagerLink.attr('onclick') || ''}`;
+  const m = /__doPostBack\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]\s*\)/.exec(rawJs);
+  if (!m) return null;
+
+  const form = pagerLink.closest('form').length ? pagerLink.closest('form') : $('form').first();
+  if (!form.length) return null;
+
+  const params = new URLSearchParams();
+  form.find('input').each((_, el) => {
+    const name = $(el).attr('name');
+    const type = ($(el).attr('type') || '').toLowerCase();
+    if (!name || type === 'submit' || type === 'button' || type === 'image' || type === 'reset') return;
+    if ((type === 'checkbox' || type === 'radio') && !$(el).is(':checked')) return;
+    params.set(name, $(el).attr('value') || '');
+  });
+  params.set('__EVENTTARGET', m[1]);
+  params.set('__EVENTARGUMENT', m[2]);
+  return params.toString();
 }

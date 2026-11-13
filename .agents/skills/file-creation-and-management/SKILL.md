@@ -32,15 +32,19 @@ Tender-Search/
 │   └── favicon.ico / icons
 ├── scripts/                      # Standalone CLI tools & maintenance scripts
 ├── src/                          # TypeScript source code
-│   ├── components/               # React screens and compound UI components
-│   ├── ui/                       # Atomic design UI primitives (Button, Chip, Dialog, etc.)
-│   ├── types.ts                  # Shared domain TypeScript interfaces
+│   ├── client/                   # Frontend React application
+│   │   ├── components/           # React screens and compound UI components
+│   │   ├── ui/                   # Atomic design UI primitives (Button, Chip, Dialog, etc.)
+│   │   ├── App.tsx / main.tsx    # Vite React entrypoint
+│   │   └── index.css / theme.ts  # Design tokens & theme handler
+│   ├── shared/                   # Shared domain interfaces (client & server)
+│   │   └── types.ts
 │   └── server/                   # Backend Node.js / Express application
 │       ├── routes/               # Modular Express API route controllers
 │       ├── db/                   # Database connection, schema DDL, and repositories
 │       │   └── repositories/     # Domain data access objects (tenders, portals, etc.)
 │       ├── scrapers/             # Ingestion pipeline, parsers, and auto-healer
-│       └── [services]            # deduplicator.ts, dossierManager.ts, ocrService.ts, scheduler.ts
+│       └── services/             # Domain services (deduplicator, dossierManager, ocrService, scheduler, etc.)
 ├── tests/                        # Automated tests mirroring src/ 1:1
 │   ├── api/                      # REST endpoint and SSE integration tests
 │   ├── db/                       # Database schema and repository tests
@@ -67,10 +71,11 @@ When creating a new file, find its exact home using this decision table:
 | **Date / string / parsing utility** | `src/server/scrapers/dateParser.ts` | Standalone exported function with tests |
 | **Scraper recovery or link scoring** | `src/server/scrapers/healer.ts` | Adhere strictly to the 7 Anti-Corruption Rules |
 | **Scraper transport & ingestion pipeline** | `src/server/scrapers/` | `htmlFetcher.ts`, `ingestPipeline.ts`, `tenderAnalysis.ts` |
-| **Core backend service or orchestrator** | `src/server/` | `<serviceName>.ts` (e.g. `dossierManager.ts`) |
-| **React screen or full view** | `src/components/` | `<Name>Screen.tsx` |
-| **Reusable UI widget / slideover / modal** | `src/components/<screen>/` | Subdivided component (`Detail.tsx`, `AddTenderModal.tsx`, `TenderRow.tsx`) |
-| **Atomic UI primitive (button, input, badge)** | `src/ui/` | Within `src/ui/index.tsx` or `src/ui/<primitive>.tsx` |
+| **Core backend service or orchestrator** | `src/server/services/` | `<serviceName>.ts` (e.g. `dossierManager.ts`) |
+| **Shared client/server TypeScript type** | `src/shared/` | `types.ts` |
+| **React screen or full view** | `src/client/components/` | `<Name>Screen.tsx` |
+| **Reusable UI widget / slideover / modal** | `src/client/components/<screen>/` | Subdivided component (`Detail.tsx`, `AddTenderModal.tsx`, `TenderRow.tsx`) |
+| **Atomic UI primitive (button, input, badge)** | `src/client/ui/` | Within `src/client/ui/index.tsx` or `src/client/ui/<primitive>.tsx` |
 | **Logo, icon, or static brand image** | `public/brand/` | Lowercase kebab/hyphenated PNG/SVG (`logo-*.png`) |
 | **Standalone CLI or maintenance script** | `scripts/` | `<action>-<target>.ts` |
 | **Automated test suite** | `tests/<domain>/` | Mirroring `src/` path (`tests/<domain>/<name>.test.ts`) |
@@ -102,8 +107,7 @@ When creating a new file, find its exact home using this decision table:
   - `tracksRepo.ts`
   - `systemRepo.ts`
   - `ingestJobsRepo.ts` (document ingest retry queue)
-- `src/server/db/index.ts` must re-export all connection and repository symbols.
-- `src/server/db.ts` acts as a backward-compatible barrel export (`export * from './db/index.js'`) so existing consumers never break.
+- `src/server/db/index.ts` re-exports all connection and repository symbols directly.
 
 ### Rule 4: Scraper Pipeline & Autonomous Healer (`src/server/scrapers/`)
 - Date parsing logic and regexes belong in `src/server/scrapers/dateParser.ts`. Always parse Pakistani dates with explicit PKT (+05:00) timezone and DD/MM/YYYY priority to prevent US day/month swaps.

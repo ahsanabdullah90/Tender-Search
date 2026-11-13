@@ -28,7 +28,7 @@ for (const sub of ['backups', 'dossiers', 'sessions', 'models', 'logs']) {
 }
 process.env.TENDER_DATA_DIR = sampleDir;
 
-const { db, initDatabase, DATA_DIR } = await import('../src/server/db.ts');
+const { db, initDatabase, DATA_DIR } = await import('../src/server/db/index.js');
 if (path.resolve(DATA_DIR) !== sampleDir) throw new Error('Refusing to seed: not pointing at sampleDir');
 initDatabase();
 

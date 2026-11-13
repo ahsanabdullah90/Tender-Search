@@ -1,9 +1,8 @@
-import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { KpiHeader } from '../../src/components/KpiHeader.js';
-import type { CorrigendumLog, PortalHealth } from '../../src/types.js';
+import { KpiHeader } from '../../src/client/components/KpiHeader.js';
+import type { CorrigendumLog, PortalHealth } from '../../src/shared/types.js';
 
 describe('KpiHeader component', () => {
   const baseStats = {

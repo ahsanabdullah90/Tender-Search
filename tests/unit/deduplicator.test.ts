@@ -5,7 +5,7 @@ import {
   isValidReferenceNo,
   titlesAreDistinguishable,
   normalizeReferenceNo
-} from '../../src/server/deduplicator.js';
+} from '../../src/server/services/deduplicator.js';
 import { extractRefFromText } from '../../src/server/scrapers/crawlerEngine.js';
 
 describe('normalizeText', () => {

@@ -9,7 +9,7 @@ graph TD
     subgraph Client [Browser Client: React 19 + Tailwind v4]
         AppShell[App.tsx: Root State & SSE Subscriber]
         KpiBanner[KpiHeader.tsx: Metrics, HITL & Corrigenda Alerts]
-        Inbox[InboxScreen.tsx & src/components/inbox/: Detail, AddTenderModal, TenderRow, DeadlineRunway]
+        Inbox[InboxScreen.tsx & src/client/components/inbox/: Detail, AddTenderModal, TenderRow, DeadlineRunway]
         Pipeline[PipelineScreen.tsx: Kanban Board & 5-Week Gantt]
         Sources[SourcesScreen.tsx: Keywords, Portals & Data Mgmt]
     end
@@ -79,7 +79,7 @@ graph TD
 
 ## How Application Segments Communicate With Each Other
 
-### 1. Frontend UI $\leftrightarrow$ Express REST & SSE Backend (`src/App.tsx` $\leftrightarrow$ `src/server/routes/*.routes.ts`)
+### 1. Frontend UI $\leftrightarrow$ Express REST & SSE Backend (`src/client/App.tsx` $\leftrightarrow$ `src/server/routes/*.routes.ts`)
 - **Initial Hydration & Polling-Free Updates**:
   When `App.tsx` mounts, it fetches `/api/tenders`, `/api/kpis`, `/api/tracks`, `/api/portals`, and `/api/scan/status` in parallel, then opens a persistent `EventSource` connection to `/api/scan/progress`.
 - **Real-Time Scan Telemetry**:
@@ -108,7 +108,7 @@ When `startCrawlerScan()` in `crawlerEngine.ts` processes a portal via `scrapePo
 
 1. **Hybrid Track Matching (`matchTracks` & `embeddingService.ts`)**:
    - Evaluates each scraped item against active `domain_tracks` using positive/negative keywords and 384-dimensional `all-MiniLM-L6-v2` semantic embeddings (`model`-tagged vs `fast`-tagged vector spaces are never mixed).
-2. **3-Tier Canonical Deduplication (`src/server/deduplicator.ts`)**:
+2. **3-Tier Canonical Deduplication (`src/server/services/deduplicator.ts`)**:
    - Checks `findCanonicalMatch()` across Tier 1 (normalized `reference_no`), Tier 2 ($\ge 0.85$ bigram Dice-coefficient title similarity within 1.5 days), and Tier 3 (same-space semantic vector cosine similarity).
    - Tier 2 and Tier 3 similarity matching only considers tenders from other portals; a tender's own portal is excluded from the candidate search.
    - On a duplicate match: the other portal is appended to `secondary_sources` and any new document links are queued for the background worker.
@@ -131,20 +131,20 @@ When `startCrawlerScan()` in `crawlerEngine.ts` processes a portal via `scrapePo
 - **Backend Framework**: Express v4 (`server.ts`, modularized via `createApp()`).
 - **Frontend Framework**: React v19 with React DOM.
 - **Build Tool**: Vite v8 with `@vitejs/plugin-react` and `@tailwindcss/vite`.
-- **Styling**: Tailwind CSS v4 using semantic design tokens defined in `src/index.css` and `src/theme.ts`.
+- **Styling**: Tailwind CSS v4 using semantic design tokens defined in `src/client/index.css` and `src/client/theme.ts`.
 - **Icons**: Lucide React.
-- **Language**: TypeScript v5 throughout client, server, and test suites.
+- **Language**: TypeScript throughout client, server, shared types (`src/shared/types.ts`), and test suites.
 
 ### Data & Persistence
 - **Database**: SQLite 3 using `better-sqlite3`.
 - **Journal Mode**: Write-Ahead Logging (`PRAGMA journal_mode = WAL`) for concurrent reads and writes without blocking.
-- **Schema & Migrations**: Programmatic, idempotent guarded `ALTER TABLE` schema updates and `app_settings` initialization in `src/server/db/schema.ts` (`src/server/db.ts` remains only as a one-line re-export of `src/server/db/index.ts`).
+- **Schema & Migrations**: Programmatic, idempotent guarded `ALTER TABLE` schema updates and `app_settings` initialization in `src/server/db/schema.ts` (exported via `src/server/db/index.ts`).
 
 ### Scraping, Automation & AI
 - **HTML Parsing**: `cheerio` for fast, lightweight DOM parsing and link-preserving HTML compaction.
 - **HTTP Client**: Redirect-aware tolerant HTTPS/HTTP agents (`fetchHtmlWithMetadata`) with 15s timeouts, realistic Chrome header masquerading, and unverified TLS bypass for legacy government SSL certificates.
 - **Browser Automation**: Playwright Chromium for rendering dynamic SPA portals (e.g., Sindh SPPRA) and interactive HITL Cloudflare bypass.
-- **AI Engine (`src/server/ocrService.ts`)**: `@google/genai` configured with a cached client (`20s` timeout) and a **4-Model Failover Chain** (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`) plus a self-healing JSON repair parser (`parseAndRepairTenderJson`).
+- **AI Engine (`src/server/services/ocrService.ts`)**: `@google/genai` configured with a cached client (`20s` timeout) and a **4-Model Failover Chain** (`gemini-flash-lite-latest` $\rightarrow$ `gemini-3.1-flash-lite` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.8-flash`) plus a self-healing JSON repair parser (`parseAndRepairTenderJson`).
 
 ---
 

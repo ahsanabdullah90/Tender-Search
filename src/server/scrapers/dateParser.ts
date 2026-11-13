@@ -16,6 +16,46 @@ export const MONTH_NAMES: Record<string, number> = {
   nov: 11, november: 11, dec: 12, december: 12
 };
 
+function resolvePktDateTime(
+  year: number,
+  month: number,
+  day: number,
+  hourRaw?: string,
+  minuteRaw?: string,
+  secondRaw?: string,
+  meridiem?: string
+): string | null {
+  let hour = hourRaw ? parseInt(hourRaw, 10) : 14;
+  const minute = minuteRaw ? parseInt(minuteRaw, 10) : 0;
+  const second = secondRaw ? parseInt(secondRaw, 10) : 0;
+
+  if (meridiem) {
+    const upper = meridiem.toUpperCase();
+    if (hour < 1 || hour > 12) return null;
+    if (upper === 'AM') {
+      if (hour === 12) hour = 0;
+    } else if (upper === 'PM') {
+      if (hour !== 12) hour += 12;
+    }
+  }
+
+  if (
+    !isValidCalendarDay(year, month, day) ||
+    !isPlausibleTenderYear(year) ||
+    hour < 0 || hour >= 24 ||
+    minute < 0 || minute >= 60 ||
+    second < 0 || second >= 60
+  ) {
+    return null;
+  }
+
+  const hStr = String(hour).padStart(2, '0');
+  const mStr = String(minute).padStart(2, '0');
+  const sStr = String(second).padStart(2, '0');
+  const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
+  return !isNaN(d.getTime()) ? d.toISOString() : null;
+}
+
 export function parseDateString(raw: string): string | null {
   if (!raw || !raw.trim()) return null;
   const str = raw.trim();
@@ -23,8 +63,9 @@ export function parseDateString(raw: string): string | null {
   // Exclude known non-date text noise
   if (/^(not available|n\/a|none|null|undefined|-+)$/i.test(str)) return null;
 
-  // Strip ordinal suffixes (1st, 2nd, 3rd, 4th..31st), normalize military time (e.g. 1100 hrs -> 11:00), and commas
+  // Strip optional leading weekday, ordinal suffixes (1st, 2nd, 3rd, 4th..31st), normalize military time, and commas
   const cleanStr = str
+    .replace(/^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b,?\s*/i, '')
     .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1')
     .replace(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:hrs?|hours?)\b/gi, '$1:$2')
     .replace(/\b([01]?\d|2[0-3])([0-5]\d)\s*(?:hrs?|hours?)\b/gi, '$1:$2')
@@ -33,96 +74,36 @@ export function parseDateString(raw: string): string | null {
     .trim();
 
   try {
-    // 1. Check numeric DD/MM/YYYY or DD-MM-YYYY with optional time
-    const dmyMatch = cleanStr.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    // 1. Check numeric DD/MM/YYYY or DD-MM-YYYY with optional time (+ optional AM/PM)
+    const dmyMatch = cleanStr.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
     if (dmyMatch) {
       const day = parseInt(dmyMatch[1], 10);
       const month = parseInt(dmyMatch[2], 10);
       let year = parseInt(dmyMatch[3], 10);
       if (year < 100) year += 2000;
-
-      const hour = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 14;
-      const minute = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
-      const second = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
-
-      if (
-        isValidCalendarDay(year, month, day) &&
-        isPlausibleTenderYear(year) &&
-        hour >= 0 && hour < 24 &&
-        minute >= 0 && minute < 60 &&
-        second >= 0 && second < 60
-      ) {
-        const hStr = String(hour).padStart(2, '0');
-        const mStr = String(minute).padStart(2, '0');
-        const sStr = String(second).padStart(2, '0');
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
-        if (!isNaN(d.getTime())) {
-          return d.toISOString();
-        }
-      }
-      return null;
+      return resolvePktDateTime(year, month, day, dmyMatch[4], dmyMatch[5], dmyMatch[6], dmyMatch[7]);
     }
 
-    // 2. Named month format (Day first): e.g. 15 Nov 2026, 30 Oct, 2026, 15-November-2026
-    const namedMonthMatch = cleanStr.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
+    // 2. Named month format (Day first): e.g. 15 Nov 2026, 30 Oct, 2026, 15-November-2026 02:30 PM
+    const namedMonthMatch = cleanStr.match(/^(\d{1,2})\s*[-/.\s]\s*([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
     if (namedMonthMatch) {
       const day = parseInt(namedMonthMatch[1], 10);
       const month = MONTH_NAMES[namedMonthMatch[2].toLowerCase()];
       let year = parseInt(namedMonthMatch[3], 10);
       if (year < 100) year += 2000;
-
-      const hour = namedMonthMatch[4] ? parseInt(namedMonthMatch[4], 10) : 14;
-      const minute = namedMonthMatch[5] ? parseInt(namedMonthMatch[5], 10) : 0;
-      const second = namedMonthMatch[6] ? parseInt(namedMonthMatch[6], 10) : 0;
-
-      if (
-        month &&
-        isValidCalendarDay(year, month, day) &&
-        isPlausibleTenderYear(year) &&
-        hour >= 0 && hour < 24 &&
-        minute >= 0 && minute < 60 &&
-        second >= 0 && second < 60
-      ) {
-        const hStr = String(hour).padStart(2, '0');
-        const mStr = String(minute).padStart(2, '0');
-        const sStr = String(second).padStart(2, '0');
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
-        if (!isNaN(d.getTime())) {
-          return d.toISOString();
-        }
-      }
-      return null;
+      if (!month) return null;
+      return resolvePktDateTime(year, month, day, namedMonthMatch[4], namedMonthMatch[5], namedMonthMatch[6], namedMonthMatch[7]);
     }
 
-    // 2b. Named month format (Month first): e.g. September 25, 2026, Jun 30th 2026, Aug 17, 2026
-    const monthFirstMatch = cleanStr.match(/^([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{1,2})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
+    // 2b. Named month format (Month first): e.g. Saturday, November 14, 2026 12:00 PM, Jun 30th 2026
+    const monthFirstMatch = cleanStr.match(/^([A-Za-z]{3,9})\.?\s*[-/.\s]\s*(\d{1,2})\s*[-/.\s]\s*(\d{2,4})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i);
     if (monthFirstMatch) {
       const month = MONTH_NAMES[monthFirstMatch[1].toLowerCase()];
       const day = parseInt(monthFirstMatch[2], 10);
       let year = parseInt(monthFirstMatch[3], 10);
       if (year < 100) year += 2000;
-
-      const hour = monthFirstMatch[4] ? parseInt(monthFirstMatch[4], 10) : 14;
-      const minute = monthFirstMatch[5] ? parseInt(monthFirstMatch[5], 10) : 0;
-      const second = monthFirstMatch[6] ? parseInt(monthFirstMatch[6], 10) : 0;
-
-      if (
-        month &&
-        isValidCalendarDay(year, month, day) &&
-        isPlausibleTenderYear(year) &&
-        hour >= 0 && hour < 24 &&
-        minute >= 0 && minute < 60 &&
-        second >= 0 && second < 60
-      ) {
-        const hStr = String(hour).padStart(2, '0');
-        const mStr = String(minute).padStart(2, '0');
-        const sStr = String(second).padStart(2, '0');
-        const d = new Date(Date.parse(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${hStr}:${mStr}:${sStr}+05:00`));
-        if (!isNaN(d.getTime())) {
-          return d.toISOString();
-        }
-      }
-      return null;
+      if (!month) return null;
+      return resolvePktDateTime(year, month, day, monthFirstMatch[4], monthFirstMatch[5], monthFirstMatch[6], monthFirstMatch[7]);
     }
 
     // 3a. Full ISO timestamp with an explicit offset (e.g. "...Z" or "...+05:00") is already unambiguous.

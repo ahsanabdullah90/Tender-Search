@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import { launchLocalBrowserHITL, verifyAndResumePortal, playwrightDeps } from '../../src/server/scrapers/playwrightEngine.js';
-import { initDatabase, getPortalHealthList, updatePortalHealth, SESSIONS_DIR } from '../../src/server/db.js';
+import { initDatabase, getPortalHealthList, updatePortalHealth, SESSIONS_DIR } from '../../src/server/db/index.js';
 
 describe('playwrightEngine & HITL orchestration', () => {
   let originalImport: any;
@@ -21,7 +21,7 @@ describe('playwrightEngine & HITL orchestration', () => {
 
     expect(result.success).toBe(true);
     expect(result.portalName).toBeDefined();
-    expect(result.portalUrl).toContain('ppra');
+    expect(result.portalUrl).toContain('epads');
     expect(result.message).toBeDefined();
   });
 

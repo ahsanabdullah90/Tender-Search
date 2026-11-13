@@ -6,15 +6,15 @@ import {
   getTenderById,
   updateTenderFields,
   getGeminiApiKey
-} from '../db.js';
-import { Tender, CachedDossier } from '../../types.js';
+} from '../db/index.js';
+import { Tender, CachedDossier } from '../../shared/types.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
-import { downloadAndCacheDossier, deriveDossierLabel } from '../dossierManager.js';
-import { saveTenderDocument, getPortalFileCode } from '../dossierStore.js';
-import { extractFromDocument, DocumentExtractionResult } from '../documentExtractor.js';
-import { applyDocumentResultToTender } from '../documentApply.js';
-import { summarizeTenderTextWithAI } from '../ocrService.js';
-import { tryConsumeDailyAiText } from '../ingestBudget.js';
+import { downloadAndCacheDossier, deriveDossierLabel } from '../services/dossierManager.js';
+import { saveTenderDocument, getPortalFileCode } from '../services/dossierStore.js';
+import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
+import { applyDocumentResultToTender } from '../services/documentApply.js';
+import { summarizeTenderTextWithAI } from '../services/ocrService.js';
+import { tryConsumeDailyAiText } from '../services/ingestBudget.js';
 import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
 import { isGenericListingUrl, collectRowAttachments, cleanRowSummary } from './portalParsers.js';
 import { crawlerDeps } from './crawlerDeps.js';
@@ -44,7 +44,7 @@ export function isReadableDocumentMime(mimeType?: string | null): boolean {
  */
 export async function fetchDocumentsForTender(
   tenderId: string,
-  options: { forceRefresh?: boolean } = {}
+  _options: { forceRefresh?: boolean } = {}
 ): Promise<{ tender: Tender | null; dossiers: CachedDossier[]; newlyFetched: number; expired: boolean }> {
   const tender = getTenderById(tenderId);
   if (!tender) {
@@ -157,7 +157,7 @@ export async function fetchDocumentsForTender(
           title: tender.title,
           organization: tender.organization
         });
-        if (docResult.closingDateISO || docResult.referenceNo || docResult.summaryScope) {
+        if (docResult.closingDateISO || docResult.referenceNo || docResult.summaryScope || docResult.bidBrief || docResult.extractedText) {
           const applied = applyDocumentResultToTender(getTenderById(tender.id) || tender, docResult);
           if (applied === 'expired') {
             // Signal the removal explicitly instead of returning a fake 'Deleted' tender,
@@ -281,7 +281,7 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
       title: tender.title,
       organization: tender.organization
     });
-    if (r.closingDateISO || r.referenceNo || r.summaryScope) {
+    if (r.closingDateISO || r.referenceNo || r.summaryScope || r.bidBrief || r.extractedText) {
       docResult = r;
       break;
     }

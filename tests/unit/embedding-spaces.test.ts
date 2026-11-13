@@ -9,8 +9,8 @@ import {
   getEmbeddingSpace,
   embedTextToBlobAsync,
   __setExtractorPipelineForTests
-} from '../../src/server/embeddingService.js';
-import { backfillModelEmbeddings } from '../../src/server/embeddingBackfill.js';
+} from '../../src/server/services/embeddingService.js';
+import { backfillModelEmbeddings } from '../../src/server/services/embeddingBackfill.js';
 import {
   db,
   initDatabase,
@@ -20,7 +20,7 @@ import {
   getTendersNeedingModelEmbedding,
   setTenderEmbeddingIfUnchanged,
   countTenderEmbeddingsBySpace
-} from '../../src/server/db.js';
+} from '../../src/server/db/index.js';
 
 /** Deterministic stand-in for the MiniLM pipeline: a character-histogram vector. */
 const fakeMiniLm = async (text: string) => {

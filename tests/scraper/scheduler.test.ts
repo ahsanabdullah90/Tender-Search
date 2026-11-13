@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { db, initDatabase, getPortalHealthList, updatePortalHealth, setAppSetting } from '../../src/server/db.js';
-import { initStartupScheduler, stopStartupScheduler, schedulerDeps } from '../../src/server/scheduler.js';
+import { db, initDatabase, getPortalHealthList, updatePortalHealth, setAppSetting } from '../../src/server/db/index.js';
+import { updateDigestSettings } from '../../src/server/db/repositories/systemRepo.js';
+import { initStartupScheduler, stopStartupScheduler, schedulerDeps, maybeDispatchDailyDigest, getPktDateKey } from '../../src/server/services/scheduler.js';
 
 describe('scheduler and startup watchdog', () => {
   let originalScan: any;
@@ -168,7 +169,6 @@ describe('scheduler and startup watchdog', () => {
 
     it('B7: daily health check runs after catch-up scan promise resolves', async () => {
       let scanResolved = false;
-      let healthChecked = false;
 
       schedulerDeps.startCrawlerScan = vi.fn().mockImplementation(() => {
         return new Promise<any>(resolve => {
@@ -190,6 +190,45 @@ describe('scheduler and startup watchdog', () => {
       // Wait for catch-up to complete
       await new Promise(r => setTimeout(r, 60));
       expect(scanResolved).toBe(true);
+    });
+  });
+
+  describe('Plans B & C: Daily Digest Deduplication & Two-Speed Catch-Up Depth', () => {
+    it('dispatches daily digest webhook at most once per PKT calendar day when urgent alerts exist', async () => {
+      const origSend = schedulerDeps.sendDigestWebhook;
+      const sendMock = vi.fn().mockResolvedValue(undefined);
+      schedulerDeps.sendDigestWebhook = sendMock;
+
+      try {
+        const soon = new Date(Date.now() + 8 * 3600000).toISOString();
+        db.prepare(`
+          INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url, closing_date, pipeline_status, ingestion_status)
+          VALUES ('t-sched-urg', 't-sched-urg', 'epads', 'EPADS', 'Urgent Solar Notice', 'FDE', 'https://epads.gov.pk/su1', ?, 'New Opportunity', 'ready')
+        `).run(soon);
+
+        updateDigestSettings({ enabled: true, webhookUrl: 'https://hooks.example.test/pkt', withinHours: 48 });
+
+        const nowMs = Date.UTC(2026, 10, 13, 19, 30, 0); // 2026-11-14 00:30 PKT
+        const first = await maybeDispatchDailyDigest(nowMs);
+        expect(first).toEqual({ sent: true, reason: 'dispatched' });
+        expect(sendMock).toHaveBeenCalledTimes(1);
+
+        // Second run same PKT calendar day should deduplicate
+        const second = await maybeDispatchDailyDigest(nowMs + 2 * 3600000);
+        expect(second).toEqual({ sent: false, reason: 'already_sent_today' });
+        expect(sendMock).toHaveBeenCalledTimes(1);
+        expect(getPktDateKey(nowMs)).toBe('2026-11-14');
+      } finally {
+        schedulerDeps.sendDigestWebhook = origSend;
+      }
+    });
+
+    it('requests deep depth on catch-up when last_deep_scan_at is absent or older than 24h', () => {
+      setAppSetting('last_full_scan_at', new Date(Date.now() - 15 * 3600000).toISOString());
+      setAppSetting('last_deep_scan_at', null);
+
+      initStartupScheduler();
+      expect(schedulerDeps.startCrawlerScan).toHaveBeenCalledWith(undefined, false, { depth: 'deep' });
     });
   });
 });

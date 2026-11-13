@@ -107,7 +107,7 @@ Plots tenders along a 5-week horizon starting from the current Monday in PKT:
 ## Corrigenda Detection, Provenance Badges & Operator Review Flags
 
 When government agencies issue amendments or when documents are read during ingestion:
-1. **Deadline Provenance Badges (`deadlineProvenance` in `src/components/inbox/Detail.tsx`)**:
+1. **Deadline Provenance Badges (`deadlineProvenance` in `src/client/components/inbox/Detail.tsx`)**:
    - Every tender card and detail panel in both the **Inbox** and **Pipeline** surfaces where its closing deadline came from:
      - `Verified from corrigendum` (`corrigendum_doc`)
      - `Verified from tender document` (`primary_doc`)
@@ -141,12 +141,12 @@ Whenever a crawler visits a portal:
 - If the document text matches a track, the status is promoted to `'ready'` (appearing in the Inbox).
 - If no track matches, the tender is deleted with `reason = 'no-track-match'` and suppressed. Unresolved `awaiting_scope` rows older than 3 days are cleaned up by retention.
 
-### 3. Deduplication & Provenance Rules (`src/server/deduplicator.ts`)
+### 3. Deduplication & Provenance Rules (`src/server/services/deduplicator.ts`)
 - **Tier 1 (Strict Reference)**: Match on `reference_norm`. Requires corroborating signals (organization similarity $\ge 0.5$, title similarity $\ge 0.5$, or closing dates within 1.5 days) unless the reference is long and structured ($\ge 12$ chars with $\ge 2$ segments).
 - **Tier 2 (Title Dice Similarity)**: Evaluated only against different portals (own portal is strictly excluded from duplicate candidate search). The `titlesAreDistinguishable` check prevents merging distinct procurement packages that differ by 1–2 key nouns (e.g., "Laptops" vs "Printers").
 - **Secondary Sources**: The tender's own originating portal is never recorded under `secondary_sources`. Secondary source entries are unique by `direct_url`.
 
-### 4. Slimming, Suppression & Ageing Invariants (`src/server/retention.ts`)
+### 4. Slimming, Suppression & Ageing Invariants (`src/server/services/retention.ts`)
 - **Slimming Passed Tenders**: Dossiers are purged from disk 2 minutes after a tender enters `Passed`. Tenders passed directly from Inbox have descriptions cleared while retaining `status_notes`. Tenders that have ever been in the Pipeline (`pipeline_audit_logs`) preserve their description, full history, and corrigenda permanently.
 - **Suppression Expiry**: Undated suppressions expire after 120 days. Auto-expired suppressions are automatically lifted if a subsequent scan finds a new future closing date. User suppressions (`reason = 'user'`) are permanent.
 - **Undated Ageing Limit**: Standardized to **90 days** (`UNDATED_MAX_AGE_DAYS = 90`) across ingest, retention, and Inbox UI. Publication dates inferred from upload folder paths (`publish_date_source = 'upload_folder'`) are never used for ageing; discovery timestamp `created_at` is used instead.

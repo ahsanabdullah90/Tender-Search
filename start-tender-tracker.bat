@@ -13,8 +13,17 @@ if not exist "node_modules\" (
     call npm install
 )
 
+:: Build production bundle on fresh clone or after clean
+if not exist "dist\index.html" (
+    echo Building production UI and server bundle...
+    call npm run build
+) else if not exist "dist-server\server.mjs" (
+    echo Building compiled server bundle...
+    call npm run build:server
+)
+
 :: Start browser once server is ready in background
 start /min cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:3000"
 
-call npm run dev
+call npm start
 pause

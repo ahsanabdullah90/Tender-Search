@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { extractFromDocument } from '../../src/server/documentExtractor.js';
+import { extractFromDocument } from '../../src/server/services/documentExtractor.js';
 
 describe('DOC-10: Local Document Reading & Two-Stage Extraction Benchmark', () => {
   const DOSSIERS_DIR = path.resolve(process.cwd(), 'data', 'dossiers');

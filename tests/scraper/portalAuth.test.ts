@@ -3,7 +3,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { authenticatePortal } from '../../src/server/scrapers/portalAuth.js';
-import { initDatabase, getPortalHealthList, SESSIONS_DIR } from '../../src/server/db.js';
+import { initDatabase, getPortalHealthList, SESSIONS_DIR } from '../../src/server/db/index.js';
 
 describe('portalAuth', () => {
   let server: http.Server;

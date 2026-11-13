@@ -50,13 +50,15 @@ C:\Tender_Tracker/
   public/                   # Brand logos (public/brand/) and favicons
   scripts/                  # Operational scripts (seed-sample.ts, probe-portals.ts, capture-portal-fixture.ts)
   src/                      # Application source code
-    components/             # React 19 UI screens (Inbox, Pipeline, Sources, AppShell)
-      inbox/                # Modular inbox components (Detail, AddTenderModal, TenderRow, index)
-    server/                 # Express backend, scrapers, local document extractor, ingest worker, Gemini OCR
+    client/                 # React 19 UI application (App, theme, index.css, components/, ui/)
+      components/           # UI screens (Inbox, Pipeline, Sources, AppShell, inbox/, pipeline/)
+      ui/                   # Design system primitive UI components
+    shared/                 # Isomorphic TypeScript domain types (types.ts)
+    server/                 # Express backend, db/, routes/, scrapers/, services/
       db/                   # SQLite connection, schema migrations, and repositories/
       routes/               # Modular Express domain routers (tenders, portals, tracks, scan, system)
       scrapers/             # Modular scrapers (htmlFetcher, crawlerDeps, portalParsers, tenderAnalysis, ingestPipeline, healer, crawlerEngine)
-    ui/                     # Design system primitive UI components
+      services/             # Domain services (deduplicator, documentExtractor, dossierManager, ocrService, embeddingService, ingestWorker, retention, scheduler, etc.)
   tests/                    # Full test suite (39 test files, 598 tests across node & jsdom runners)
   docs/                     # Comprehensive architecture and operational documentation
 ```

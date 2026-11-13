@@ -3,6 +3,8 @@ export interface PaginationConfig {
   param?: string;
   pathPattern?: string;
   maxPages: number;
+  quickMaxPages?: number;
+  deepMaxPages?: number;
   nextSelector?: string;
 }
 
@@ -26,31 +28,32 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
   // 1. Regulatory Authorities (PPRAs)
   {
     id: 'epads',
-    name: 'Federal PPRA (EPMS / EPADS)',
+    name: 'Federal PPRA (EPADS)',
     category: 'Regulatory',
-    tier: 'playwright',
-    baseUrl: 'https://www.ppra.gov.pk',
-    tendersUrl: 'https://epms.ppra.gov.pk/',
+    tier: 'http',
+    baseUrl: 'https://epads.gov.pk',
+    tendersUrl: 'https://epads.gov.pk/',
     fileCode: 'FPPRA',
-    loginUrl: 'https://epms.ppra.gov.pk/',
-    description: 'Federal statutory public procurement electronic system (EPMS/EPADS)',
+    loginUrl: 'https://epads.gov.pk/login',
+    description: 'Federal statutory public procurement electronic portal (EPADS public opportunities board)',
     defaultKeywords: ['construction', 'solar', 'stationery', 'education', 'tvet'],
-    accessMode: 'login_required',
-    verifiedStatus: 'Main site public; EPMS portal requires operator credentials'
+    accessMode: 'public',
+    verifiedStatus: 'Verified open Federal EPADS opportunities table (100/page)',
+    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 3, deepMaxPages: 10 }
   },
   {
     id: 'punjab_eproc',
     name: 'Punjab PPRA (eproc.punjab.gov.pk)',
     category: 'Regulatory',
     tier: 'http',
-    baseUrl: 'https://ppra.punjab.gov.pk',
-    tendersUrl: 'http://eproc.punjab.gov.pk/ActiveTenders.aspx',
+    baseUrl: 'https://eproc.punjab.gov.pk',
+    tendersUrl: 'https://eproc.punjab.gov.pk/ActiveTenders.aspx',
     fileCode: 'PPPRA',
     description: 'Punjab provincial e-Procurement portal (865+ live tenders, no login needed)',
     defaultKeywords: ['renovation', 'photovoltaic', 'stationery', 'consultancy', 'civil works'],
     accessMode: 'public',
     verifiedStatus: 'Working — Top provincial source',
-    pagination: { kind: 'query', param: 'page', maxPages: 3 }
+    pagination: { kind: 'postback', maxPages: 3, quickMaxPages: 3, deepMaxPages: 10 }
   },
   {
     id: 'sppra',
@@ -64,7 +67,7 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     defaultKeywords: ['masonry', 'solarization', 'curriculum', 'toner', 'infrastructure'],
     accessMode: 'public',
     verifiedStatus: 'Working — Massive repository, public access',
-    pagination: { kind: 'query', param: 'page', maxPages: 3 }
+    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 2, deepMaxPages: 5 }
   },
   {
     id: 'kppra',
@@ -106,7 +109,7 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     defaultKeywords: ['rehabilitation', 'solar', 'supplies', 'prefabricated', 'tents'],
     accessMode: 'public',
     verifiedStatus: 'Working — 34 pages of tenders',
-    pagination: { kind: 'query', param: 'page', maxPages: 3 }
+    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 2, deepMaxPages: 5 }
   },
   {
     id: 'fde',
@@ -228,7 +231,7 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     defaultKeywords: ['education', 'clean energy', 'rehabilitation', 'advocacy campaign'],
     accessMode: 'public',
     verifiedStatus: 'Working — 1,700+ live notices',
-    pagination: { kind: 'query', param: 'page', maxPages: 3 }
+    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 2, deepMaxPages: 5 }
   },
   {
     id: 'giz',

@@ -1,5 +1,5 @@
 import { db } from '../connection.js';
-import { PortalHealth } from '../../../types.js';
+import { PortalHealth } from '../../../shared/types.js';
 
 export function getPortalHealthList(): PortalHealth[] {
   const rows = db.prepare('SELECT * FROM portal_health ORDER BY portal_name ASC').all() as any[];
@@ -19,6 +19,7 @@ export function getPortalHealthList(): PortalHealth[] {
     last_items_found: r.last_items_found,
     consecutive_zero_yields: r.consecutive_zero_yields,
     last_error_message: r.last_error_message,
+    last_error_code: r.last_error_code ?? null,
     access_mode: r.access_mode,
     verified_status: r.verified_status,
     last_success_at: r.last_success_at ?? null,
@@ -34,7 +35,7 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
     'portal_name', 'category', 'tier', 'base_url', 'tenders_url', 'login_url',
     'auth_username', 'auth_password', 'session_cookies',
     'status', 'last_scan_at', 'last_items_found', 'consecutive_zero_yields',
-    'last_error_message', 'access_mode', 'verified_status',
+    'last_error_message', 'last_error_code', 'access_mode', 'verified_status',
     'last_success_at', 'pages_scanned'
   ]);
 
@@ -98,6 +99,7 @@ export function getPortalById(portalId: string): PortalHealth | null {
     last_items_found: r.last_items_found,
     consecutive_zero_yields: r.consecutive_zero_yields,
     last_error_message: r.last_error_message,
+    last_error_code: r.last_error_code ?? null,
     access_mode: r.access_mode,
     verified_status: r.verified_status,
     last_success_at: r.last_success_at ?? null,
