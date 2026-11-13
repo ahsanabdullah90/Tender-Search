@@ -141,8 +141,10 @@ When `startCrawlerScan()` in `crawlerEngine.ts` processes a portal via `scrapePo
 - **Journal Mode**: Write-Ahead Logging (`PRAGMA journal_mode = WAL`) for concurrent reads and writes without blocking.
 - **Schema & Migrations**: Programmatic, idempotent guarded `ALTER TABLE` schema updates and `app_settings` initialization in `src/server/db/schema.ts` (exported via `src/server/db/index.ts`).
 
-### Database, Routing & Service Inventory
-Every backend module lives cleanly inside four domain directories under `src/server/`:
+### Full Module Inventory (Client, Shared & Server)
+Every source module lives cleanly inside its designated domain directory under `src/`:
+- **Client UI (`src/client/`)**: `main.tsx`, `App.tsx`, `theme.ts`, `index.css`, `ui/index.tsx` (design primitives), top-level screens/chrome (`components/AppShell.tsx`, `components/KpiHeader.tsx`, `components/InboxScreen.tsx`, `components/PipelineScreen.tsx`, `components/SourcesScreen.tsx`, `components/PortalCredentialsModal.tsx`), pipeline modal (`components/pipeline/PassConfirmModal.tsx`), and Inbox submodules (`components/inbox/Detail.tsx`, `AddTenderModal.tsx`, `TenderRow.tsx`, `DeadlineRunway.tsx`, `DeleteTenderModal.tsx`, `HighlightedDescription.tsx`, `PortalPills.tsx`, `index.ts`).
+- **Shared (`src/shared/`)**: `types.ts` (isomorphic TypeScript domain types shared between React client and Express server).
 - **Database (`src/server/db/`)**: `connection.ts`, `schema.ts`, `index.ts`, and domain repositories `repositories/tendersRepo.ts`, `repositories/portalsRepo.ts`, `repositories/tracksRepo.ts`, `repositories/systemRepo.ts`, `repositories/ingestJobsRepo.ts`.
 - **Routes (`src/server/routes/`)**: `index.ts` mounting `tenders.routes.ts`, `portals.routes.ts`, `tracks.routes.ts`, `scan.routes.ts`, and `system.routes.ts`.
 - **Scrapers (`src/server/scrapers/`)**: `baseScraper.ts`, `crawlerDeps.ts`, `crawlerEngine.ts`, `dateParser.ts`, `healer.ts`, `htmlFetcher.ts`, `ingestPipeline.ts`, `playwrightEngine.ts`, `portalAuth.ts`, `portalList.ts`, `portalParsers.ts`, `tenderAnalysis.ts`, `trackMatcher.ts`.

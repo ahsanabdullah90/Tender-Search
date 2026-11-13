@@ -18,15 +18,25 @@ Returns a list of all active opportunities.
 - **Query Parameters**:
   - `status` *(optional)*: Filter by pipeline status (`New Opportunity`, `Under Review`, `Preparing Bid`, `Submitted`, `Won`, `Passed`).
   - `track` *(optional)*: Filter by matched domain track.
+  - `portal` / `portalId` *(optional)*: Filter by originating portal identifier (`epms_ppra`, `punjab_eproc`, etc.).
   - `search` *(optional)*: FTS5 prefix + semantic fallback text query matched against title, organization, reference number, description, and extracted PDF/DOCX text (`extracted_text`).
   - `bookmarkedOnly` *(optional, `true`\|`false`)*: Filter starred items.
   - `corrigendumOnly` *(optional, `true`\|`false`)*: Filter tenders with active unacknowledged amendments.
-  - `closingWithinHours` *(optional, integer)*: Filter open opportunities closing within the next `N` hours (e.g., `48` for the `Closing <=48h` Inbox chip).
+  - `unreadOnly` *(optional, `true`\|`false`)*: Filter unviewed opportunities.
+  - `excludeExpired` *(optional, `true`\|`false`)*: Exclude tenders whose closing deadline is already in the past. *(Note: Inbox's `Closing <=48h` filter evaluates `closing_date` client-side alongside `GET /api/system/digest?hours=48`.)*
 - **Response**: `200 OK` array of tender objects (including parsed `bid_brief_json` when structured Go/No-Go brief fields are available).
+
+### `GET /api/tenders/portal-summary`
+Returns grouped non-expired active tender counts per portal (`getPortalTenderSummary()`).
+- **Response**: `200 OK` array of `{ portal_id, portal_name, count }`.
 
 ### `GET /api/tenders/:id`
 Retrieves a single tender by its unique identifier.
 - **Response**: `200 OK` or `404 Not Found`.
+
+### `DELETE /api/tenders/:id`
+Deletes a single tender record and adds it to `deleted_tenders` with `reason = 'user'` so future crawls do not re-import it.
+- **Response**: `200 OK` (`{"success": true, "deleted": 1, "id": "..."}`) or `404 Not Found`.
 
 ### `POST /api/tenders`
 Creates a manual tender entry with automatic domain track matching and optional file attachment.
@@ -324,6 +334,9 @@ Creates or updates a domain track.
     "negative_keywords": ["solar geyser repair"]
   }
   ```
+
+### `GET /api/kpis`
+Returns live operational KPI summary counts (`newOpportunities`, `closingSoon`, `corrigendaCount`, `activePipeline`, `sourcesHealthy`, `sourcesTotal`, `lastFullScanTimestamp`, etc.) via `getKpiStats()`.
 
 ### `DELETE /api/tracks/:id`
 Deletes a domain track.

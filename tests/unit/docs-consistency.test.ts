@@ -101,7 +101,7 @@ describe('docs-consistency (QA-4 Automated Documentation Consistency)', () => {
     expect(untestedRows).toEqual([]);
   });
 
-  it('proves every table in schema.ts is documented in docs/03-database-schema.md (QA-4)', () => {
+  it('proves every table and column in schema.ts is documented in docs/03-database-schema.md (QA-4)', () => {
     const schemaFile = fs.readFileSync(path.resolve(rootDir, 'src/server/db/schema.ts'), 'utf8');
     const doc03 = fs.readFileSync(path.resolve(docsDir, '03-database-schema.md'), 'utf8');
 
@@ -112,34 +112,92 @@ describe('docs-consistency (QA-4 Automated Documentation Consistency)', () => {
       schemaTables.add(match[1].toLowerCase());
     }
 
-    const undocumented = [...schemaTables].filter(t => !doc03.includes(t));
+    const createBlockPattern = /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+\w+\s*\(([\s\S]*?)\);/gi;
+    const schemaCols = new Set<string>();
+    let blockMatch: RegExpExecArray | null;
+    while ((blockMatch = createBlockPattern.exec(schemaFile)) !== null) {
+      for (const line of blockMatch[1].split('\n')) {
+        const colMatch = line.trim().match(/^([a-z_][a-z0-9_]*)\s+(?:TEXT|INTEGER|REAL|BLOB)\b/i);
+        if (colMatch) schemaCols.add(colMatch[1]);
+      }
+    }
+    for (const alterMatch of schemaFile.matchAll(/ADD\s+COLUMN\s+([a-z_][a-z0-9_]*)/gi)) {
+      schemaCols.add(alterMatch[1]);
+    }
+
+    const undocumentedTables = [...schemaTables].filter(t => !doc03.includes(t));
+    const undocumentedCols = [...schemaCols].filter(c => !doc03.includes(c));
     expect(schemaTables.size).toBeGreaterThanOrEqual(10);
-    expect(undocumented).toEqual([]);
+    expect(undocumentedTables).toEqual([]);
+    expect(undocumentedCols).toEqual([]);
   });
 
-  it('proves every server module under src/server/ is documented in docs/02-architecture-and-stack.md (QA-4)', () => {
+  it('proves every source module (server, client, shared) and script is documented (QA-4)', () => {
     const doc02 = fs.readFileSync(path.resolve(docsDir, '02-architecture-and-stack.md'), 'utf8');
-    const dirsToCheck = [
-      'src/server/db',
-      'src/server/db/repositories',
-      'src/server/routes',
-      'src/server/scrapers',
-      'src/server/services'
-    ];
+    const doc11 = fs.readFileSync(path.resolve(docsDir, '11-configuration-and-env.md'), 'utf8');
 
+    const walk = (dir: string): string[] => {
+      const results: string[] = [];
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) results.push(...walk(full));
+        else results.push(full);
+      }
+      return results;
+    };
+
+    const srcRoots = ['src/server', 'src/client', 'src/shared'];
     const missingModules: string[] = [];
-    for (const relDir of dirsToCheck) {
-      const fullDir = path.resolve(rootDir, relDir);
-      const files = fs.readdirSync(fullDir)
-        .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && f !== 'index.ts');
-      for (const file of files) {
-        if (!doc02.includes(file)) {
-          missingModules.push(`${relDir}/${file}`);
+    for (const relRoot of srcRoots) {
+      for (const absFile of walk(path.resolve(rootDir, relRoot))) {
+        const rel = path.relative(rootDir, absFile).replace(/\\/g, '/');
+        if (!/\.(ts|tsx|css)$/.test(rel) || rel.endsWith('.d.ts')) continue;
+        const base = path.basename(rel);
+        if (base === 'index.ts' && !rel.startsWith('src/client/components/inbox/')) continue;
+        if (!doc02.includes(base)) {
+          missingModules.push(rel);
         }
       }
     }
 
+    const missingScripts = fs.readdirSync(path.resolve(rootDir, 'scripts'))
+      .filter(f => !doc11.includes(f));
+
     expect(missingModules).toEqual([]);
+    expect(missingScripts).toEqual([]);
+  });
+
+  it('proves canonical REST endpoints match docs/04-api-reference.md and docs/06 avoids retired EPADS (QA-4)', () => {
+    const doc04 = fs.readFileSync(path.resolve(docsDir, '04-api-reference.md'), 'utf8');
+    const doc06 = fs.readFileSync(path.resolve(docsDir, '06-pipeline-and-workflow.md'), 'utf8');
+
+    const requiredEndpoints = [
+      '/api/tenders',
+      '/api/tenders/portal-summary',
+      '/api/tenders/:id',
+      '/api/portals',
+      '/api/tracks',
+      '/api/kpis',
+      '/api/corrigenda',
+      '/api/scan/start',
+      '/api/scan/status',
+      '/api/scan/progress',
+      '/api/storage',
+      '/api/system/ingest-budgets',
+      '/api/system/retention',
+      '/api/system/embedding-status',
+      '/api/system/logs',
+      '/api/system/digest',
+      '/api/backups',
+      '/api/dossiers/:tenderId/:filename',
+      '/api/export/csv',
+      '/api/ai/status',
+      '/api/ai/config',
+      '/api/ai/extract-file'
+    ];
+    const missingEndpoints = requiredEndpoints.filter(ep => !doc04.includes(ep));
+    expect(missingEndpoints).toEqual([]);
+    expect(doc06).not.toMatch(/\bEPADS\b/);
   });
 
   it('proves canonical PORTAL_DEFINITIONS IDs & schema sync with docs/05 and operational docs avoid retired epads (QA-4)', () => {

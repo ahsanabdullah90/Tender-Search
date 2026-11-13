@@ -78,7 +78,7 @@ stateDiagram-v2
 3. **`Preparing Bid` (Pipeline)**:
    Active proposal drafting stage: procuring bid bonds, preparing technical envelopes, costing bill of quantities (BOQ), and completing compliance sheets.
 4. **`Submitted` (Pipeline)**:
-   The bid has been formally delivered (physically by courier or electronically via EPADS). The tender awaits opening and technical evaluation.
+   The bid has been formally delivered (physically by courier or electronically via e-Procurement / EPMS). The tender awaits opening and technical evaluation.
 5. **`Won` (Pipeline)**:
    Contract awarded to Ahsan Abdullah / operating entity. Successfully closed opportunity.
 6. **`Passed` (Archive)**:
