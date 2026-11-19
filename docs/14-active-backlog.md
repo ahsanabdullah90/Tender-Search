@@ -28,6 +28,9 @@ All approved non-breaking improvement plans are implemented and moved to the Com
 
 ## 3. Recently Completed Register Items (2026-11-11 – 2026-11-19)
 
+- **Sidebar Accessibility Hardening, Node 22 Runtime & Repository Hygiene (`2026-11-19`):**
+  - Updated `src/client/components/AppShell.tsx` (`bb87903`) per `modern-web-guidance` (`accessibility`, `motion`, `color`) with centralized polite/assertive live regions outside interactive controls, ≥24px Recheck target size, `aria-describedby` scan-button descriptions, shape-distinct network icons, `forced-colors` borders, and `motion-safe` animation gating (`tests/ui/app-shell.test.tsx`).
+  - Aligned runtime to Node.js `v22.23.5` (removing legacy `OpenJS.NodeJS.20`), updated `.gitignore` (`data/app-profile/`, `data/**/*.tmp`) and `.env.example`, removed stale untracked artifacts (`coverage/`, `data-sample/`, `docs/archive/claude-outputs/`, `docs/archive/mocks/`), and synchronized governance/architecture/API/operations/testing docs.
 - **Network Health Monitor, Heavy/Light Task Gating & Anti-Corruption Safeguards (`2026-11-19`):**
   - Created `src/server/services/networkMonitor.ts` (`online` / `degraded` / `offline` classification via cached multi-endpoint HTTP probes and passive multi-host slow/timeout tracking) with `GET /api/system/network` and `POST /api/system/network/check` in `src/server/routes/system.routes.ts`.
   - Eliminated slow-network data corruption via `90s` TLS agent socket ceilings (`baseScraper.ts`), strict HTTP stream completion & `Content-Length` truncation checks (`htmlFetcher.ts`, `dossierManager.ts`), and atomic `.tmp` rename writes in `dossierManager.ts`.

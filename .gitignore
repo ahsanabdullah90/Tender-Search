@@ -17,10 +17,10 @@ data/sessions/
 data/logs/
 data/models/
 data/tessdata/
+data/app-profile/
+data/**/*.tmp
 
 # Sample data for redesign work
 data-sample/
 
-docs/archive/claude-outputs/
-docs/archive/mocks/
 .claude/

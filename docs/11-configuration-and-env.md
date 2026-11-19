@@ -1,5 +1,9 @@
 # 11. Configuration & Environment Reference
 
+## Runtime Requirement
+
+- **Node.js**: **v22+ (LTS)** (matches `.github/workflows/ci.yml` `node-version: 22`; native SQLite binding `better-sqlite3` targets the active Node ABI).
+
 ## Environment Variables
 
 Tender Tracker supports the following environment variables (defined in `.env` or set in the operating system shell):
@@ -54,8 +58,8 @@ C:\Tender_Tracker/
     models/                 # Local HuggingFace MiniLM ONNX model cache
     tessdata/               # Offline Tesseract language traineddata cache
     sessions/               # Serialized session cookies from HITL portal sessions
-    app-profile/            # Isolated Edge/Chrome profile for standalone desktop app window
-  data-sample/              # Isolated sample data used for preview & demonstration
+    app-profile/            # Isolated Edge/Chrome profile for standalone desktop app window (gitignored)
+  data-sample/              # Optional isolated sample data created on demand by npm run seed:sample (gitignored)
   dist/                     # Built Vite client bundle (served by Express in production)
   dist-server/              # Compiled server bundle (dist-server/server.mjs)
   public/                   # Brand logos (public/brand/), favicons, and web app manifest (public/manifest.webmanifest)

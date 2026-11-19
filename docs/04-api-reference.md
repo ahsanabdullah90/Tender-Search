@@ -24,7 +24,7 @@ Returns a list of all active opportunities.
   - `corrigendumOnly` *(optional, `true`\|`false`)*: Filter tenders with active unacknowledged amendments.
   - `unreadOnly` *(optional, `true`\|`false`)*: Filter unviewed opportunities.
   - `excludeExpired` *(optional, `true`\|`false`)*: Exclude tenders whose closing deadline is already in the past. *(Note: Inbox's `Closing <=48h` filter evaluates `closing_date` client-side alongside `GET /api/system/digest?hours=48`.)*
-- **Response**: `200 OK` array of tender objects (including parsed `bid_brief_json` when structured Go/No-Go brief fields are available).
+- **Response**: `200 OK` array of tender objects (including parsed `bid_brief` when structured Go/No-Go brief fields are available).
 
 ### `GET /api/tenders/portal-summary`
 Returns grouped non-expired active tender counts per portal (`getPortalTenderSummary()`).
@@ -176,7 +176,7 @@ Returns the current Gemini configuration state, masked API key, and active model
   {
     "configured": true,
     "maskedKey": "AIza••••1234",
-    "model": "gemini-flash-lite-latest"
+    "model": "Gemini Flash (Multi-Model Failover)"
   }
   ```
 
@@ -308,9 +308,11 @@ Returns immediate snapshot of crawler status.
     "corrigendaFound": 2,
     "heldForScope": 3,
     "lastScanTimestamp": "2026-11-13T09:00:00+05:00",
-    "lastFullScanTimestamp": "2026-11-13T08:00:00+05:00"
+    "lastFullScanTimestamp": "2026-11-13T08:00:00+05:00",
+    "pausedReason": null
   }
   ```
+  - `pausedReason` *(optional `string | null`)*: Explains why a requested scan was paused or deferred (for example, offline or slow network connectivity).
 
 ### `GET /api/scan/progress` & `GET /api/scan/stream`
 Server-Sent Events (SSE) connection streaming real-time scan progress events to connected clients.
@@ -336,7 +338,7 @@ Creates or updates a domain track.
   ```
 
 ### `GET /api/kpis`
-Returns live operational KPI summary counts (`newOpportunities`, `closingSoon`, `corrigendaCount`, `activePipeline`, `sourcesHealthy`, `sourcesTotal`, `lastFullScanTimestamp`, etc.) via `getKpiStats()`.
+Returns live operational KPI summary counts (`totalTracked`, `closingSoon`, `inPipeline`, `unackCorrigenda`, `totalPortals`, `onlinePortals`, `hitlRequiredCount`) via `getKpiStats()`.
 
 ### `DELETE /api/tracks/:id`
 Deletes a domain track.

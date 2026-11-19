@@ -48,6 +48,7 @@ When you open Tender Tracker:
    - If greater than 0, tenders you are tracking have received deadline extensions or amendments.
    - Click the alert or filter by **Amended** to inspect modified closing dates.
 3. **Network Status Indicator (Sidebar Footer)**:
+   - Displays shape-distinct status icons alongside labels (`Healthy`, `Slow`, `Offline`), supports Windows High Contrast (Forced Colors) borders, links status details directly to disabled **Scan now** / **Deep** buttons via assistive descriptions, and announces connectivity transitions or scan pauses cleanly without 60s background poll chatter:
    - **`Healthy`**: Normal high-speed mode; both quick and deep scans as well as background PDF downloads run automatically.
    - **`Slow`**: Heavy tasks (**Deep** multi-page scans, upfront PDF downloads, and the background document queue) are automatically held until connectivity recovers to protect data integrity. Lightweight **Quick Scans** (**Scan now** / single-portal refreshes) still run serially with extended timeouts, and all local browsing/editing/searching continues unaffected. Deferred deep scans and document jobs resume automatically once connectivity returns to **Healthy**.
    - **`Offline`**: All network scans and document downloads pause cleanly without corrupting portal health or partial files; local Inbox/Pipeline review, search, notes, and backups remain available.

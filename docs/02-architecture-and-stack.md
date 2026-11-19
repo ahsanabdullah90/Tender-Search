@@ -7,17 +7,18 @@ Tender Tracker is architected as an integrated single-process Node.js applicatio
 ```mermaid
 graph TD
     subgraph Client [Browser Client: React 19 + Tailwind v4]
-        AppShell[App.tsx: Root State & SSE Subscriber]
+        AppShell[App.tsx & AppShell.tsx: Root State, Sidebar Network Status & SSE]
         KpiBanner[KpiHeader.tsx: Metrics, HITL & Corrigenda Alerts]
         Inbox[InboxScreen.tsx & src/client/components/inbox/: Detail, AddTenderModal, TenderRow, DeadlineRunway]
         Pipeline[PipelineScreen.tsx: Kanban Board & 5-Week Gantt]
         Sources[SourcesScreen.tsx: Keywords, Portals & Data Mgmt]
     end
 
-    subgraph Server [Backend Engine: Express on Node 20/24]
+    subgraph Server [Backend Engine: Express on Node 22+]
         API["src/server/routes/*.routes.ts: Modular REST, Auth & Digest API"]
-        SSEHub[SSE Stream /api/scan/progress]
+        SSEHub[SSE Stream /api/scan/stream & /api/scan/progress]
         Scheduler[scheduler.ts & retention.ts: Cron, Digest, Retention & Worker Trigger]
+        NetworkMonitor[networkMonitor.ts: Connectivity Health & Task Gating]
         Crawler[crawlerEngine.ts & baseScraper.ts: Scan Orchestrator & Worker Pool]
         IngestPipeline[ingestPipeline.ts: Dedup, Staging, Rescan & Ingestion Decisions]
         PortalParsers[portalParsers.ts, dateParser.ts, trackMatcher.ts & portalList.ts]
@@ -40,6 +41,7 @@ graph TD
         DossierStorage[data/dossiers/]
         SessionStorage[data/sessions/]
         BackupStorage[data/backups/]
+        RuntimeCaches[data/logs/, data/models/, data/tessdata/ & data/app-profile/]
     end
 
     subgraph External [External Web & AI Services]
@@ -47,7 +49,7 @@ graph TD
         GeminiAPI[Google AI Studio: 4-Model Failover Pool]
     end
 
-    AppShell -->|REST Fetch| API
+    AppShell -->|REST Fetch & Network Check| API
     AppShell -->|EventSource| SSEHub
     Inbox -->|Trigger AI / Upload / Triage| API
     Pipeline -->|Stage Transition / Notes| API
@@ -55,9 +57,12 @@ graph TD
 
     API --> DB
     API --> Crawler
+    API --> NetworkMonitor
     API --> OCR
     API --> BrowserEngine
     Scheduler --> Crawler
+    Scheduler --> NetworkMonitor
+    Crawler --> NetworkMonitor
     Crawler -->|Broadcast Progress| SSEHub
     Crawler -->|Fetch & Parse| GovPortals
     Crawler -->|On HTTP 404/410/500 only| Healer
@@ -74,17 +79,20 @@ graph TD
     DossierMgr --> OCR
     OCR --> GeminiAPI
     API --> BackupStorage
+    API -.-> RuntimeCaches
 ```
 
 ---
 
 ## How Application Segments Communicate With Each Other
 
-### 1. Frontend UI $\leftrightarrow$ Express REST & SSE Backend (`src/client/App.tsx` $\leftrightarrow$ `src/server/routes/*.routes.ts`)
-- **Initial Hydration & Polling-Free Updates**:
-  When `App.tsx` mounts, it fetches `/api/tenders`, `/api/kpis`, `/api/tracks`, `/api/portals`, and `/api/scan/status` in parallel, then opens a persistent `EventSource` connection to `/api/scan/progress`.
+### 1. Frontend UI $\leftrightarrow$ Express REST & SSE Backend (`src/client/App.tsx` & `src/client/components/AppShell.tsx` $\leftrightarrow$ `src/server/routes/*.routes.ts`)
+- **Initial Hydration & Network Health Polling**:
+  When `App.tsx` mounts, it fetches `/api/tenders`, `/api/tracks`, `/api/portals`, `/api/corrigenda`, and `/api/kpis`, polls `/api/system/network` every 60 seconds (plus on window focus, `online`/`offline` browser transitions, and manual **Recheck** via `POST /api/system/network/check`), and opens a persistent `EventSource` connection to `/api/scan/stream` (alias `/api/scan/progress`).
+- **Sidebar Network Indicator & Accessible Announcements (`AppShell.tsx`)**:
+  Renders live network health (`Healthy`, `Slow`, `Offline`) with shape-distinct icons, `aria-describedby` scan-button context, `forced-colors` borders, `motion-safe` animations, and centralized off-control `role="status"` / `role="alert"` live regions.
 - **Real-Time Scan Telemetry**:
-  Whenever `crawlerEngine.ts` updates `currentScanStatus` (portal name, completion percentage, new tenders found, corrigenda count), `broadcastProgress()` pushes a JSON frame over SSE to `App.tsx`. When `isScanning` transitions from `true` to `false`, `App.tsx` automatically re-fetches tenders, KPIs, and portal health rows so the UI updates immediately.
+  Whenever `crawlerEngine.ts` updates `currentScanStatus` (portal name, completion percentage, new tenders found, corrigenda count, `pausedReason`), `broadcastProgress()` pushes a JSON frame over SSE to `App.tsx`. When `isScanning` transitions from `true` to `false`, `App.tsx` automatically re-fetches tenders, KPIs, corrigenda, portal health rows, and network status so the UI updates immediately.
 - **Portals Management & Error Diagnostics (`SourcesScreen.tsx`)**:
   - Displays each portal's live status badge (`Online`, `Action needed`, `Selector broken`, `Connection error`) and surfaces the exact failure cause (`Reason: <last_error_message>`) directly below the website address.
   - Provides a simplified two-field Edit Dialog (**Portal name** and **Website address**). Saving sends `PUT /api/portals/:portalId`, which updates both `tenders_url` and derived `base_url` in SQLite and clears stale error states.
@@ -128,7 +136,7 @@ When `startCrawlerScan()` in `crawlerEngine.ts` processes a portal via `scrapePo
 ## Technology Stack
 
 ### Runtime & Core Frameworks
-- **Runtime**: Node.js v20+ / v24.
+- **Runtime**: Node.js v22+ (LTS).
 - **Backend Framework**: Express v4 (`server.ts`, modularized via `createApp()`).
 - **Frontend Framework**: React v19 with React DOM.
 - **Build Tool**: Vite v8 with `@vitejs/plugin-react` and `@tailwindcss/vite`.
@@ -161,7 +169,7 @@ Every source module lives cleanly inside its designated domain directory under `
 
 ## Data Boundary & Security Isolation
 
-- **Production Directory (`data/`)**: Contains live operational database `tender_tracker.db`, dossier downloads, serialized session cookies, and database backups.
+- **Production Directory (`data/`)**: Contains live operational database `tender_tracker.db`, dossier downloads (`dossiers/`), serialized session cookies (`sessions/`), database backups (`backups/`), session logs (`logs/`), MiniLM ONNX models (`models/`), Tesseract language files (`tessdata/`), and isolated desktop browser profile (`app-profile/`).
 - **Sample Directory (`data-sample/`)**: Isolated environment populated by `npm run seed:sample` for demonstration and preview.
 - **Automated Test Isolation**: Tests enforce `TENDER_DATA_DIR` pointing to temporary isolated folders (`AppData/Local/Temp/tt-suite-temp-*`). The setup guard throws an immediate exception if a test attempts to bind to the root production `data/` directory.
 - **Loopback Binding**: By default, `server.ts` binds strictly to `127.0.0.1` (`HOST=127.0.0.1`), preventing exposure on public network interfaces.

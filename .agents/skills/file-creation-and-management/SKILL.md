@@ -23,17 +23,22 @@ Tender-Search/
 ├── .agents/skills/               # Custom workspace skills (including this skill)
 ├── data/                         # Local database & runtime files (gitignored)
 │   ├── tender_tracker.db
+│   ├── app-profile/              # Isolated Edge/Chrome profile for standalone desktop window
 │   ├── backups/                  # SQLite snapshot backups
 │   ├── dossiers/                 # Cached tender PDF/image attachments
-│   └── sessions/                 # Persistent Playwright browser auth states
+│   ├── logs/                     # Session execution logs (last 3 retained)
+│   ├── models/                   # Local MiniLM ONNX model cache
+│   ├── sessions/                 # Persistent Playwright browser auth states
+│   └── tessdata/                 # Offline Tesseract OCR language data
 ├── docs/                         # Technical documentation & architecture specs
 ├── public/                       # Static web assets served verbatim by Vite/Express
 │   ├── brand/                    # Application logos (logo-square.png, logo-landscape.png)
+│   ├── manifest.webmanifest      # Standalone desktop PWA manifest
 │   └── favicon.ico / icons
-├── scripts/                      # Standalone CLI tools & maintenance scripts
+├── scripts/                      # Standalone CLI tools, desktop tray host & maintenance scripts
 ├── src/                          # TypeScript source code
 │   ├── client/                   # Frontend React application
-│   │   ├── components/           # React screens and compound UI components
+│   │   ├── components/           # React screens and compound UI components (inbox/, pipeline/)
 │   │   ├── ui/                   # Atomic design UI primitives (Button, Chip, Dialog, etc.)
 │   │   ├── App.tsx / main.tsx    # Vite React entrypoint
 │   │   └── index.css / theme.ts  # Design tokens & theme handler
@@ -44,7 +49,7 @@ Tender-Search/
 │       ├── db/                   # Database connection, schema DDL, and repositories
 │       │   └── repositories/     # Domain data access objects (tenders, portals, etc.)
 │       ├── scrapers/             # Ingestion pipeline, parsers, and auto-healer
-│       └── services/             # Domain services (deduplicator, dossierManager, ocrService, scheduler, etc.)
+│       └── services/             # Domain services (deduplicator, dossierManager, networkMonitor, ocrService, scheduler, etc.)
 ├── tests/                        # Automated tests mirroring src/ 1:1
 │   ├── api/                      # REST endpoint and SSE integration tests
 │   ├── db/                       # Database schema and repository tests
@@ -53,6 +58,8 @@ Tender-Search/
 │   └── unit/                     # Pure domain logic tests (dateParser, match, etc.)
 ├── server.ts                     # Thin server bootstrap launcher (< 120 lines)
 ├── index.html                    # Vite HTML entrypoint
+├── start-tender-tracker.bat      # Windows desktop/console launcher
+├── Launch Tender Tracker.lnk     # Windows Explorer standalone desktop shortcut
 └── [config files]                # package.json, tsconfig.json, vite.config.ts, vitest.config.ts
 ```
 
@@ -87,7 +94,7 @@ When creating a new file, find its exact home using this decision table:
 ### Rule 1: Project Root Hygiene
 - **Never place loose image files, media, PDFs, or raw assets in the project root.** All brand assets belong exclusively in `public/brand/`.
 - **Never place route handlers or business logic directly in `server.ts`.** `server.ts` is strictly a thin bootstrapper that configures middleware, delegates `/api` to `apiRouter`, and mounts Vite or static files.
-- The project root must only contain standard configuration files (`package.json`, `tsconfig.json`, `vite.config.ts`, etc.) and the bootstrapper `server.ts`.
+- The project root must only contain standard configuration files (`package.json`, `tsconfig.json`, `vite.config.ts`, etc.), `index.html`, the bootstrapper `server.ts`, and authorized desktop launchers (`start-tender-tracker.bat`, `Launch Tender Tracker.lnk`).
 
 ### Rule 2: Modular Route Controllers (`src/server/routes/`)
 - Every HTTP endpoint must reside in a domain controller:

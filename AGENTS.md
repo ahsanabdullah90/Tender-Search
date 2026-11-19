@@ -1,7 +1,7 @@
 # Tender-Search Project Rules & Codebase Governance
 
 ## 1. File Placement & Root Hygiene Rules
-- **Root Directory**: The repository root must contain ONLY top-level build configuration files (`package.json`, `tsconfig.json`, `vite.config.ts`, etc.) and the thin launcher `server.ts`. NEVER place loose image files, media, test dumps, or scratch files in the root directory.
+- **Root Directory**: The repository root must contain ONLY top-level build configuration files (`package.json`, `tsconfig.json`, `vite.config.ts`, etc.), `index.html`, the thin launcher `server.ts`, and authorized Windows desktop launchers (`start-tender-tracker.bat`, `Launch Tender Tracker.lnk`). NEVER place loose image files, media, test dumps, or scratch files in the root directory.
 - **Brand Assets**: All branding logos live strictly under `public/brand/` (`logo-square.png`, `logo-landscape.png`). Favicons live in `public/`.
 - **Server Routes**: All REST endpoints and SSE streams belong in domain route controllers under `src/server/routes/` (`tenders.routes.ts`, `portals.routes.ts`, `tracks.routes.ts`, `scan.routes.ts`, `system.routes.ts`) and must be registered via `src/server/routes/index.ts`. Never put route handlers directly into `server.ts`.
 - **Database Layer**: Database connection belongs in `src/server/db/connection.ts`, schema DDL in `src/server/db/schema.ts`, domain queries in `src/server/db/repositories/` (`tendersRepo.ts`, `portalsRepo.ts`, `tracksRepo.ts`, `systemRepo.ts`, `ingestJobsRepo.ts`), and barrel exports in `src/server/db/index.ts`. Never write ad-hoc SQL queries outside these repositories.

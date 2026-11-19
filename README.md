@@ -4,6 +4,8 @@ Autonomous procurement scout and opportunity command center monitoring 18 Pakist
 
 ## Quick Start (Windows 11)
 
+Requires **Node.js 22+ (LTS)**.
+
 1. Double-click **`Launch Tender Tracker.lnk`** (or **`start-tender-tracker.bat`**) — or run **`npm run desktop`** — to build if needed and launch the silent Windows System Tray host with a dedicated standalone Edge/Chrome window (**Microsoft Edge first**, **Chrome second**).
 2. For a foreground terminal session use `start-tender-tracker.bat --console` (or `npm start`), or run `npm install` followed by `npm run dev` for development with Vite hot reloading.
 3. Tender Tracker initializes the local SQLite WAL database in `./data/tender_tracker.db` at `http://127.0.0.1:3000`.
@@ -38,6 +40,8 @@ Sample data is kept in `./data-sample/`, separate from `./data/`.
 - **3-Tier Hybrid Deduplication & Semantic Matching**: Combines normalized reference numbers, Dice bigram similarity, and 384-dimensional `all-MiniLM-L6-v2` semantic embeddings (with tagged vector spaces) across provincial boards, PPRA, and newspapers.
 - **Deadline Provenance & Operator Review Workflow**: Tracks where every closing date came from (`corrigendum_doc`, `primary_doc`, `html_row`, `manual`) and flags ambiguous, earlier-shifted, or cancelled notices (`needs_review`) across both Inbox and Pipeline with one-click **Confirm** and **Pass as cancelled** actions.
 - **Human-in-the-Loop (HITL)**: When a portal presents a CAPTCHA or Cloudflare challenge, Tender Tracker prompts you to launch a local browser session to resolve it.
+- **Network Health Monitor & Anti-Corruption Safeguards**: Classifies connectivity (`online`, `degraded`, `offline`), gates heavy tasks (deep multi-page scans, upfront PDFs, background document queue, `awaiting_scope` purges) while preserving serial quick scans, enforces 90s TLS socket ceilings and strict stream/atomic-file checks, and surfaces accessible live status + manual recheck controls in the sidebar and tray.
+- **Standalone Desktop Window & Windows System Tray**: Launches silently via `Launch Tender Tracker.lnk` and `scripts/tray-app.ps1` into an isolated Edge/Chrome `--app` window (`data/app-profile/`) with tray scan/network controls, closing alerts, and token-guarded SQLite WAL shutdown.
 - **UTF-8 BOM CSV Export**: Filter-aware export rendered cleanly for Microsoft Excel on Windows.
 
 ## Testing & Quality Assurance

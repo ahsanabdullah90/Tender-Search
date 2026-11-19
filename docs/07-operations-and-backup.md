@@ -23,10 +23,12 @@ The production operational environment contains Ahsan Abdullah's private bids, h
 
 ### Manual Backup Restoration
 To restore from a backup:
-1. Stop the application server:
-   ```powershell
-   Get-Process -Name node | Stop-Process
-   ```
+1. Stop the application cleanly so SQLite WAL checkpoints and closes:
+   - **Desktop Tray Host:** Right-click the Tender Tracker tray icon and select **Quit Tender Tracker** (triggers graceful `/api/system/shutdown`).
+   - **Console Fallback:** Press `Ctrl+C` in the terminal or terminate Node:
+     ```powershell
+     Get-Process -Name node | Stop-Process
+     ```
 2. Navigate to the `data/` directory.
 3. Rename the current database:
    ```powershell
@@ -60,14 +62,16 @@ Over months of operation, passed and expired tenders can accumulate cached files
 ## Daily Operational Health Checklist
 
 At the beginning of each business day:
-1. **Launch Tender Tracker**: Double-click `start-tender-tracker.bat` (runs compiled production bundle `npm start`) or launch via `npm run dev` during development.
-2. **Review KPI Banner**:
+1. **Launch Tender Tracker**: Double-click **`Launch Tender Tracker.lnk`** (or **`start-tender-tracker.bat`** / **`npm run desktop`**) for the standalone window and system tray host, or run `npm run dev` during development.
+2. **Check Network Status (Sidebar Footer)**:
+   - Confirm the indicator shows **`Healthy`** (`Slow` pauses deep scans and background document queues while keeping quick scans available; `Offline` pauses all network tasks cleanly). Click **Recheck** if you just switched connections.
+3. **Review KPI Banner**:
    - Check if any portal has `hitl_required` (amber warning). If present, click "Launch HITL Browser", solve the challenge or sign in, and click "I've finished".
    - Check if any portal is in `error` state.
-3. **Review Corrigenda**:
+4. **Review Corrigenda**:
    - Check the KPI header for unacknowledged amendments. Click to inspect updated closing deadlines or modified scopes.
-4. **Process New Opportunities**:
+5. **Process New Opportunities**:
    - Review the Inbox. For viable tenders, click "Track this bid" to move to `Under Review`. Pass unwanted notices.
    - For paper clippings or outside leads, click **"Add Tender"** to create a manual notice or upload an image/PDF with AI auto-extraction.
-5. **Update Pipeline**:
+6. **Update Pipeline**:
    - Update bid status, record proposal submission details, and note expected award dates.
