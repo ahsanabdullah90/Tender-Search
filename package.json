@@ -10,6 +10,7 @@
     "build": "npm run build:client && npm run build:server",
     "preview": "vite preview",
     "start": "node dist-server/server.mjs --production",
+    "desktop": "wscript.exe scripts/launch-desktop.vbs",
     "clean": "node -e \"try{fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-server',{recursive:true,force:true});fs.rmSync('server.js',{force:true})}catch(e){}\"",
     "lint": "tsc --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "verify": "npm run lint && vitest run --testTimeout=30000 && npm run build",

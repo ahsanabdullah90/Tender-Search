@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-16 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, and Offline `local_ocr` Fallback).
+**Last updated:** 2026-11-19 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, and Standalone Desktop Window & System Tray).
 
 This document tracks **active operational items and approved non-breaking feature plans**. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 
@@ -26,7 +26,13 @@ All approved non-breaking improvement plans are implemented and moved to the Com
 
 ---
 
-## 3. Recently Completed Register Items (2026-11-11 – 2026-11-16)
+## 3. Recently Completed Register Items (2026-11-11 – 2026-11-19)
+
+- **Standalone Desktop Window & Windows System Tray (Option 2, `2026-11-19`):**
+  - Added `public/manifest.webmanifest` (`display: "standalone"`) and manifest/theme-color tags in `index.html`.
+  - Added token-guarded `POST /api/system/shutdown` in `src/server/routes/system.routes.ts` (`TENDER_SHUTDOWN_TOKEN` + constant-time `X-Shutdown-Token`) and `closeAllConnections` shutdown handling in `server.ts`.
+  - Added `scripts/tray-app.ps1` and `scripts/launch-desktop.vbs` featuring single-instance mutex protection, hidden production server orchestration, **Microsoft Edge first / Google Chrome second** isolated `--app` window (`data/app-profile`), tray scan/log/restart/quit controls, `SessionEnding` handling, and deduplicated `<=48h` closing notifications.
+  - Updated `scripts/launch.cmd`, `start-tender-tracker.bat`, `scripts/create-desktop-shortcut.ps1`, `scripts/install-startup-task.ps1`, `Launch Tender Tracker.lnk`, and `package.json` (`npm run desktop`), preserving `--console` fallback and full `QA-4`/`OPS-6`/`OPS-8` compliance.
 
 - **`awaiting_scope` Lifecycle Hardening & Live DB Maintenance (`2026-11-16`):**
   - Filtered non-downloadable `.html`/`.aspx`/`.php`/`.jsp` links in `orderDocumentCandidates` (`src/server/scrapers/ingestPipeline.ts`) and `collectRowDocumentUrls` (`src/server/db/repositories/ingestJobsRepo.ts`) via `isDownloadableCandidateUrl` (preserving `/pdf?file=` and `?wpdmdl=` endpoints).

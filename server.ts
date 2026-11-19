@@ -11,6 +11,7 @@ import { initStartupScheduler, stopStartupScheduler } from './src/server/service
 import { initEmbeddingModel } from './src/server/services/embeddingService.js';
 import { backfillModelEmbeddings } from './src/server/services/embeddingBackfill.js';
 import { apiRouter } from './src/server/routes/index.js';
+import { setShutdownHandler } from './src/server/routes/system.routes.js';
 import { initSessionLogger, closeSessionLogger, requestLoggerMiddleware } from './src/server/services/logger.js';
 import { terminateLocalOcrWorker } from './src/server/services/localOcrService.js';
 
@@ -71,7 +72,11 @@ export async function startServer() {
   });
 
   // Graceful shutdown handling on Windows / Linux
+  let isShuttingDown = false;
   const handleExit = () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    setShutdownHandler(null);
     console.log('\n[Tender Tracker] Shutting down cleanly...');
     stopStartupScheduler();
     void terminateLocalOcrWorker();
@@ -84,8 +89,12 @@ export async function startServer() {
     server.close(() => {
       process.exit(0);
     });
+    try {
+      (server as any).closeAllConnections?.();
+    } catch {}
   };
 
+  setShutdownHandler(handleExit);
   process.on('SIGINT', handleExit);
   process.on('SIGTERM', handleExit);
 

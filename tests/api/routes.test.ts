@@ -940,4 +940,94 @@ describe('Server API Routes', () => {
       }
     });
   });
+
+  describe('Graceful Shutdown API (POST /api/system/shutdown)', () => {
+    it('returns 403 when TENDER_SHUTDOWN_TOKEN is unset', async () => {
+      const prevToken = process.env.TENDER_SHUTDOWN_TOKEN;
+      delete process.env.TENDER_SHUTDOWN_TOKEN;
+      try {
+        const res = await request(app)
+          .post('/api/system/shutdown')
+          .set('X-Shutdown-Token', 'any-token');
+        expect(res.status).toBe(403);
+        expect(res.body.success).toBe(false);
+      } finally {
+        if (prevToken === undefined) delete process.env.TENDER_SHUTDOWN_TOKEN;
+        else process.env.TENDER_SHUTDOWN_TOKEN = prevToken;
+      }
+    });
+
+    it('returns 403 when X-Shutdown-Token is missing, mismatched, or a different length', async () => {
+      const { setShutdownHandler } = await import('../../src/server/routes/system.routes.js');
+      const prevToken = process.env.TENDER_SHUTDOWN_TOKEN;
+      process.env.TENDER_SHUTDOWN_TOKEN = 'secret-session-token-1234';
+      const spy = vi.fn();
+      setShutdownHandler(spy);
+
+      try {
+        const missing = await request(app).post('/api/system/shutdown');
+        expect(missing.status).toBe(403);
+
+        const wrongLength = await request(app)
+          .post('/api/system/shutdown')
+          .set('X-Shutdown-Token', 'short');
+        expect(wrongLength.status).toBe(403);
+
+        const sameLengthWrong = await request(app)
+          .post('/api/system/shutdown')
+          .set('X-Shutdown-Token', 'secret-session-token-9999');
+        expect(sameLengthWrong.status).toBe(403);
+
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        setShutdownHandler(null);
+        if (prevToken === undefined) delete process.env.TENDER_SHUTDOWN_TOKEN;
+        else process.env.TENDER_SHUTDOWN_TOKEN = prevToken;
+      }
+    });
+
+    it('returns 503 when token matches but no shutdown handler is registered', async () => {
+      const { setShutdownHandler } = await import('../../src/server/routes/system.routes.js');
+      const prevToken = process.env.TENDER_SHUTDOWN_TOKEN;
+      process.env.TENDER_SHUTDOWN_TOKEN = 'secret-session-token-1234';
+      setShutdownHandler(null);
+
+      try {
+        const res = await request(app)
+          .post('/api/system/shutdown')
+          .set('X-Shutdown-Token', 'secret-session-token-1234');
+        expect(res.status).toBe(503);
+        expect(res.body.success).toBe(false);
+      } finally {
+        setShutdownHandler(null);
+        if (prevToken === undefined) delete process.env.TENDER_SHUTDOWN_TOKEN;
+        else process.env.TENDER_SHUTDOWN_TOKEN = prevToken;
+      }
+    });
+
+    it('returns 200, sets Connection: close, and invokes the shutdown handler on valid token', async () => {
+      const { setShutdownHandler } = await import('../../src/server/routes/system.routes.js');
+      const prevToken = process.env.TENDER_SHUTDOWN_TOKEN;
+      process.env.TENDER_SHUTDOWN_TOKEN = 'valid-shutdown-token-9876';
+      const handlerSpy = vi.fn();
+      setShutdownHandler(handlerSpy);
+
+      try {
+        const res = await request(app)
+          .post('/api/system/shutdown')
+          .set('X-Shutdown-Token', 'valid-shutdown-token-9876');
+
+        expect(res.status).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(res.headers.connection).toBe('close');
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+        expect(handlerSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        setShutdownHandler(null);
+        if (prevToken === undefined) delete process.env.TENDER_SHUTDOWN_TOKEN;
+        else process.env.TENDER_SHUTDOWN_TOKEN = prevToken;
+      }
+    });
+  });
 });

@@ -5,6 +5,25 @@ title Tender Tracker
 :: Resolve project root from script directory
 cd /d "%~dp0\.."
 
+:: Optional foreground console mode for diagnostics (--console)
+if /i "%~1"=="--console" goto console_mode
+
+:: Build production client + compiled server bundle if missing
+if not exist "dist\index.html" (
+    echo Building production UI and server bundle...
+    call npm run build
+    if %errorlevel% neq 0 exit /b %errorlevel%
+) else if not exist "dist-server\server.mjs" (
+    echo Building compiled server bundle...
+    call npm run build:server
+    if %errorlevel% neq 0 exit /b %errorlevel%
+)
+
+:: Launch standalone desktop window + Windows system tray quietly
+start "" wscript.exe "%~dp0launch-desktop.vbs" %*
+exit /b 0
+
+:console_mode
 echo =======================================================================
 echo              Tender Tracker - Solo-Operator Console
 echo =======================================================================

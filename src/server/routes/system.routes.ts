@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import {
@@ -325,3 +326,38 @@ systemRouter.get('/digest', handleGetDigest);
 systemRouter.get('/system/digest', handleGetDigest);
 systemRouter.post('/digest/settings', handleUpdateDigestSettings);
 systemRouter.post('/system/digest/settings', handleUpdateDigestSettings);
+
+// 9. Token-Guarded Graceful Shutdown (for standalone desktop tray host)
+let shutdownHandler: (() => void) | null = null;
+
+export function setShutdownHandler(handler: (() => void) | null): void {
+  shutdownHandler = handler;
+}
+
+function tokensMatch(expected: string, provided: string): boolean {
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  const providedBuf = Buffer.from(provided, 'utf8');
+  if (expectedBuf.length !== providedBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
+}
+
+systemRouter.post('/system/shutdown', (req, res) => {
+  const expectedToken = (process.env.TENDER_SHUTDOWN_TOKEN || '').trim();
+  if (!expectedToken) {
+    return res.status(403).json({ success: false, error: 'Shutdown endpoint is disabled.' });
+  }
+
+  const provided = (req.get('x-shutdown-token') || '').trim();
+  if (!provided || !tokensMatch(expectedToken, provided)) {
+    return res.status(403).json({ success: false, error: 'Invalid shutdown token.' });
+  }
+
+  if (!shutdownHandler) {
+    return res.status(503).json({ success: false, error: 'Shutdown handler is not registered.' });
+  }
+
+  const handler = shutdownHandler;
+  res.setHeader('Connection', 'close');
+  res.status(200).json({ success: true, message: 'Shutting down cleanly...' });
+  setTimeout(() => handler(), 50);
+});

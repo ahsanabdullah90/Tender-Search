@@ -4,8 +4,9 @@ Autonomous procurement scout and opportunity command center monitoring 18 Pakist
 
 ## Quick Start (Windows 11)
 
-1. Double-click **`start-tender-tracker.bat`** to build (if needed) and launch the production bundle via `npm start`, or run `npm install` followed by `npm run dev` for development with Vite hot reloading.
-2. Tender Tracker will initialize the local SQLite WAL database in `./data/tender_tracker.db` and launch the browser at `http://localhost:3000`.
+1. Double-click **`Launch Tender Tracker.lnk`** (or **`start-tender-tracker.bat`**) — or run **`npm run desktop`** — to build if needed and launch the silent Windows System Tray host with a dedicated standalone Edge/Chrome window (**Microsoft Edge first**, **Chrome second**).
+2. For a foreground terminal session use `start-tender-tracker.bat --console` (or `npm start`), or run `npm install` followed by `npm run dev` for development with Vite hot reloading.
+3. Tender Tracker initializes the local SQLite WAL database in `./data/tender_tracker.db` at `http://127.0.0.1:3000`.
 
 ## The three screens
 
@@ -56,6 +57,9 @@ npm run test:coverage
 
 # Probe live connectivity for all 18 procurement portals
 npm run probe:portals
+
+# Launch standalone desktop window + Windows system tray
+npm run desktop
 
 # Refresh Windows Desktop shortcut pointing to C:\Tender_Tracker
 npm run shortcut

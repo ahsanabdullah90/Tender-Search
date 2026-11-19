@@ -1,0 +1,30 @@
+{
+  "id": "/",
+  "name": "Tender Tracker - Pakistan Procurement Watchdog",
+  "short_name": "Tender Tracker",
+  "description": "Autonomous procurement scout and opportunity command center monitoring Pakistani public procurement portals.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#1f408d",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "128x128",
+      "type": "image/png"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

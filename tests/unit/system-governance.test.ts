@@ -174,4 +174,65 @@ describe('System Governance, Security & Operational Invariants', () => {
       expect(serverTs).toContain("process.argv.includes('--production')");
     });
   });
+
+  describe('Desktop Standalone Window & System Tray invariants (Option 2)', () => {
+    it('provides valid standalone web app manifest linked from index.html', () => {
+      const rootDir = path.resolve(__dirname, '../../');
+      const manifestPath = path.join(rootDir, 'public', 'manifest.webmanifest');
+      const indexPath = path.join(rootDir, 'index.html');
+
+      expect(fs.existsSync(manifestPath)).toBe(true);
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      expect(manifest.display).toBe('standalone');
+      expect(manifest.start_url).toBe('/');
+      expect(Array.isArray(manifest.icons)).toBe(true);
+      expect(manifest.icons.length).toBeGreaterThanOrEqual(1);
+
+      for (const icon of manifest.icons) {
+        const relIcon = String(icon.src || '').replace(/^\//, '');
+        expect(relIcon.length).toBeGreaterThan(0);
+        expect(fs.existsSync(path.join(rootDir, 'public', relIcon))).toBe(true);
+      }
+
+      const indexHtml = fs.readFileSync(indexPath, 'utf8');
+      expect(indexHtml).toContain('href="/manifest.webmanifest"');
+    });
+
+    it('configures tray host with Edge-first priority, single-instance mutex, 63-char tooltips, and token-guarded shutdown', () => {
+      const rootDir = path.resolve(__dirname, '../../');
+      const trayPath = path.join(rootDir, 'scripts', 'tray-app.ps1');
+      const vbsPath = path.join(rootDir, 'scripts', 'launch-desktop.vbs');
+      const systemRoutesPath = path.join(rootDir, 'src', 'server', 'routes', 'system.routes.ts');
+      const shortcutScriptPath = path.join(rootDir, 'scripts', 'create-desktop-shortcut.ps1');
+      const startupScriptPath = path.join(rootDir, 'scripts', 'install-startup-task.ps1');
+
+      expect(fs.existsSync(trayPath)).toBe(true);
+      expect(fs.existsSync(vbsPath)).toBe(true);
+
+      const tray = fs.readFileSync(trayPath, 'utf8');
+      const edgeIdx = tray.indexOf('msedge.exe');
+      const chromeIdx = tray.indexOf('chrome.exe');
+      expect(edgeIdx).toBeGreaterThan(-1);
+      expect(chromeIdx).toBeGreaterThan(edgeIdx);
+      expect(tray).toContain('Format-TrayTooltip');
+      expect(tray).toContain('63');
+      expect(tray).toContain('Local\\TenderTrackerTrayHost_');
+      expect(tray).toContain('TENDER_SHUTDOWN_TOKEN');
+      expect(tray).toContain('/api/system/shutdown');
+      expect(tray).toContain('X-Shutdown-Token');
+      expect(tray).toContain('dist-server\\server.mjs');
+      expect(tray).toContain('--production');
+
+      const systemRoutes = fs.readFileSync(systemRoutesPath, 'utf8');
+      expect(systemRoutes).toContain("'/system/shutdown'");
+      expect(systemRoutes).toContain('timingSafeEqual');
+      expect(systemRoutes).toContain('TENDER_SHUTDOWN_TOKEN');
+
+      const shortcutScript = fs.readFileSync(shortcutScriptPath, 'utf8');
+      const startupScript = fs.readFileSync(startupScriptPath, 'utf8');
+      expect(shortcutScript).toContain('launch-desktop.vbs');
+      expect(startupScript).toContain('launch-desktop.vbs');
+      expect(startupScript).toContain('--minimized');
+    });
+  });
 });

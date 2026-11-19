@@ -9,11 +9,16 @@ This guide outlines the day-to-day routine for managing and tracking tenders usi
 ### 1. Starting the Application
 
 On Windows 11:
-- Double-click **`start-tender-tracker.bat`** in the project directory (builds if missing and starts the compiled production server via `npm start`), or run in PowerShell for live hot-reloading during development:
-  ```powershell
-  npm run dev
-  ```
-- The local SQLite WAL database initializes in `./data/tender_tracker.db` and launches the browser at `http://localhost:3000`.
+- **Standalone Desktop App & System Tray (Recommended):** Double-click **`Launch Tender Tracker.lnk`**, your Desktop shortcut (create or refresh via `npm run shortcut`), **`start-tender-tracker.bat`**, or run **`npm run desktop`**.
+  - Builds missing bundles if needed, starts the production server silently in the background (zero console window), and opens Tender Tracker in a dedicated frameless window (**Microsoft Edge first**, **Google Chrome fallback**) using an isolated `data/app-profile` directory.
+  - Closing the app window leaves background scans and document ingestion running in the **Windows System Tray** icon:
+    - **Double-click tray icon:** Re-open / focus the standalone Tender Tracker window.
+    - **Right-click menu:** *Open Tender Tracker*, *Open in Default Browser*, *Run Quick Scan*, *Run Deep Scan*, live status summary, *Open Data Folder*, *Open Latest Log*, *Restart Server*, and *Quit Tender Tracker* (triggers token-guarded graceful shutdown with SQLite WAL flush).
+    - **Desktop alerts:** Shows deduplicated Windows balloon notifications when tenders are closing within `<=48h` or have unacknowledged corrigenda.
+- **Foreground Console Fallback:** Run `start-tender-tracker.bat --console`, `scripts/launch.cmd --console`, or `npm start` to run the production server in a visible terminal window.
+- **Optional Logon Auto-Start:** Run `scripts/install-startup-task.ps1` to launch quietly in the system tray (`--minimized`) at Windows logon without opening a window.
+- **Development Mode (Hot Reload):** Run **`npm run dev`** in PowerShell.
+- The local SQLite WAL database initializes in `./data/tender_tracker.db` on `http://127.0.0.1:3000`.
 
 ---
 

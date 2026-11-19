@@ -372,3 +372,11 @@ Lists all available SQLite backups with filenames, creation timestamps, and byte
 ### `GET /api/system/digest` & `POST /api/system/digest/settings`
 - `GET /api/system/digest` *(alias `/api/digest`, optional `?hours=48`)*: Returns the proactive alert summary (`closingSoon`, `closingSoonCount`, `unacknowledgedCorrigendaCount`, `newMatchesLast24hCount`) plus current `settings` (`enabled`, `webhookUrl`, `withinHours`, `lastSentDatePkt`).
 - `POST /api/system/digest/settings` *(alias `/api/digest/settings`)*: Updates opt-in daily digest webhook configuration (`enabled`, `webhookUrl`, `withinHours`) in `app_settings`. Non-empty `webhookUrl` values must pass `validateExternalHttpUrl` (`urlSafety.ts`, `SEC-5`, returning `400 Bad Request` on invalid or private/loopback targets).
+
+### `POST /api/system/shutdown`
+Token-guarded graceful shutdown endpoint used by the standalone Windows system tray host (`TENDER_SHUTDOWN_TOKEN`).
+- **Headers**: `X-Shutdown-Token: <token>` (compared in constant time via `crypto.timingSafeEqual`).
+- **Responses**:
+  - `200 OK`: Flushes HTTP response (`Connection: close`), stops the scheduler, terminates local OCR worker, truncates/checkpoints SQLite WAL, closes the database cleanly, and exits.
+  - `403 Forbidden`: Returned when `TENDER_SHUTDOWN_TOKEN` is unset (disabled by default in standard `npm run dev` / `npm start` runs) or when the header token is missing/invalid.
+  - `503 Service Unavailable`: Returned if no shutdown handler is registered.

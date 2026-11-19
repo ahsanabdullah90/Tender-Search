@@ -10,6 +10,7 @@ Tender Tracker supports the following environment variables (defined in `.env` o
 | `HOST` | `string` | `127.0.0.1` | Network interface to bind. Defaults strictly to loopback for security. |
 | `TENDER_DATA_DIR` | `string` | `<repo>/data` | Directory where SQLite database, backups, dossiers, and sessions reside. Set to `data-sample` for demo data. |
 | `GEMINI_API_KEY` | `string` | `""` | Google Gemini API key fallback. Can also be set directly in the UI under Sources & Keywords > Data (persisted in SQLite `app_settings`). |
+| `TENDER_SHUTDOWN_TOKEN` | `string` | `""` | Optional per-session secret injected by the desktop tray host to authorize `POST /api/system/shutdown`. When unset, the shutdown endpoint stays disabled (`403`). |
 | `NODE_ENV` | `string` | `development` | Runtime mode (`development`, `production`, `test`). |
 
 ---
@@ -53,11 +54,12 @@ C:\Tender_Tracker/
     models/                 # Local HuggingFace MiniLM ONNX model cache
     tessdata/               # Offline Tesseract language traineddata cache
     sessions/               # Serialized session cookies from HITL portal sessions
+    app-profile/            # Isolated Edge/Chrome profile for standalone desktop app window
   data-sample/              # Isolated sample data used for preview & demonstration
   dist/                     # Built Vite client bundle (served by Express in production)
   dist-server/              # Compiled server bundle (dist-server/server.mjs)
-  public/                   # Brand logos (public/brand/) and favicons
-  scripts/                  # Operational scripts (launch.cmd, seed-sample.ts, probe-portals.ts, capture-portal-fixture.ts, create-desktop-shortcut.ps1, install-startup-task.ps1, migrate-dossier-names.ts)
+  public/                   # Brand logos (public/brand/), favicons, and web app manifest (public/manifest.webmanifest)
+  scripts/                  # Operational scripts (launch.cmd, tray-app.ps1, launch-desktop.vbs, seed-sample.ts, probe-portals.ts, capture-portal-fixture.ts, create-desktop-shortcut.ps1, install-startup-task.ps1, migrate-dossier-names.ts)
   src/                      # Application source code
     client/                 # React 19 UI application (App, theme, index.css, components/, ui/)
       components/           # UI screens (Inbox, Pipeline, Sources, AppShell, inbox/, pipeline/)
@@ -74,11 +76,12 @@ C:\Tender_Tracker/
 
 ---
 
-## Startup Script
+## Startup Scripts & Desktop Tray Host
 
-Double-clicking **`start-tender-tracker.bat`** (which invokes `scripts/launch.cmd`) handles production startup on Windows 11:
-1. Verifies dependencies exist (`npm install` runs automatically if `node_modules` is absent) and builds `dist/` + `dist-server/server.mjs` (`npm run build`) if compiled bundles are missing.
-2. Spawns a background browser launch to `http://localhost:3000`.
-3. Runs **`npm start`** (`node dist-server/server.mjs --production`) for a fast, standalone server with zero dev-watcher overhead.
+Double-clicking **`Launch Tender Tracker.lnk`**, **`start-tender-tracker.bat`**, or running **`npm run desktop`** executes the standalone Windows desktop experience:
+1. Verifies dependencies exist (`node_modules/` installs on fresh clones) and builds `dist/` + `dist-server/server.mjs` (`npm run build`) if compiled bundles are missing.
+2. Launches `scripts/launch-desktop.vbs` via `wscript.exe` (zero console-window flash), which starts `scripts/tray-app.ps1`.
+3. `scripts/tray-app.ps1` acquires a single-instance mutex (`Local\TenderTrackerTrayHost_3000`), injects a per-session `TENDER_SHUTDOWN_TOKEN`, spawns `node dist-server/server.mjs --production` hidden, shows a Windows System Tray icon (with scan actions, status polling, log/data shortcuts, deduplicated closing alerts, and clean `/api/system/shutdown` exit), and opens a standalone frameless `--app` window using **Microsoft Edge first** and **Google Chrome second** with an isolated `data/app-profile` directory.
+4. Pass `--minimized` (used by `scripts/install-startup-task.ps1` at Windows logon) to start quietly in the tray without opening a window, or pass `--console` to `start-tender-tracker.bat` / `scripts/launch.cmd` for foreground terminal execution via `npm start`.
 
 For active development with live TypeScript & Vite hot reloading, run **`npm run dev`** directly in PowerShell.

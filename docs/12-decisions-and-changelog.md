@@ -115,6 +115,11 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13, 2026)
+- **Standalone Desktop Window & Windows System Tray (Option 2, November 19, 2026)**:
+  - Added `public/manifest.webmanifest` (`display: "standalone"`) linked from `index.html` with light/dark `theme-color` metadata.
+  - Added token-guarded `POST /api/system/shutdown` (`TENDER_SHUTDOWN_TOKEN` + `X-Shutdown-Token` validated via `crypto.timingSafeEqual`) in `src/server/routes/system.routes.ts` paired with re-entrant `handleExit` + `server.closeAllConnections()` in `server.ts` so the tray host can shut down SQLite WAL cleanly on Windows.
+  - Added `scripts/tray-app.ps1` and zero-flash `scripts/launch-desktop.vbs` running `dist-server/server.mjs --production` silently with a single-instance mutex, Edge-first / Chrome-second `--app` window (`data/app-profile`), tray menu controls (*Open*, *Quick/Deep Scan*, *Data Folder*, *Latest Log*, *Restart*, *Quit*), `SessionEnding` cleanup, and deduplicated `<=48h` closing notifications.
+  - Wired `scripts/launch.cmd`, `start-tender-tracker.bat`, `scripts/create-desktop-shortcut.ps1`, `scripts/install-startup-task.ps1` (`--minimized` logon mode), `Launch Tender Tracker.lnk`, and `npm run desktop` (preserving `--console` terminal fallback).
 - **Federal PPRA (EPMS) Integration (`epms_ppra` replacing `epads`, `DB-1`)**:
   - Replaced Imperva/WAF-blocked `epads` (`epads.gov.pk`) with the open Federal PPRA EPMS board (`https://epms.ppra.gov.pk/public/tenders/active-tenders`), retiring `epads` to `deleted_portals` while preserving historical saved tenders.
   - Implemented `parseEpmsDetailHtml` and `applyEpmsDetailMetadata` for deterministic detail-page `BidBrief` extraction and `/pdf?file=` document discovery, broadened Framework Agreement reference extraction (`/^[A-Z]{2}\d{5,}[A-Z0-9]*$/i`), and disabled ephemeral `PHPSESSID` forwarding during EPMS GET pagination to avoid PHP session lock timeouts.
