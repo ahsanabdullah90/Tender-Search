@@ -168,6 +168,38 @@ describe('App root component', () => {
           })
         } as any;
       }
+      if (urlStr.includes('/api/system/network/check') && method === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({
+            state: 'online',
+            latencyMs: 38,
+            checkedAt: '2026-11-19T10:01:00Z',
+            reason: 'Healthy',
+            heavyTasksPaused: false,
+            deferredHeavyTasks: {
+              deepScanPending: false,
+              pendingDocumentJobs: 0
+            }
+          })
+        } as any;
+      }
+      if (urlStr.includes('/api/system/network') && method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            state: 'online',
+            latencyMs: 45,
+            checkedAt: '2026-11-19T10:00:00Z',
+            reason: 'Healthy',
+            heavyTasksPaused: false,
+            deferredHeavyTasks: {
+              deepScanPending: false,
+              pendingDocumentJobs: 0
+            }
+          })
+        } as any;
+      }
       if (urlStr.includes('/api/scan/status')) {
         return {
           ok: true,
@@ -748,6 +780,80 @@ describe('App root component', () => {
     await user.click(bannerBtn);
     await waitFor(() => {
       expect(localStorage.getItem('tt_section')).toBe('inbox');
+    });
+  });
+
+  it('fetches network status on mount and triggers manual network recheck', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('network-status-indicator')).toHaveTextContent('Network: Healthy (45ms)');
+    });
+
+    const recheckBtn = screen.getByRole('button', { name: /Recheck network connectivity/i });
+    await user.click(recheckBtn);
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/system/network/check',
+        expect.objectContaining({ method: 'POST' })
+      );
+      expect(screen.getByTestId('network-status-indicator')).toHaveTextContent('Network: Healthy (38ms)');
+    });
+  });
+
+  it('displays pausedReason without staying stuck in scanning state when scan start defers', async () => {
+    const user = userEvent.setup();
+    const pausedMessage = 'Slow network detected — deep scan held until connection is healthy (Quick Scan remains available)';
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText('Solar Power System')).toBeInTheDocument();
+    });
+
+    vi.spyOn(global, 'fetch').mockImplementation(async (url: any) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/api/scan/start')) {
+        return {
+          ok: true,
+          json: async () => ({
+            isScanning: false,
+            currentPortal: null,
+            progressPercent: 0,
+            completedPortals: 0,
+            totalPortals: 10,
+            newTendersFound: 0,
+            corrigendaFound: 0,
+            lastScanTimestamp: null,
+            pausedReason: pausedMessage,
+          }),
+        } as any;
+      }
+      if (urlStr.includes('/api/system/network')) {
+        return {
+          ok: true,
+          json: async () => ({
+            state: 'degraded',
+            latencyMs: 2100,
+            checkedAt: '2026-11-19T10:02:00Z',
+            reason: 'High latency',
+            heavyTasksPaused: true,
+            deferredHeavyTasks: { deepScanPending: true, pendingDocumentJobs: 2 },
+          }),
+        } as any;
+      }
+      return { ok: true, json: async () => ({}) } as any;
+    });
+
+    const deepBtn = screen.getByRole('button', { name: /Run deep multi-page scan/i });
+    await user.click(deepBtn);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('scan-paused-reason')).toHaveTextContent(pausedMessage);
+      expect(screen.getByTestId('network-status-indicator')).toHaveTextContent('Network: Slow');
+      expect(screen.getByRole('button', { name: /Scan now/i })).toBeEnabled();
+      expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toBeDisabled();
     });
   });
 });

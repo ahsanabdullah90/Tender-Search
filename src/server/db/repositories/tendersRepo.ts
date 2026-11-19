@@ -1010,6 +1010,10 @@ export function getStaleAwaitingScopeTenderIds(olderThanDays: number = 3, limit:
     SELECT id FROM tenders
     WHERE ingestion_status = 'awaiting_scope'
       AND julianday(COALESCE(updated_at, created_at)) <= julianday('now', '-' || ? || ' days')
+      AND NOT EXISTS (
+        SELECT 1 FROM document_ingest_jobs j
+        WHERE j.tender_id = tenders.id AND j.status = 'pending' AND j.attempts = 0
+      )
     LIMIT ?
   `).all(olderThanDays, limit) as { id: string }[]).map(r => r.id);
 }

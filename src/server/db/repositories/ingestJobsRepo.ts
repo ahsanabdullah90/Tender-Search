@@ -272,6 +272,13 @@ export function getJobSummaryForTender(tenderId: string): JobSummary {
   return summary;
 }
 
+export function countPendingDocumentJobs(): number {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM document_ingest_jobs WHERE status = 'pending'`).get() as
+    | { n: number }
+    | undefined;
+  return row?.n || 0;
+}
+
 export function getJobsForTender(tenderId: string): IngestJob[] {
   return db.prepare(`
     SELECT * FROM document_ingest_jobs WHERE tender_id = ? ORDER BY priority ASC, created_at ASC

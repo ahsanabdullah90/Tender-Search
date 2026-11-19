@@ -194,7 +194,8 @@ describe('docs-consistency (QA-4 Automated Documentation Consistency)', () => {
       '/api/ai/status',
       '/api/ai/config',
       '/api/ai/extract-file',
-      '/api/system/shutdown'
+      '/api/system/shutdown',
+      '/api/system/network'
     ];
     const missingEndpoints = requiredEndpoints.filter(ep => !doc04.includes(ep));
     expect(missingEndpoints).toEqual([]);

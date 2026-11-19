@@ -11,10 +11,12 @@ export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Agent socket timeout ceiling (90s) sits above per-request timeouts (35s EPMS, 45s-90s PDFs)
+// so individual request timeouts control slow-network cutoffs rather than agent pooling.
 export const sslTolerantAgent = new https.Agent({
   rejectUnauthorized: false,
   keepAlive: false,
-  timeout: 25000
+  timeout: 90000
 });
 
 /**
@@ -29,7 +31,7 @@ export const legacySslTolerantAgent = new https.Agent({
   ciphers: LEGACY_TLS_CIPHERS,
   minVersion: 'TLSv1',
   keepAlive: false,
-  timeout: 25000
+  timeout: 90000
 });
 
 /**

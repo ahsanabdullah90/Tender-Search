@@ -1,10 +1,18 @@
 import { backupDatabase, updatePortalHealth, getScanningPortalIds, getLastSuccessfulScanTimestamp } from '../db/index.js';
 import { getAppSetting, setAppSetting, getAlertsDigest, getDigestSettings } from '../db/repositories/systemRepo.js';
 import { ScanDepth, DigestSummary } from '../../shared/types.js';
-import { startCrawlerScan, getActivePortalsList } from '../scrapers/crawlerEngine.js';
+import { startCrawlerScan, getActivePortalsList, currentScanStatus } from '../scrapers/crawlerEngine.js';
 import { runRetentionCycle } from './retention.js';
 import { backfillModelEmbeddings } from './embeddingBackfill.js';
 import { processDocumentQueue } from './ingestWorker.js';
+import {
+  checkNetworkHealth,
+  getCachedNetworkStatus,
+  canRunHeavyNetworkTask,
+  canRunLightNetworkTask,
+  isDeepScanPending,
+  setDeepScanPending
+} from './networkMonitor.js';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 let retentionInterval: NodeJS.Timeout | null = null;
@@ -78,13 +86,24 @@ export function initStartupScheduler() {
     );
   }, 5 * 60 * 1000);
 
-  // 2b. Background document worker: downloads and reads queued tender documents every 2 minutes
-  // (skips itself while a scan is running).
+  // 2b. Background document worker & deferred heavy-task recovery check every 2 minutes
+  // (skips heavy network work when degraded/offline or while a scan is active).
   if (documentQueueInterval) clearInterval(documentQueueInterval);
-  documentQueueInterval = setInterval(() => {
-    schedulerDeps.processDocumentQueue(5).catch(err =>
-      console.warn('[Tender Tracker Scheduler] Document queue error:', err)
-    );
+  documentQueueInterval = setInterval(async () => {
+    try {
+      const net = await checkNetworkHealth();
+      if (!canRunHeavyNetworkTask(net)) {
+        return;
+      }
+      if (isDeepScanPending() && !currentScanStatus.isScanning) {
+        setDeepScanPending(false);
+        schedulerDeps.startCrawlerScan(undefined, false, { depth: 'deep' });
+        return;
+      }
+      await schedulerDeps.processDocumentQueue(5);
+    } catch (err) {
+      console.warn('[Tender Tracker Scheduler] Document queue error:', err);
+    }
   }, 2 * 60 * 1000);
 
   // 2. Check if a catch-up scan is required; run daily health check after it finishes (docs/16 B7)
@@ -140,10 +159,16 @@ function checkAndTriggerCatchUpScan(): Promise<any> | void {
   try {
     const lastFullScan = getAppSetting('last_full_scan_at');
     const lastScanStr = lastFullScan || getLastSuccessfulScanTimestamp();
+    const net = getCachedNetworkStatus();
 
     if (!lastScanStr) {
-      console.log('[Tender Tracker Scheduler] No previous scan recorded. Initiating background crawl...');
       const depth: ScanDepth = shouldRunDeepScanNow() ? 'deep' : 'quick';
+      if (!canRunLightNetworkTask(net) || (depth === 'deep' && !canRunHeavyNetworkTask(net))) {
+        if (depth === 'deep') setDeepScanPending(true);
+        console.log(`[Tender Tracker Scheduler] Deferring initial ${depth} scan while network is ${net.state}.`);
+        return;
+      }
+      console.log('[Tender Tracker Scheduler] No previous scan recorded. Initiating background crawl...');
       return schedulerDeps.startCrawlerScan(undefined, false, { depth });
     }
 
@@ -154,6 +179,11 @@ function checkAndTriggerCatchUpScan(): Promise<any> | void {
     // If more than 12 hours have elapsed since the last full successful scan (docs/15 F5)
     if (hoursSinceLastScan >= 12) {
       const depth: ScanDepth = shouldRunDeepScanNow(now) ? 'deep' : 'quick';
+      if (!canRunLightNetworkTask(net) || (depth === 'deep' && !canRunHeavyNetworkTask(net))) {
+        if (depth === 'deep') setDeepScanPending(true);
+        console.log(`[Tender Tracker Scheduler] Deferring catch-up ${depth} scan while network is ${net.state}.`);
+        return;
+      }
       console.log(`[Tender Tracker Scheduler] Last scan was ${hoursSinceLastScan.toFixed(1)}h ago. Starting ${depth} catch-up scan...`);
       return schedulerDeps.startCrawlerScan(undefined, false, { depth });
     }
@@ -173,6 +203,10 @@ export async function maybeDispatchDailyDigest(nowMs: number = Date.now()): Prom
   }
   if (!settings.webhookUrl) {
     return { sent: false, reason: 'no_webhook_url' };
+  }
+  const net = await checkNetworkHealth();
+  if (!canRunLightNetworkTask(net)) {
+    return { sent: false, reason: 'offline' };
   }
   const todayPkt = getPktDateKey(nowMs);
   if (settings.lastSentDatePkt === todayPkt) {
@@ -195,6 +229,10 @@ export async function maybeDispatchDailyDigest(nowMs: number = Date.now()): Prom
  */
 async function runDailyPortalHealthAdvisement() {
   try {
+    const net = await checkNetworkHealth();
+    if (!canRunHeavyNetworkTask(net)) {
+      return;
+    }
     const portals = getActivePortalsList();
     const problemPortals = portals.filter(p => p.accessMode === 'offline_broken' || p.verifiedStatus.toLowerCase().includes('broken'));
     let checkedCount = 0;

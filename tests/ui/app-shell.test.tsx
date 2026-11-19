@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AppShell } from '../../src/client/components/AppShell.js';
-import type { ScanStatus } from '../../src/shared/types.js';
+import type { ScanStatus, NetworkStatus } from '../../src/shared/types.js';
 
 describe('AppShell component', () => {
   const idleScan: ScanStatus = {
@@ -242,5 +242,139 @@ describe('AppShell component', () => {
 
     expect(screen.getByTestId('active-workers')).toHaveTextContent('Workers (3): punjab_eproc, epads, kp_ppra');
     expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toBeDisabled();
+  });
+
+  it('displays healthy network indicator and triggers manual recheck callback', async () => {
+    const user = userEvent.setup();
+    const handleRecheck = vi.fn();
+    const onlineNet: NetworkStatus = {
+      state: 'online',
+      latencyMs: 42,
+      checkedAt: '2026-11-19T10:00:00Z',
+      reason: 'Healthy',
+      heavyTasksPaused: false,
+      deferredHeavyTasks: { deepScanPending: false, pendingDocumentJobs: 0 },
+    };
+
+    render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        onRunDeepScan={vi.fn()}
+        networkStatus={onlineNet}
+        onRecheckNetwork={handleRecheck}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByTestId('network-status-indicator')).toHaveTextContent('Network: Healthy (42ms)');
+    expect(screen.getByRole('button', { name: /Scan now/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: /Recheck network connectivity/i }));
+    expect(handleRecheck).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps quick scan enabled while disabling deep scan on degraded slow network', () => {
+    const degradedNet: NetworkStatus = {
+      state: 'degraded',
+      latencyMs: 2200,
+      checkedAt: '2026-11-19T10:00:00Z',
+      reason: 'High RTT latency',
+      heavyTasksPaused: true,
+      deferredHeavyTasks: { deepScanPending: true, pendingDocumentJobs: 3 },
+    };
+
+    render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        onRunDeepScan={vi.fn()}
+        networkStatus={degradedNet}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByTestId('network-status-indicator')).toHaveTextContent('Network: Slow');
+    expect(screen.getByTestId('network-status-detail')).toHaveTextContent(
+      'Heavy tasks paused · Deep scan held · 3 doc(s) queued'
+    );
+    expect(screen.getByRole('button', { name: /Scan now/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toBeDisabled();
+  });
+
+  it('disables both quick and deep scans when network is offline', () => {
+    const offlineNet: NetworkStatus = {
+      state: 'offline',
+      latencyMs: null,
+      checkedAt: '2026-11-19T10:00:00Z',
+      reason: 'No internet connection',
+      heavyTasksPaused: true,
+      deferredHeavyTasks: { deepScanPending: false, pendingDocumentJobs: 0 },
+    };
+
+    render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        onRunDeepScan={vi.fn()}
+        networkStatus={offlineNet}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByTestId('network-status-indicator')).toHaveTextContent('Network: Offline');
+    expect(screen.getByTestId('network-status-detail')).toHaveTextContent('Scans & downloads paused');
+    expect(screen.getByRole('button', { name: /Scan now/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toBeDisabled();
+  });
+
+  it('renders scan pausedReason only when not actively scanning', () => {
+    const pausedReason = 'Slow network detected — deep scan held until connection is healthy';
+    const { rerender } = render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{ ...idleScan, pausedReason }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByTestId('scan-paused-reason')).toHaveTextContent(pausedReason);
+
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{ ...idleScan, isScanning: true, progressPercent: 10, pausedReason }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.queryByTestId('scan-paused-reason')).not.toBeInTheDocument();
   });
 });

@@ -350,5 +350,77 @@ describe('dossierManager', () => {
         httpsSpy.mockRestore();
       }
     });
+
+    it('rejects truncated file downloads where Content-Length exceeds received bytes and creates no folder', async () => {
+      const httpsSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, _opts: any, cb: any) => {
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        res.complete = true;
+        res.headers = { 'content-type': 'application/pdf', 'content-length': '2048' };
+        setImmediate(() => {
+          cb(res);
+          res.emit('data', Buffer.from('%PDF-1.4 short'));
+          res.emit('end');
+        });
+        return req;
+      });
+
+      try {
+        const tenderId = 't-truncated-content-length';
+        const res = await downloadAndCacheDossier(tenderId, 'https://example.gov.pk/partial.pdf', 'Partial');
+        expect(res).toBeNull();
+        expect(fs.existsSync(path.resolve(DOSSIERS_DIR, tenderId))).toBe(false);
+      } finally {
+        httpsSpy.mockRestore();
+      }
+    });
+
+    it('rejects file downloads when res.complete === false (aborted HTTP stream)', async () => {
+      const httpsSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, _opts: any, cb: any) => {
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        res.complete = false;
+        res.headers = { 'content-type': 'application/pdf' };
+        setImmediate(() => {
+          cb(res);
+          res.emit('data', Buffer.from('%PDF-1.4 incomplete'));
+          res.emit('end');
+        });
+        return req;
+      });
+
+      try {
+        await expect(fetchFileBuffer('https://example.gov.pk/aborted.pdf')).rejects.toThrow(/truncated/i);
+      } finally {
+        httpsSpy.mockRestore();
+      }
+    });
+
+    it('rejects truncated portal HTML when res.complete === false', async () => {
+      const httpsSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, _opts: any, cb: any) => {
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        const res = new EventEmitter() as any;
+        res.statusCode = 200;
+        res.complete = false;
+        res.headers = { 'content-type': 'text/html; charset=utf-8' };
+        setImmediate(() => {
+          cb(res);
+          res.emit('data', Buffer.from('<html><body><table><tr><td>Partial'));
+          res.emit('end');
+        });
+        return req;
+      });
+
+      try {
+        await expect(fetchHtmlWithMetadata('https://example.gov.pk/tenders')).rejects.toThrow(/truncated/i);
+      } finally {
+        httpsSpy.mockRestore();
+      }
+    });
   });
 });

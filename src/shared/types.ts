@@ -178,6 +178,8 @@ export interface ScanStatus {
   visionDeferred?: number;
   /** Tenders held without immediate track match, pending document download/analysis (docs/15 F2). */
   heldForScope?: number;
+  /** Explains why a requested scan was paused/deferred (e.g. offline or slow network). */
+  pausedReason?: string | null;
 }
 
 
@@ -189,4 +191,18 @@ export interface SessionLogMeta {
   lineCount?: number;
   errorCount?: number;
   warnCount?: number;
+}
+
+export type NetworkState = 'online' | 'degraded' | 'offline';
+
+export interface NetworkStatus {
+  state: NetworkState;
+  latencyMs: number | null;
+  checkedAt: string | null;
+  reason: string | null;
+  heavyTasksPaused: boolean;
+  deferredHeavyTasks: {
+    deepScanPending: boolean;
+    pendingDocumentJobs: number;
+  };
 }

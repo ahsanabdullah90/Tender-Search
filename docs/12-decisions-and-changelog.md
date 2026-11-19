@@ -115,6 +115,11 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13, 2026)
+- **Network Health Monitor, Heavy/Light Task Gating & Anti-Corruption Safeguards (November 19, 2026)**:
+  - Added `src/server/services/networkMonitor.ts` (`online` / `degraded` / `offline` classification via cached multi-endpoint probes, passive multi-host slow/timeout telemetry, and deep-scan pending tracking) plus `GET /api/system/network` and `POST /api/system/network/check` endpoints in `src/server/routes/system.routes.ts`.
+  - Hardened transport integrity across `src/server/scrapers/baseScraper.ts` (`90s` TLS agent socket timeout ceiling), `src/server/scrapers/htmlFetcher.ts` (strict `res.complete`, `aborted`, and error guards), and `src/server/services/dossierManager.ts` (Content-Length & incomplete-stream rejection plus atomic `.tmp` rename writes).
+  - Applied heavy vs. light task gating in `crawlerEngine.ts`, `ingestPipeline.ts`, `ingestWorker.ts` (`deferJob` retry-refund on transient network errors), `retention.ts` (deferring `awaiting_scope` purges when network is unhealthy), and `scheduler.ts` (auto-resuming pending deep scans on recovery).
+  - Added live sidebar network status, recheck control, and scan button gating in `src/client/App.tsx` and `src/client/components/AppShell.tsx`, plus Windows tray status and **Recheck Network** integration in `scripts/tray-app.ps1`.
 - **Standalone Desktop Window & Windows System Tray (Option 2, November 19, 2026)**:
   - Added `public/manifest.webmanifest` (`display: "standalone"`) linked from `index.html` with light/dark `theme-color` metadata.
   - Added token-guarded `POST /api/system/shutdown` (`TENDER_SHUTDOWN_TOKEN` + `X-Shutdown-Token` validated via `crypto.timingSafeEqual`) in `src/server/routes/system.routes.ts` paired with re-entrant `handleExit` + `server.closeAllConnections()` in `server.ts` so the tray host can shut down SQLite WAL cleanly on Windows.

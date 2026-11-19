@@ -13,7 +13,13 @@ import {
 import { InboxScreen } from './components/InboxScreen';
 import { PipelineScreen } from './components/PipelineScreen';
 import { SourcesScreen } from './components/SourcesScreen';
-import { Tender, DomainTrack, PortalHealth, CorrigendumLog, ScanStatus, OpportunityStatus } from '../shared/types';
+import { Tender, DomainTrack, PortalHealth, CorrigendumLog, ScanStatus, OpportunityStatus, NetworkStatus } from '../shared/types';
+
+function isValidNetworkStatus(data: unknown): data is NetworkStatus {
+  if (!data || typeof data !== 'object') return false;
+  const state = (data as Partial<NetworkStatus>).state;
+  return state === 'online' || state === 'degraded' || state === 'offline';
+}
 
 const SECTION_KEY = 'tt_section';
 const OLD_KEYS = ['tender_tracker_currentView', 'tender_tracker_sortBy', 'tender_tracker_isDark'];
@@ -80,6 +86,11 @@ export default function App() {
     corrigendaFound: 0,
     lastScanTimestamp: null
   });
+
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
+  const [checkingNetwork, setCheckingNetwork] = useState<boolean>(false);
+  const networkStatusRef = useRef<NetworkStatus | null>(null);
+  const checkingNetworkRef = useRef<boolean>(false);
 
   // UI Filtering & Navigation States
   const [selectedTrack, setSelectedTrack] = useState<string>('All');
@@ -193,7 +204,52 @@ export default function App() {
     }
   }, []);
 
-  // Initial load
+  const fetchNetworkStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/system/network');
+      if (res.ok) {
+        const data = await res.json();
+        if (isValidNetworkStatus(data)) {
+          networkStatusRef.current = data;
+          setNetworkStatus(data);
+        }
+      }
+    } catch {
+      // Best-effort background network poll
+    }
+  }, []);
+
+  const handleRecheckNetwork = useCallback(async () => {
+    if (checkingNetworkRef.current) return;
+    checkingNetworkRef.current = true;
+    setCheckingNetwork(true);
+    try {
+      const res = await fetch('/api/system/network/check', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        if (isValidNetworkStatus(data)) {
+          const prevState = networkStatusRef.current?.state;
+          networkStatusRef.current = data;
+          setNetworkStatus(data);
+          if (data.state === 'online' && prevState && prevState !== 'online') {
+            fetchTenders();
+            fetchPortals();
+            fetchKpis();
+          }
+        }
+      }
+    } catch {
+      // Best-effort manual probe
+    } finally {
+      checkingNetworkRef.current = false;
+      setCheckingNetwork(false);
+    }
+  }, [fetchTenders, fetchPortals, fetchKpis]);
+
+  const handleRecheckNetworkRef = useRef(handleRecheckNetwork);
+  handleRecheckNetworkRef.current = handleRecheckNetwork;
+
+  // Initial load (must stay above background network poll so fetchTenders() is first)
   useEffect(() => {
     fetchTenders();
     fetchTracks();
@@ -201,6 +257,29 @@ export default function App() {
     fetchCorrigenda();
     fetchKpis();
   }, [fetchTenders, fetchTracks, fetchPortals, fetchCorrigenda, fetchKpis]);
+
+  // Network health monitor: poll every 60s, on focus, and on browser online/offline transitions
+  useEffect(() => {
+    void fetchNetworkStatus();
+    const timer = setInterval(() => {
+      void fetchNetworkStatus();
+    }, 60_000);
+    const onBrowserNetworkChange = () => {
+      void handleRecheckNetworkRef.current();
+    };
+    const onWindowFocus = () => {
+      void fetchNetworkStatus();
+    };
+    window.addEventListener('online', onBrowserNetworkChange);
+    window.addEventListener('offline', onBrowserNetworkChange);
+    window.addEventListener('focus', onWindowFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('online', onBrowserNetworkChange);
+      window.removeEventListener('offline', onBrowserNetworkChange);
+      window.removeEventListener('focus', onWindowFocus);
+    };
+  }, [fetchNetworkStatus]);
 
   // Server-Sent Events (SSE) Listener for Real-Time Scraper Telemetry
   useEffect(() => {
@@ -219,6 +298,9 @@ export default function App() {
           fetchPortals();
           fetchCorrigenda();
           fetchKpis();
+          fetchNetworkStatus();
+        } else if (statusData.pausedReason) {
+          fetchNetworkStatus();
         }
       } catch (err) {
         console.error('SSE JSON parse error:', err);
@@ -232,7 +314,7 @@ export default function App() {
     return () => {
       eventSource.close();
     };
-  }, [fetchTenders, fetchPortals, fetchCorrigenda, fetchKpis]);
+  }, [fetchTenders, fetchPortals, fetchCorrigenda, fetchKpis, fetchNetworkStatus]);
 
   // Actions
   const handleRunScan = async (portalId?: string, depth?: 'quick' | 'deep') => {
@@ -246,6 +328,11 @@ export default function App() {
       if (res.ok) {
         const status = await res.json();
         setScanStatus(status);
+        if (!status.isScanning && status.pausedReason) {
+          fetchNetworkStatus();
+        }
+      } else {
+        setScanStatus(prev => ({ ...prev, isScanning: false }));
       }
     } catch (err) {
       console.error('Failed to trigger scan:', err);
@@ -483,6 +570,9 @@ export default function App() {
       scanStatus={scanStatus}
       onRunScan={() => handleRunScan()}
       onRunDeepScan={() => handleRunScan(undefined, 'deep')}
+      networkStatus={networkStatus}
+      checkingNetwork={checkingNetwork}
+      onRecheckNetwork={handleRecheckNetwork}
       themePref={themePref}
       onThemePref={changeThemePref}
     >

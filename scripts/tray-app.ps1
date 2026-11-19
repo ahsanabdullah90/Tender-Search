@@ -138,6 +138,23 @@ function Get-DigestAlertInfo {
   }
 }
 
+function Format-TrayNetworkSummary {
+  param($NetworkStatus)
+
+  if ($null -eq $NetworkStatus -or [string]::IsNullOrWhiteSpace([string]$NetworkStatus.state)) {
+    return $null
+  }
+  $state = [string]$NetworkStatus.state
+  if ($state -eq 'offline') {
+    return @{ State = 'offline'; MenuTag = 'Network: Offline (paused)'; Tooltip = 'Tender Tracker - Offline (paused)'; Balloon = 'Network offline: scans and document downloads are paused.' }
+  }
+  if ($state -eq 'degraded') {
+    return @{ State = 'degraded'; MenuTag = 'Network: Slow (heavy paused)'; Tooltip = 'Tender Tracker - Slow network'; Balloon = 'Slow network detected: deep scans and PDF downloads are paused; quick scans remain available.' }
+  }
+  $ms = if ($null -ne $NetworkStatus.latencyMs) { " ($([int]$NetworkStatus.latencyMs)ms)" } else { '' }
+  return @{ State = 'online'; MenuTag = "Network: Healthy$ms"; Tooltip = 'Tender Tracker - Online'; Balloon = "Network healthy$ms." }
+}
+
 function Open-StandaloneWindow {
   $browser = Resolve-StandaloneBrowser
   if ($browser.Path) {
@@ -186,6 +203,8 @@ $script:WasScanning = $false
 $script:TrayStartedScan = $false
 $script:LastDigestAlertKey = ''
 $script:LastClosingCount = $null
+$script:LastNetworkState = 'online'
+$script:LastNetworkPollUtc = [DateTime]::MinValue
 
 function Open-DefaultBrowser {
   Start-Process $script:BaseUrl | Out-Null
@@ -349,6 +368,32 @@ function Update-DigestState {
   } catch {
     # Ignore transient poll errors
   }
+
+  $null = Update-NetworkState
+}
+
+function Update-NetworkState {
+  param([switch]$Force, [switch]$Notify)
+
+  try {
+    $uri = if ($Force) { "$script:BaseUrl/api/system/network/check" } else { "$script:BaseUrl/api/system/network" }
+    $method = if ($Force) { 'Post' } else { 'Get' }
+    $timeout = if ($Force) { 8 } else { 2 }
+    $net = Invoke-RestMethod -Uri $uri -Method $method -TimeoutSec $timeout
+    $summary = Format-TrayNetworkSummary -NetworkStatus $net
+    if ($null -ne $summary) {
+      $script:LastNetworkState = $summary.State
+      $script:LastNetworkPollUtc = [DateTime]::UtcNow
+      if ($Notify) {
+        $icon = if ($summary.State -eq 'offline' -or $summary.State -eq 'degraded') { [System.Windows.Forms.ToolTipIcon]::Warning } else { [System.Windows.Forms.ToolTipIcon]::Info }
+        Show-TrayBalloon -Title 'Tender Tracker' -Message $summary.Balloon -Icon $icon
+      }
+      return $summary
+    }
+  } catch {
+    # Ignore transient poll errors
+  }
+  return $null
 }
 
 try {
@@ -406,7 +451,12 @@ $openBrowserItem.Add_Click({ Open-DefaultBrowser })
 $quickScanItem = New-Object System.Windows.Forms.ToolStripMenuItem('Run Quick Scan')
 $quickScanItem.Add_Click({
   try {
-    $null = Invoke-RestMethod -Uri "$script:BaseUrl/api/scan/start" -Method Post -ContentType 'application/json' -Body '{"depth":"quick"}' -TimeoutSec 4
+    $resp = Invoke-RestMethod -Uri "$script:BaseUrl/api/scan/start" -Method Post -ContentType 'application/json' -Body '{"depth":"quick"}' -TimeoutSec 4
+    if ($resp -and (-not [bool]$resp.isScanning) -and -not [string]::IsNullOrWhiteSpace([string]$resp.pausedReason)) {
+      Show-TrayBalloon -Title 'Tender Tracker' -Message ([string]$resp.pausedReason) -Icon ([System.Windows.Forms.ToolTipIcon]::Warning)
+      $null = Update-NetworkState
+      return
+    }
     $script:TrayStartedScan = $true
     $script:WasScanning = $true
     if ($null -ne $statusTimer -and $statusTimer.Interval -ne 10000) {
@@ -422,7 +472,12 @@ $quickScanItem.Add_Click({
 $deepScanItem = New-Object System.Windows.Forms.ToolStripMenuItem('Run Deep Scan')
 $deepScanItem.Add_Click({
   try {
-    $null = Invoke-RestMethod -Uri "$script:BaseUrl/api/scan/start" -Method Post -ContentType 'application/json' -Body '{"depth":"deep"}' -TimeoutSec 4
+    $resp = Invoke-RestMethod -Uri "$script:BaseUrl/api/scan/start" -Method Post -ContentType 'application/json' -Body '{"depth":"deep"}' -TimeoutSec 4
+    if ($resp -and (-not [bool]$resp.isScanning) -and -not [string]::IsNullOrWhiteSpace([string]$resp.pausedReason)) {
+      Show-TrayBalloon -Title 'Tender Tracker' -Message ([string]$resp.pausedReason) -Icon ([System.Windows.Forms.ToolTipIcon]::Warning)
+      $null = Update-NetworkState
+      return
+    }
     $script:TrayStartedScan = $true
     $script:WasScanning = $true
     if ($null -ne $statusTimer -and $statusTimer.Interval -ne 10000) {
@@ -440,6 +495,22 @@ $statusItem = New-Object System.Windows.Forms.ToolStripMenuItem($initialStatusTe
 $statusItem.Enabled = $false
 [void]$menu.Items.Add($statusItem)
 $script:StatusItem = $statusItem
+
+$recheckNetItem = New-Object System.Windows.Forms.ToolStripMenuItem('Recheck Network')
+$recheckNetItem.Add_Click({
+  $summary = Update-NetworkState -Force -Notify
+  if ($null -ne $summary -and -not $script:WasScanning) {
+    $prefix = if ($script:OwnsServer) { 'Online' } else { 'Attached' }
+    if ($summary.State -eq 'offline' -or $summary.State -eq 'degraded') {
+      $script:StatusItem.Text = "Status: $prefix | $($summary.MenuTag)"
+      $script:NotifyIcon.Text = Format-TrayTooltip $summary.Tooltip
+    } else {
+      $script:StatusItem.Text = "Status: $prefix | $($summary.MenuTag)"
+      $script:NotifyIcon.Text = Format-TrayTooltip "Tender Tracker - $prefix"
+    }
+  }
+})
+[void]$menu.Items.Add($recheckNetItem)
 
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
@@ -559,10 +630,19 @@ $statusTimer.Add_Tick({
       $script:StatusItem.Text = "Status: Scanning ($pct%) - $portalLabel"
       $script:NotifyIcon.Text = Format-TrayTooltip "Tender Tracker - Scanning ($pct%)"
     } else {
+      if (([DateTime]::UtcNow - $script:LastNetworkPollUtc).TotalSeconds -ge 120 -or (-not [string]::IsNullOrWhiteSpace([string]$scanStatus.pausedReason))) {
+        $null = Update-NetworkState
+      }
       $prefix = if ($script:OwnsServer) { 'Online' } else { 'Attached' }
       $closingCount = $script:LastClosingCount
 
-      if ($null -ne $closingCount -and $closingCount -gt 0) {
+      if ($script:LastNetworkState -eq 'offline') {
+        $script:StatusItem.Text = "Status: $prefix | Network: Offline (paused)"
+        $script:NotifyIcon.Text = Format-TrayTooltip 'Tender Tracker - Offline (paused)'
+      } elseif ($script:LastNetworkState -eq 'degraded') {
+        $script:StatusItem.Text = "Status: $prefix | Network: Slow (heavy paused)"
+        $script:NotifyIcon.Text = Format-TrayTooltip 'Tender Tracker - Slow network'
+      } elseif ($null -ne $closingCount -and $closingCount -gt 0) {
         $script:StatusItem.Text = "Status: $prefix | $closingCount closing <=48h"
         $script:NotifyIcon.Text = Format-TrayTooltip "Tender Tracker - $prefix ($closingCount closing soon)"
       } else {

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Inbox, Kanban, SlidersHorizontal, RefreshCw, Monitor, Sun, Moon } from 'lucide-react';
-import { ScanStatus } from '../../shared/types';
+import { ScanStatus, NetworkStatus } from '../../shared/types';
 import { ThemePref } from '../theme';
 import { Button } from '../ui';
 
@@ -12,6 +12,9 @@ interface AppShellProps {
   scanStatus: ScanStatus;
   onRunScan: () => void;
   onRunDeepScan?: () => void;
+  networkStatus?: NetworkStatus | null;
+  checkingNetwork?: boolean;
+  onRecheckNetwork?: () => void;
   themePref: ThemePref;
   onThemePref: (pref: ThemePref) => void;
   children: React.ReactNode;
@@ -54,7 +57,19 @@ function ThemeSwitch({ value, onChange }: { value: ThemePref; onChange: (p: Them
   );
 }
 
-export function AppShell({ section, onNavigate, scanStatus, onRunScan, onRunDeepScan, themePref, onThemePref, children }: AppShellProps) {
+export function AppShell({
+  section,
+  onNavigate,
+  scanStatus,
+  onRunScan,
+  onRunDeepScan,
+  networkStatus,
+  checkingNetwork,
+  onRecheckNetwork,
+  themePref,
+  onThemePref,
+  children,
+}: AppShellProps) {
   const scanning = scanStatus.isScanning;
   const lastSync = scanStatus.lastScanTimestamp
     ? new Date(scanStatus.lastScanTimestamp).toLocaleTimeString('en-GB', {
@@ -75,6 +90,44 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, onRunDeep
     ? (Date.now() - new Date(fullScanTime).getTime()) / (1000 * 60 * 60)
     : null;
   const isFullScanStale = fullScanAgeHours !== null && fullScanAgeHours >= 24;
+
+  const netState = networkStatus?.state ?? null;
+  const isOffline = netState === 'offline';
+  const isDegraded = netState === 'degraded';
+  const deepPaused = Boolean(networkStatus?.heavyTasksPaused);
+
+  const netContainerClass = isOffline
+    ? 'rounded-lg bg-danger-soft px-2 py-1.5 text-danger'
+    : isDegraded
+      ? 'rounded-lg bg-warn-soft px-2 py-1.5 text-warn'
+      : 'rounded-lg px-2 py-1.5 text-ink-muted';
+
+  const netDotClass = isOffline
+    ? 'bg-danger'
+    : isDegraded
+      ? 'animate-pulse bg-warn'
+      : 'bg-ok';
+
+  const netLabel = isOffline
+    ? 'Network: Offline'
+    : isDegraded
+      ? 'Network: Slow'
+      : networkStatus?.latencyMs != null
+        ? `Network: Healthy (${networkStatus.latencyMs}ms)`
+        : 'Network: Healthy';
+
+  const netSubtitle =
+    networkStatus && netState !== 'online'
+      ? [
+          isOffline ? 'Scans & downloads paused' : isDegraded ? 'Heavy tasks paused' : null,
+          networkStatus.deferredHeavyTasks?.deepScanPending ? 'Deep scan held' : null,
+          (networkStatus.deferredHeavyTasks?.pendingDocumentJobs ?? 0) > 0
+            ? `${networkStatus.deferredHeavyTasks.pendingDocumentJobs} doc(s) queued`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : '';
 
   return (
     <div className="flex min-h-screen bg-bg text-ink">
@@ -104,6 +157,39 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, onRunDeep
         </nav>
 
         <div className="mt-auto flex flex-col gap-3">
+          {networkStatus && (
+            <div
+              data-testid="network-status-indicator"
+              role="status"
+              aria-live="polite"
+              title={networkStatus.reason || undefined}
+              className={`flex flex-col gap-0.5 ${netContainerClass}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2 text-xs font-medium">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${netDotClass}`} />
+                  <span className="truncate">{netLabel}</span>
+                </div>
+                {onRecheckNetwork && (
+                  <button
+                    type="button"
+                    onClick={onRecheckNetwork}
+                    disabled={checkingNetwork}
+                    aria-label="Recheck network connectivity"
+                    title="Recheck network connectivity"
+                    className="shrink-0 cursor-pointer rounded p-0.5 opacity-80 transition hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${checkingNetwork ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
+              </div>
+              {netSubtitle && (
+                <div className="pl-4 text-[11px] leading-snug opacity-90" data-testid="network-status-detail">
+                  {netSubtitle}
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-2 px-2 text-xs text-ink-muted">
             <span className={`h-2 w-2 shrink-0 rounded-full ${scanning ? 'animate-pulse bg-warn' : isFullScanStale ? 'bg-danger' : 'bg-ok'}`} />
             <span>{syncText}</span>
@@ -133,8 +219,21 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, onRunDeep
               ].filter(Boolean).join(' · ')}
             </div>
           )}
+          {!scanning && scanStatus.pausedReason && (
+            <div
+              data-testid="scan-paused-reason"
+              className="px-2 text-[11px] leading-snug text-warn"
+            >
+              {scanStatus.pausedReason}
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
-            <Button onClick={onRunScan} disabled={scanning} className="flex-1">
+            <Button
+              onClick={onRunScan}
+              disabled={scanning || isOffline}
+              title={isOffline ? 'Scan paused while offline' : isDegraded ? 'Quick scan (serial mode on slow network)' : 'Run quick scan'}
+              className="flex-1"
+            >
               <RefreshCw className={`h-4 w-4 ${scanning ? 'animate-spin' : ''}`} />
               {scanning ? 'Scanning…' : 'Scan now'}
             </Button>
@@ -143,9 +242,9 @@ export function AppShell({ section, onNavigate, scanStatus, onRunScan, onRunDeep
                 variant="ghost"
                 size="sm"
                 onClick={onRunDeepScan}
-                disabled={scanning}
+                disabled={scanning || deepPaused}
                 aria-label="Run deep multi-page scan"
-                title="Deep scan (scans deeper archive pages per portal)"
+                title={deepPaused ? 'Deep scan held until network connection is healthy' : 'Deep scan (scans deeper archive pages per portal)'}
                 className="shrink-0"
               >
                 Deep

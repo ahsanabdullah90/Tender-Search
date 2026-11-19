@@ -33,6 +33,7 @@ import {
 import { matchTracks, applyDocumentScopeToTracks } from './trackMatcher.js';
 import { embedTextToBlobAsync, buildTenderEmbeddingText } from '../services/embeddingService.js';
 import { purgeTenderFiles } from '../services/dossierStore.js';
+import { canRunHeavyNetworkTask } from '../services/networkMonitor.js';
 import { deriveDossierLabel } from '../services/dossierManager.js';
 import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import {
@@ -418,7 +419,7 @@ export async function processAndSaveTender(
   // has no deadline yet, or its link IS the document. Dated tenders insert straight away and
   // their documents are fetched by the background worker.
   const needsUpfront = (!item.closingDate || isDirectDoc) && candidates.length > 0;
-  const runUpfront = needsUpfront && hasUpfrontTime();
+  const runUpfront = needsUpfront && hasUpfrontTime() && canRunHeavyNetworkTask();
   if (runUpfront) {
     // Stage the new tender so Inbox/Pipeline/analytics queries ignore it via NOT_STAGING_SQL
     // until verification passes (P2-4). Only ever done for a row that did not exist (step 1).

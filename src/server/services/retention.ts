@@ -21,6 +21,7 @@ import {
   reconcileDossiers,
   ReconcileResult
 } from './dossierStore.js';
+import { canRunHeavyNetworkTask } from './networkMonitor.js';
 
 export interface RetentionReport {
   slimmedCount: number;
@@ -110,14 +111,17 @@ export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolea
     }
   }
 
-  // 2b. Clean up stale awaiting_scope tenders older than 3 days (held for documents that never arrived or matched)
-  const staleAwaitingScope = getStaleAwaitingScopeTenderIds(3, batchCap);
-  if (staleAwaitingScope.length > 0) {
-    if (!isDryRun) {
-      const deleteResult = deleteTenders(staleAwaitingScope, 'no-track-match');
-      report.staleAwaitingScopeDeletedCount = deleteResult.deletedCount;
-    } else {
-      report.staleAwaitingScopeDeletedCount = staleAwaitingScope.length;
+  // 2b. Clean up stale awaiting_scope tenders older than 3 days (held for documents that never arrived or matched).
+  // Never purge awaiting_scope rows while heavy document tasks are paused due to slow/offline network (G1).
+  if (canRunHeavyNetworkTask()) {
+    const staleAwaitingScope = getStaleAwaitingScopeTenderIds(3, batchCap);
+    if (staleAwaitingScope.length > 0) {
+      if (!isDryRun) {
+        const deleteResult = deleteTenders(staleAwaitingScope, 'no-track-match');
+        report.staleAwaitingScopeDeletedCount = deleteResult.deletedCount;
+      } else {
+        report.staleAwaitingScopeDeletedCount = staleAwaitingScope.length;
+      }
     }
   }
 

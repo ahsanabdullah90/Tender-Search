@@ -7,6 +7,7 @@ import { CachedDossier } from '../../shared/types.js';
 import { DOSSIERS_DIR, getTenderById } from '../db/index.js';
 import { maxFileBytes } from './ingestBudget.js';
 import { sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError } from '../scrapers/baseScraper.js';
+import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from './networkMonitor.js';
 
 // Same folder the rest of the app uses (honours TENDER_DATA_DIR).
 const DOSSIERS_ROOT = DOSSIERS_DIR;
@@ -82,6 +83,8 @@ export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, in
 export interface DownloadDossierOptions {
   signal?: AbortSignal;
   maxBytes?: number;
+  timeoutMs?: number;
+  onError?: (err: Error, meta: { isTransientNetwork: boolean }) => void;
 }
 
 export function isHtmlContent(buffer: Buffer, contentTypeHeader?: string): boolean {
@@ -170,9 +173,20 @@ export async function downloadAndCacheDossier(
     effectiveLabel = deriveDossierLabel(remoteUrl, label, docIndex);
   }
 
+  let hostForTelemetry = '';
+  try { hostForTelemetry = new URL(remoteUrl).hostname; } catch {}
+  const startedAt = Date.now();
+
   try {
     const buffer = await fetchFileBuffer(remoteUrl, cookieHeader, 0, options);
     if (options?.signal?.aborted) return null;
+
+    if (hostForTelemetry) {
+      reportNetworkOutcome(hostForTelemetry, true, {
+        durationMs: Date.now() - startedAt,
+        slowThresholdMs: PASSIVE_SLOW_DOC_MS
+      });
+    }
 
     const ctHeader = (buffer as any)?.contentType;
     if (isHtmlContent(buffer, ctHeader)) {
@@ -235,7 +249,14 @@ export async function downloadAndCacheDossier(
       }
     }
 
-    fs.writeFileSync(finalPath, buffer);
+    const tmpPath = `${finalPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    fs.writeFileSync(tmpPath, buffer);
+    try {
+      fs.renameSync(tmpPath, finalPath);
+    } catch (renameErr) {
+      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+      throw renameErr;
+    }
 
     const webUrl = `/api/dossiers/${encodeURIComponent(tenderId)}/${encodeURIComponent(filename)}`;
 
@@ -248,7 +269,13 @@ export async function downloadAndCacheDossier(
       sizeBytes: buffer.length
     };
   } catch (err) {
-    console.warn(`Failed to download dossier from ${remoteUrl}:`, (err as any)?.message || err);
+    const errObj = err instanceof Error ? err : new Error(String(err));
+    const transient = isTransientNetworkError(errObj);
+    if (hostForTelemetry && transient) {
+      reportNetworkOutcome(hostForTelemetry, false, { isTimeout: true });
+    }
+    try { options?.onError?.(errObj, { isTransientNetwork: transient }); } catch {}
+    console.warn(`Failed to download dossier from ${remoteUrl}:`, errObj.message || err);
     return null;
   }
 }
@@ -342,7 +369,7 @@ export function fetchFileBuffer(
     const req = client.get(url, {
       agent: isHttps ? (useLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
       headers,
-      timeout: 45000
+      timeout: options?.timeoutMs ?? 45000
     }, res => {
       // Follow redirects cleanly
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -385,7 +412,13 @@ export function fetchFileBuffer(
         chunks.push(chunk);
       });
       res.on('end', () => finish(() => {
+        if ((res as any).complete === false) {
+          return reject(new Error('File download truncated before completion'));
+        }
         const fullBuf = Buffer.concat(chunks);
+        if (Number.isFinite(contentLength) && contentLength > 0 && fullBuf.length < contentLength) {
+          return reject(new Error(`File download truncated (received ${fullBuf.length} of ${contentLength} bytes)`));
+        }
         if (isHtmlContent(fullBuf, contentType)) {
           return reject(new Error('Downloaded file content is HTML, not a valid document'));
         }
@@ -393,6 +426,7 @@ export function fetchFileBuffer(
         (fullBuf as any).contentDisposition = contentDisposition;
         resolve(fullBuf);
       }));
+      res.on('aborted', () => finish(() => reject(new Error('File download aborted by remote host'))));
       res.on('error', err => finish(() => reject(err)));
     });
 

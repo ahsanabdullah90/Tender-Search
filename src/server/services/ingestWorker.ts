@@ -25,6 +25,7 @@ import { isDownloadableCandidateUrl, UPFRONT_MAX_DOCS } from '../scrapers/ingest
 import { applyDocumentScopeToTracks, matchTracks } from '../scrapers/trackMatcher.js';
 import { applyDocumentResultToTender } from './documentApply.js';
 import { Tender } from '../../shared/types.js';
+import { checkNetworkHealth, canRunHeavyNetworkTask, isTransientNetworkError } from './networkMonitor.js';
 
 /**
  * Background document worker (docs/13-ingestion-pipeline-plan.md, §3.3). Runs every 2 minutes
@@ -35,7 +36,7 @@ import { Tender } from '../../shared/types.js';
  */
 
 export interface WorkerReport {
-  skipped?: 'scan_running' | 'already_running';
+  skipped?: 'scan_running' | 'already_running' | 'network_unhealthy';
   claimed: number;
   completed: number;
   failed: number;
@@ -50,6 +51,11 @@ export async function processDocumentQueue(limit: number = 5): Promise<WorkerRep
   if (running) return { ...report, skipped: 'already_running' };
   // Never fetch portals in parallel with a scan.
   if (currentScanStatus.isScanning) return { ...report, skipped: 'scan_running' };
+  // Hold heavy background PDF downloads until network connectivity is healthy (online).
+  const network = await checkNetworkHealth();
+  if (!canRunHeavyNetworkTask(network)) {
+    return { ...report, skipped: 'network_unhealthy' };
+  }
 
   running = true;
   try {
@@ -82,9 +88,21 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
 
   try {
     const label = job.label || deriveDossierLabel(job.url, 'Tender Document');
-    const doc = await crawlerDeps.downloadAndCacheDossier(tender.id, job.url, label);
+    let downloadErr: Error | null = null;
+    let downloadTransient = false;
+    const doc = await crawlerDeps.downloadAndCacheDossier(tender.id, job.url, label, {
+      onError: (err, meta) => {
+        downloadErr = err;
+        downloadTransient = meta.isTransientNetwork;
+      }
+    });
     if (!doc) {
-      const status = failJob(job.id, 'Download failed');
+      if (downloadTransient || !canRunHeavyNetworkTask()) {
+        deferJob(job.id, 10, (downloadErr as Error | null)?.message || 'Deferred due to slow/offline network');
+        refreshTenderDocFetchStatus(tender.id);
+        return 'deferred';
+      }
+      const status = failJob(job.id, (downloadErr as Error | null)?.message || 'Download failed');
       refreshTenderDocFetchStatus(tender.id);
       if (status === 'failed') {
         finalizeAwaitingScopeAfterJobFailure(tender.id);
@@ -150,6 +168,13 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
     refreshTenderDocFetchStatus(current.id);
     return 'completed';
   } catch (err: any) {
+    if (isTransientNetworkError(err) || !canRunHeavyNetworkTask()) {
+      deferJob(job.id, 10, err?.message || 'Deferred due to transient network error');
+      if (getTenderById(job.tender_id)) {
+        refreshTenderDocFetchStatus(job.tender_id);
+      }
+      return 'deferred';
+    }
     const status = failJob(job.id, err?.message || String(err));
     if (getTenderById(job.tender_id)) {
       refreshTenderDocFetchStatus(job.tender_id);

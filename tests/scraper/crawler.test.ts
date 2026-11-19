@@ -42,6 +42,12 @@ import {
   classifyScraperError,
   runWithConcurrency
 } from '../../src/server/scrapers/crawlerEngine.js';
+import {
+  networkMonitorDeps,
+  resetNetworkMonitorForTests,
+  isDeepScanPending,
+  checkNetworkHealth
+} from '../../src/server/services/networkMonitor.js';
 import * as cheerio from 'cheerio';
 import http from 'http';
 import * as ocrSvc from '../../src/server/services/ocrService.js';
@@ -79,6 +85,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     crawlerDeps.downloadAndCacheDossier = originalDownload;
     crawlerDeps.fetchFileBuffer = originalFetchBuffer;
     currentScanStatus.isScanning = false;
+    resetNetworkMonitorForTests();
     vi.restoreAllMocks();
   });
 
@@ -2063,6 +2070,49 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(epms?.last_error_code).toBe('TIMEOUT');
       expect(punjab?.status).toBe('online');
       expect(punjab?.last_error_code).toBeNull();
+    });
+
+    it('Network Gate: pauses scans cleanly on offline, defers full deep scan on degraded while allowing quick/single-portal scans, and omits last_full_scan_at if all portals time out', async () => {
+      db.prepare(`UPDATE portal_health SET access_mode = 'offline_broken' WHERE portal_id NOT IN ('punjab_eproc', 'epms_ppra')`).run();
+      db.prepare(`DELETE FROM app_settings WHERE key IN ('last_full_scan_at', 'last_deep_scan_at')`).run();
+
+      // 1. Offline: aborts immediately without scanning portals or touching portal_health
+      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' });
+      const fetchSpy = vi.fn();
+      crawlerDeps.fetchHtml = fetchSpy;
+
+      const offlineStatus = await startCrawlerScan(undefined, true, { depth: 'deep' });
+      expect(offlineStatus.isScanning).toBe(false);
+      expect(offlineStatus.pausedReason).toContain('No internet connectivity');
+      expect(isDeepScanPending()).toBe(true);
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      // 2. Degraded: holds full deep scan, allows quick scan and single-portal scan with extended timeout
+      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 2200 });
+      await checkNetworkHealth({ force: true });
+      const heldDeep = await startCrawlerScan(undefined, true, { depth: 'deep' });
+      expect(heldDeep.isScanning).toBe(false);
+      expect(heldDeep.pausedReason).toContain('deep scan held');
+      expect(isDeepScanPending()).toBe(true);
+
+      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(`
+        <table>
+          <tr><th>Title</th><th>Closing</th></tr>
+          <tr><td><a href="https://eproc.punjab.gov.pk/ok/degraded">Solar Inverter Installation</a></td><td>20-12-2026</td></tr>
+        </table>
+      `);
+      const quickDegraded = await startCrawlerScan('punjab_eproc', true, { depth: 'quick' });
+      expect(quickDegraded.isScanning).toBe(false);
+      expect(quickDegraded.completedPortals).toBe(1);
+
+      // 3. Online but all active portals fail with TIMEOUT: refuses to stamp last_full_scan_at
+      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 30 });
+      await checkNetworkHealth({ force: true });
+      crawlerDeps.fetchHtml = vi.fn().mockRejectedValue(new Error('Request timed out (ETIMEDOUT)'));
+      const allTimeoutStatus = await startCrawlerScan(undefined, true, { depth: 'quick' });
+      expect(allTimeoutStatus.pausedReason).toContain('All portals timed out');
+      const fullScanRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'last_full_scan_at'`).get();
+      expect(fullScanRow).toBeUndefined();
     });
   });
 });

@@ -6,6 +6,8 @@ import { runRetentionCycle, getRetentionStatus } from '../../src/server/services
 import { setAppSetting } from '../../src/server/db/repositories/systemRepo.js';
 import { saveTenderDocument } from '../../src/server/services/dossierStore.js';
 import { getTenderById } from '../../src/server/db/repositories/tendersRepo.js';
+import { enqueueDocumentJobs } from '../../src/server/db/repositories/ingestJobsRepo.js';
+import { checkNetworkHealth, networkMonitorDeps, resetNetworkMonitorForTests } from '../../src/server/services/networkMonitor.js';
 
 describe('Retention Lifecycle Daemon', () => {
   const tenderPassedOld = 'tender-retention-passed-old';
@@ -342,5 +344,34 @@ describe('Retention Lifecycle Daemon', () => {
     expect(check).not.toBeNull();
     expect(check?.ingestion_status).toBe('ready');
     db.prepare('DELETE FROM tenders WHERE id = ?').run(stagingTenderId);
+  });
+
+  it('Refinement #2: never purges awaiting_scope tenders while heavy tasks are paused or when pending jobs have 0 attempts', async () => {
+    const heldId = 'tender-awaiting-scope-protected';
+    db.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, title, organization, portal_id, portal_name, direct_url,
+        domain_tracks, matched_keywords, match_score, ingestion_status, created_at, updated_at
+      ) VALUES (?, ?, 'Protected Awaiting Scope', 'Org', 'epms_ppra', 'Federal PPRA', 'https://example.com/prot',
+        '[]', '[]', 0, 'awaiting_scope', datetime('now', '-5 days'), datetime('now', '-5 days'))
+    `).run(heldId, heldId);
+
+    try {
+      // 1. Even with 0 jobs, when network is degraded, retention skips awaiting_scope purge
+      networkMonitorDeps.probeEndpoint = async () => ({ ok: true, latencyMs: 2200 });
+      await checkNetworkHealth({ force: true });
+      runRetentionCycle({ dryRun: false });
+      expect(getTenderById(heldId)).not.toBeNull();
+
+      // 2. When network recovers to online, an unattempted pending job (attempts = 0) still protects the tender
+      networkMonitorDeps.probeEndpoint = async () => ({ ok: true, latencyMs: 30 });
+      await checkNetworkHealth({ force: true });
+      enqueueDocumentJobs(heldId, [{ url: 'https://example.com/prot.pdf', label: 'Notice' }]);
+      runRetentionCycle({ dryRun: false });
+      expect(getTenderById(heldId)).not.toBeNull();
+    } finally {
+      resetNetworkMonitorForTests();
+      db.prepare('DELETE FROM tenders WHERE id = ?').run(heldId);
+    }
   });
 });

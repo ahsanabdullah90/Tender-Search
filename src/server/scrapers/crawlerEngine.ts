@@ -19,6 +19,12 @@ import {
   getActiveScanBudget
 } from '../services/ingestBudget.js';
 import {
+  checkNetworkHealth,
+  canRunHeavyNetworkTask,
+  canRunLightNetworkTask,
+  setDeepScanPending
+} from '../services/networkMonitor.js';
+import {
   formatClosingDate,
   extractDatesFromText
 } from './dateParser.js';
@@ -277,14 +283,15 @@ async function scanSinglePortal(
   activeTracks: DomainTrack[],
   depth: ScanDepth,
   activeSet: Set<string>,
-  totalPortals: number
-): Promise<void> {
+  totalPortals: number,
+  options?: { degradedMode?: boolean }
+): Promise<'ok' | 'network_error' | 'other_error'> {
   activeSet.add(portal.name);
   updateActivePortalsState(activeSet);
   updatePortalHealth(portal.id, { status: 'scanning' });
 
   try {
-    const scrapeResult = await scrapePortal(portal, { depth });
+    const scrapeResult = await scrapePortal(portal, { depth, degradedMode: options?.degradedMode });
 
     if (scrapeResult.hitlRequired) {
       updatePortalHealth(portal.id, {
@@ -336,15 +343,18 @@ async function scanSinglePortal(
           : null
       });
     }
+    return 'ok';
   } catch (err: any) {
     console.error(`[Crawler] Error scanning portal ${portal.id}:`, err.message || err);
+    const errorCode = classifyScraperError(err);
     updatePortalHealth(portal.id, {
       status: 'error',
       last_scan_at: new Date().toISOString(),
       last_items_found: 0,
-      last_error_code: classifyScraperError(err),
+      last_error_code: errorCode,
       last_error_message: err.message || 'Scrape connection failure'
     });
+    return errorCode === 'TIMEOUT' || errorCode === 'NETWORK_UNREACHABLE' ? 'network_error' : 'other_error';
   } finally {
     activeSet.delete(portal.name);
     currentScanStatus.completedPortals++;
@@ -361,13 +371,33 @@ async function scanSinglePortal(
 export async function startCrawlerScan(
   targetPortalId?: string,
   awaitCompletion: boolean = false,
-  options?: { depth?: ScanDepth }
+  options?: { depth?: ScanDepth; forceOnDegraded?: boolean }
 ): Promise<ScanStatus> {
   if (currentScanStatus.isScanning) {
     return currentScanStatus;
   }
 
   const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
+  const net = await checkNetworkHealth();
+
+  if (!canRunLightNetworkTask(net)) {
+    if (!targetPortalId && depth === 'deep') {
+      setDeepScanPending(true);
+    }
+    currentScanStatus.pausedReason = net.reason || 'No internet connection detected — scan paused';
+    broadcastProgress();
+    return currentScanStatus;
+  }
+
+  if (!canRunHeavyNetworkTask(net) && !targetPortalId && depth === 'deep' && !options?.forceOnDegraded) {
+    setDeepScanPending(true);
+    currentScanStatus.pausedReason = 'Slow network detected — deep scan held until connection is healthy (Quick Scan remains available)';
+    broadcastProgress();
+    return currentScanStatus;
+  }
+
+  const degradedMode = !canRunHeavyNetworkTask(net);
+  const effectiveHttpConcurrency = degradedMode ? 1 : HTTP_PORTAL_CONCURRENCY;
   const allPortals = getActivePortalsList(targetPortalId);
   // In automated full scans, skip offline_broken portals unless explicitly triggered individually
   const portalsToScan = targetPortalId
@@ -385,6 +415,7 @@ export async function startCrawlerScan(
     newTendersFound: 0,
     corrigendaFound: 0,
     heldForScope: 0,
+    pausedReason: null,
     lastScanTimestamp: currentScanStatus.lastScanTimestamp
   };
   broadcastProgress();
@@ -393,25 +424,33 @@ export async function startCrawlerScan(
     // Per-scan document budget: time for upfront fetches and a Gemini Vision call cap (docs/13 §3.2).
     beginScanBudget();
     const activeSet = new Set<string>();
+    let succeededPortals = 0;
+    let networkFailedPortals = 0;
     try {
       const activeTracks = getAllDomainTracks().filter(t => t.is_active === 1);
       const total = portalsToScan.length;
 
       if (portalsToScan.length <= 1) {
         for (const portal of portalsToScan) {
-          await scanSinglePortal(portal, activeTracks, depth, activeSet, total);
+          const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+          if (outcome === 'ok') succeededPortals++;
+          else if (outcome === 'network_error') networkFailedPortals++;
         }
       } else {
         const httpPortals = portalsToScan.filter(p => p.tier !== 'playwright');
         const pwPortals = portalsToScan.filter(p => p.tier === 'playwright');
 
         await Promise.all([
-          runWithConcurrency(httpPortals, HTTP_PORTAL_CONCURRENCY, async portal => {
-            await scanSinglePortal(portal, activeTracks, depth, activeSet, total);
+          runWithConcurrency(httpPortals, effectiveHttpConcurrency, async portal => {
+            const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+            if (outcome === 'ok') succeededPortals++;
+            else if (outcome === 'network_error') networkFailedPortals++;
             await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
           }),
           runWithConcurrency(pwPortals, PLAYWRIGHT_PORTAL_CONCURRENCY, async portal => {
-            await scanSinglePortal(portal, activeTracks, depth, activeSet, total);
+            const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+            if (outcome === 'ok') succeededPortals++;
+            else if (outcome === 'network_error') networkFailedPortals++;
             await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
           })
         ]);
@@ -426,9 +465,21 @@ export async function startCrawlerScan(
       currentScanStatus.lastScanTimestamp = new Date().toISOString();
       currentScanStatus.progressPercent = 100;
       if (!targetPortalId) {
-        setAppSetting('last_full_scan_at', currentScanStatus.lastScanTimestamp);
-        if (depth === 'deep') {
-          setAppSetting('last_deep_scan_at', currentScanStatus.lastScanTimestamp);
+        const allFailedFromNetwork =
+          portalsToScan.length > 0 && succeededPortals === 0 && networkFailedPortals >= portalsToScan.length;
+        if (!allFailedFromNetwork) {
+          setAppSetting('last_full_scan_at', currentScanStatus.lastScanTimestamp);
+          if (depth === 'deep') {
+            setAppSetting('last_deep_scan_at', currentScanStatus.lastScanTimestamp);
+            if (succeededPortals > 0) {
+              setDeepScanPending(false);
+            }
+          }
+        } else {
+          currentScanStatus.pausedReason = 'All portals timed out or unreachable — catch-up scan will retry when network recovers';
+          if (depth === 'deep') {
+            setDeepScanPending(true);
+          }
         }
       }
       broadcastProgress();
@@ -457,8 +508,11 @@ function normalizeClosingDayForEarlyStop(value?: string | null): string {
  */
 export async function scrapePortal(
   portal: PortalDefinition & { sessionCookies?: string },
-  options?: { depth?: ScanDepth }
+  options?: { depth?: ScanDepth; degradedMode?: boolean }
 ): Promise<ScrapeResult> {
+  const htmlTimeoutMs = options?.degradedMode
+    ? (portal.tendersUrl.includes('epms.ppra.gov.pk') ? 55000 : 45000)
+    : undefined;
   let html: string | null = null;
   let fetchError: any = null;
   let redirectedUrl: string | null = null;
@@ -507,7 +561,7 @@ export async function scrapePortal(
     const maxRetries = 2;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies);
+        const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies, htmlTimeoutMs);
         html = fetched.html;
         if (fetched.cookies) responseCookies = fetched.cookies;
         if (fetched.finalUrl && fetched.finalUrl !== portal.tendersUrl) {
@@ -610,8 +664,8 @@ export async function scrapePortal(
       try {
         await crawlerDeps.sleep(getHumanJitterDelay(1500, 3000));
         const pageFetched = postBody
-          ? await postFormSmart(pageUrl, postBody, currentCookies)
-          : await fetchHtmlSmart(pageUrl, portal.id === 'epms_ppra' ? portal.sessionCookies : currentCookies);
+          ? await postFormSmart(pageUrl, postBody, currentCookies, htmlTimeoutMs)
+          : await fetchHtmlSmart(pageUrl, portal.id === 'epms_ppra' ? portal.sessionCookies : currentCookies, htmlTimeoutMs);
         if (!pageFetched.html) break;
         currentPageHtml = pageFetched.html;
         if (pageFetched.cookies) currentCookies = pageFetched.cookies;

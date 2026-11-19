@@ -52,7 +52,7 @@ describe('baseScraper utility module', () => {
       expect(sslTolerantAgent).toBeDefined();
       expect((sslTolerantAgent as any).options.rejectUnauthorized).toBe(false);
       expect((sslTolerantAgent as any).options.keepAlive).toBe(false);
-      expect((sslTolerantAgent as any).options.timeout).toBe(25000);
+      expect((sslTolerantAgent as any).options.timeout).toBe(90000);
 
       expect(legacySslTolerantAgent).toBeDefined();
       expect((legacySslTolerantAgent as any).options.rejectUnauthorized).toBe(false);

@@ -380,3 +380,8 @@ Token-guarded graceful shutdown endpoint used by the standalone Windows system t
   - `200 OK`: Flushes HTTP response (`Connection: close`), stops the scheduler, terminates local OCR worker, truncates/checkpoints SQLite WAL, closes the database cleanly, and exits.
   - `403 Forbidden`: Returned when `TENDER_SHUTDOWN_TOKEN` is unset (disabled by default in standard `npm run dev` / `npm start` runs) or when the header token is missing/invalid.
   - `503 Service Unavailable`: Returned if no shutdown handler is registered.
+
+### `GET /api/system/network` & `POST /api/system/network/check`
+Reports current network connectivity health (`online`, `degraded`, `offline`), measured probe latency, whether heavy network tasks are paused (`heavyTasksPaused`), and deferred queue/scan counts (`deferredHeavyTasks`).
+- `GET /api/system/network`: Returns cached status (refreshed automatically every 45s).
+- `POST /api/system/network/check`: Forces an immediate re-probe across lightweight connectivity endpoints.

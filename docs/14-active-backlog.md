@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-19 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, and Standalone Desktop Window & System Tray).
+**Last updated:** 2026-11-19 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, Standalone Desktop Window & System Tray, and Network Health Monitor & Anti-Corruption Safeguards).
 
 This document tracks **active operational items and approved non-breaking feature plans**. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 
@@ -27,6 +27,12 @@ All approved non-breaking improvement plans are implemented and moved to the Com
 ---
 
 ## 3. Recently Completed Register Items (2026-11-11 – 2026-11-19)
+
+- **Network Health Monitor, Heavy/Light Task Gating & Anti-Corruption Safeguards (`2026-11-19`):**
+  - Created `src/server/services/networkMonitor.ts` (`online` / `degraded` / `offline` classification via cached multi-endpoint HTTP probes and passive multi-host slow/timeout tracking) with `GET /api/system/network` and `POST /api/system/network/check` in `src/server/routes/system.routes.ts`.
+  - Eliminated slow-network data corruption via `90s` TLS agent socket ceilings (`baseScraper.ts`), strict HTTP stream completion & `Content-Length` truncation checks (`htmlFetcher.ts`, `dossierManager.ts`), and atomic `.tmp` rename writes in `dossierManager.ts`.
+  - Held heavy tasks (`deep` multi-page scans, upfront PDF fetches, `document_ingest_jobs` queue processing, `awaiting_scope` retention purges) during `degraded`/`offline` states while allowing lightweight `quick`/single-portal HTML scans serially (`effectiveHttpConcurrency = 1`) and refunding transient-error job retries via `deferJob` in `ingestWorker.ts`.
+  - Surfaced live sidebar network status (`Healthy` / `Slow` / `Offline`), `pausedReason` banner, **Deep** button hold, manual Recheck trigger (`src/client/App.tsx`, `src/client/components/AppShell.tsx`), and Windows System Tray status / **Recheck Network** (`scripts/tray-app.ps1`).
 
 - **Standalone Desktop Window & Windows System Tray (Option 2, `2026-11-19`):**
   - Added `public/manifest.webmanifest` (`display: "standalone"`) and manifest/theme-color tags in `index.html`.

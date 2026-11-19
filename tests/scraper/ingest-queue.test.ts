@@ -18,6 +18,7 @@ import {
 } from '../../src/server/db/index.js';
 import { processAndSaveTender, crawlerDeps, currentScanStatus, orderDocumentCandidates } from '../../src/server/scrapers/crawlerEngine.js';
 import { processDocumentQueue } from '../../src/server/services/ingestWorker.js';
+import { networkMonitorDeps, resetNetworkMonitorForTests, checkNetworkHealth } from '../../src/server/services/networkMonitor.js';
 import { beginScanBudget, endScanBudget } from '../../src/server/services/ingestBudget.js';
 import { findSubmissionDeadlines } from '../../src/server/services/documentExtractor.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
@@ -68,6 +69,7 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
     crawlerDeps.downloadAndCacheDossier = originalDownload;
     endScanBudget();
     currentScanStatus.isScanning = false;
+    resetNetworkMonitorForTests();
     vi.restoreAllMocks();
   });
 
@@ -684,6 +686,57 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(getTenderById(idWith2)).toBeNull();
       const supRow = db.prepare(`SELECT reason FROM deleted_tenders WHERE id = ?`).get(idWith2) as { reason: string } | undefined;
       expect(supRow?.reason).toBe('no-track-match');
+    });
+
+    it('holds processDocumentQueue when degraded/offline, refunds attempts on transient errors, and defers upfront PDFs on degraded scans', async () => {
+      // 1. Degraded network pauses background queue without claiming jobs or burning attempts
+      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 2100 });
+      await processAndSaveTender({
+        title: 'Solar Microgrid Equipment Procurement',
+        organization: 'Energy Dept',
+        closingDate: new Date(Date.now() + 7 * DAY).toISOString(),
+        directUrl: 'https://x.pk/tenders/solar-1',
+        attachmentUrls: ['https://x.pk/uploads/solar-rfp.pdf']
+      }, portal(), tracks);
+
+      const pausedReport = await processDocumentQueue(5);
+      expect(pausedReport.skipped).toBe('network_unhealthy');
+      expect(pausedReport.claimed).toBe(0);
+
+      // 2. Undated tender on degraded network skips blocking upfront download and queues with pending status
+      const undatedRes = await processAndSaveTender({
+        title: 'Solar Batteries Supply Framework',
+        organization: 'Energy Dept',
+        directUrl: 'https://x.pk/uploads/solar-batteries.pdf'
+      }, portal(), tracks);
+      expect(undatedRes.isNew).toBe(true);
+      const deferredTender = getAllTenders().find(t => t.direct_url === 'https://x.pk/uploads/solar-batteries.pdf');
+      expect(deferredTender?.doc_fetch_status).toBe('pending');
+      expect(getJobsForTender(deferredTender!.id)).toHaveLength(1);
+
+      // 3. When online again, transient download error calls deferJob (attempts refunded to 0), whereas HTTP 404 calls failJob
+      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 40 });
+      await checkNetworkHealth({ force: true });
+      const transientUrl = 'https://x.pk/uploads/solar-rfp.pdf';
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (_tid: string, url: string, _lbl?: string, opts?: any) => {
+        if (url === transientUrl) {
+          opts?.onError?.(new Error('connect ETIMEDOUT 1.2.3.4:443'), { isTransientNetwork: true });
+          return null;
+        }
+        opts?.onError?.(new Error('HTTP 404 loading file'), { isTransientNetwork: false });
+        return null;
+      });
+
+      const workerReport = await processDocumentQueue(5);
+      expect(workerReport.deferred).toBe(1);
+      expect(workerReport.failed).toBe(1);
+
+      const transientTender = getAllTenders().find(t => t.direct_url === 'https://x.pk/tenders/solar-1')!;
+      const transientJob = getJobsForTender(transientTender.id)[0];
+      const deadJob = getJobsForTender(deferredTender!.id)[0];
+      expect(transientJob.attempts).toBe(0);
+      expect(transientJob.status).toBe('pending');
+      expect(deadJob.attempts).toBe(1);
     });
   });
 });

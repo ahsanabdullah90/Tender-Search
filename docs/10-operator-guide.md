@@ -13,8 +13,8 @@ On Windows 11:
   - Builds missing bundles if needed, starts the production server silently in the background (zero console window), and opens Tender Tracker in a dedicated frameless window (**Microsoft Edge first**, **Google Chrome fallback**) using an isolated `data/app-profile` directory.
   - Closing the app window leaves background scans and document ingestion running in the **Windows System Tray** icon:
     - **Double-click tray icon:** Re-open / focus the standalone Tender Tracker window.
-    - **Right-click menu:** *Open Tender Tracker*, *Open in Default Browser*, *Run Quick Scan*, *Run Deep Scan*, live status summary, *Open Data Folder*, *Open Latest Log*, *Restart Server*, and *Quit Tender Tracker* (triggers token-guarded graceful shutdown with SQLite WAL flush).
-    - **Desktop alerts:** Shows deduplicated Windows balloon notifications when tenders are closing within `<=48h` or have unacknowledged corrigenda.
+    - **Right-click menu:** *Open Tender Tracker*, *Open in Default Browser*, *Run Quick Scan*, *Run Deep Scan*, *Recheck Network*, live status & network health summary, *Open Data Folder*, *Open Latest Log*, *Restart Server*, and *Quit Tender Tracker* (triggers token-guarded graceful shutdown with SQLite WAL flush).
+    - **Desktop alerts:** Shows deduplicated Windows balloon notifications when tenders are closing within `<=48h`, have unacknowledged corrigenda, or when scans are paused/held due to offline or slow connectivity.
 - **Foreground Console Fallback:** Run `start-tender-tracker.bat --console`, `scripts/launch.cmd --console`, or `npm start` to run the production server in a visible terminal window.
 - **Optional Logon Auto-Start:** Run `scripts/install-startup-task.ps1` to launch quietly in the system tray (`--minimized`) at Windows logon without opening a window.
 - **Development Mode (Hot Reload):** Run **`npm run dev`** in PowerShell.
@@ -47,6 +47,11 @@ When you open Tender Tracker:
    - Check the **Corrigenda** metric in the top KPI bar.
    - If greater than 0, tenders you are tracking have received deadline extensions or amendments.
    - Click the alert or filter by **Amended** to inspect modified closing dates.
+3. **Network Status Indicator (Sidebar Footer)**:
+   - **`Healthy`**: Normal high-speed mode; both quick and deep scans as well as background PDF downloads run automatically.
+   - **`Slow`**: Heavy tasks (**Deep** multi-page scans, upfront PDF downloads, and the background document queue) are automatically held until connectivity recovers to protect data integrity. Lightweight **Quick Scans** (**Scan now** / single-portal refreshes) still run serially with extended timeouts, and all local browsing/editing/searching continues unaffected. Deferred deep scans and document jobs resume automatically once connectivity returns to **Healthy**.
+   - **`Offline`**: All network scans and document downloads pause cleanly without corrupting portal health or partial files; local Inbox/Pipeline review, search, notes, and backups remain available.
+   - Click the inline **Recheck** button next to the indicator (or **Recheck Network** in the tray menu) to probe connectivity immediately after switching networks.
 
 ---
 

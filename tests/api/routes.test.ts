@@ -1030,4 +1030,32 @@ describe('Server API Routes', () => {
       }
     });
   });
+
+  describe('Network Health API (/api/system/network)', () => {
+    it('GET /api/system/network and POST /api/system/network/check return connectivity state and deferred task counters', async () => {
+      const { networkMonitorDeps, resetNetworkMonitorForTests } = await import('../../src/server/services/networkMonitor.js');
+      resetNetworkMonitorForTests();
+      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 1850 });
+
+      try {
+        const getRes = await request(app).get('/api/system/network');
+        expect(getRes.status).toBe(200);
+        expect(getRes.body.state).toBe('degraded');
+        expect(getRes.body.heavyTasksPaused).toBe(true);
+        expect(getRes.body.deferredHeavyTasks).toEqual({
+          deepScanPending: false,
+          pendingDocumentJobs: 0
+        });
+
+        networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 42 });
+        const checkRes = await request(app).post('/api/system/network/check');
+        expect(checkRes.status).toBe(200);
+        expect(checkRes.body.state).toBe('online');
+        expect(checkRes.body.heavyTasksPaused).toBe(false);
+        expect(checkRes.body.latencyMs).toBe(42);
+      } finally {
+        resetNetworkMonitorForTests();
+      }
+    });
+  });
 });

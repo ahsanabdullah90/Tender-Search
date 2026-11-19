@@ -24,6 +24,7 @@ import { getRetentionStatus, runRetentionCycle } from '../services/retention.js'
 import { reconcileDossiers } from '../services/dossierStore.js';
 import { getIngestBudgetSettings, updateIngestBudgetSettings } from '../services/ingestBudget.js';
 import { validateExternalHttpUrl } from '../services/urlSafety.js';
+import { checkNetworkHealth } from '../services/networkMonitor.js';
 
 export const systemRouter = Router();
 
@@ -360,4 +361,13 @@ systemRouter.post('/system/shutdown', (req, res) => {
   res.setHeader('Connection', 'close');
   res.status(200).json({ success: true, message: 'Shutting down cleanly...' });
   setTimeout(() => handler(), 50);
+});
+
+// 10. Network Connectivity Health Diagnostics
+systemRouter.get('/system/network', async (_req, res) => {
+  res.json(await checkNetworkHealth());
+});
+
+systemRouter.post('/system/network/check', async (_req, res) => {
+  res.json(await checkNetworkHealth({ force: true }));
 });

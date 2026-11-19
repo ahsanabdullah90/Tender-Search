@@ -1,6 +1,7 @@
 import http from 'http';
 import https from 'https';
 import { HUMAN_CHROME_HEADERS, sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError } from './baseScraper.js';
+import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_HTML_MS } from '../services/networkMonitor.js';
 
 export interface HtmlFetchResult {
   html: string;
@@ -33,19 +34,46 @@ function requestHtmlWithMetadata(
     redirectCount: number;
     useLegacyTls: boolean;
     allowHttpDowngrade: boolean;
+    timeoutMs?: number;
   }
 ): Promise<HtmlFetchResult> {
-  const { method, formBody, cookieStr, redirectCount, useLegacyTls, allowHttpDowngrade } = options;
+  const { method, formBody, cookieStr, redirectCount, useLegacyTls, allowHttpDowngrade, timeoutMs } = options;
+  const startedAt = Date.now();
+  const reportTopLevel = redirectCount === 0 && !useLegacyTls;
+  let parsedUrlForTelemetry: URL | null = null;
+
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finishResolve = (val: HtmlFetchResult) => {
+      if (settled) return;
+      settled = true;
+      if (reportTopLevel && parsedUrlForTelemetry) {
+        reportNetworkOutcome(parsedUrlForTelemetry.hostname, true, {
+          durationMs: Date.now() - startedAt,
+          slowThresholdMs: PASSIVE_SLOW_HTML_MS
+        });
+      }
+      resolve(val);
+    };
+    const finishReject = (err: any) => {
+      if (settled) return;
+      settled = true;
+      if (reportTopLevel && parsedUrlForTelemetry && isTransientNetworkError(err)) {
+        reportNetworkOutcome(parsedUrlForTelemetry.hostname, false, { isTimeout: true });
+      }
+      reject(err);
+    };
+
     if (redirectCount > 5) {
-      return reject(new Error('Too many redirects while loading portal page'));
+      return finishReject(new Error('Too many redirects while loading portal page'));
     }
 
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(url);
+      parsedUrlForTelemetry = parsedUrl;
     } catch {
-      return reject(new Error(`Invalid URL: ${url}`));
+      return finishReject(new Error(`Invalid URL: ${url}`));
     }
 
     const isHttps = parsedUrl.protocol === 'https:';
@@ -63,7 +91,7 @@ function requestHtmlWithMetadata(
     const reqOpts: https.RequestOptions = {
       agent: isHttps ? (useLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
       headers: reqHeaders,
-      timeout: parsedUrl.hostname.includes('epms.ppra.gov.pk') ? 35000 : 25000
+      timeout: timeoutMs ?? (parsedUrl.hostname.includes('epms.ppra.gov.pk') ? 35000 : 25000)
     };
 
     const handleResponse = (res: http.IncomingMessage) => {
@@ -79,8 +107,9 @@ function requestHtmlWithMetadata(
           cookieStr: nextCookies,
           redirectCount: redirectCount + 1,
           useLegacyTls,
-          allowHttpDowngrade: nextAllowDowngrade
-        }).then(resolve).catch(reject);
+          allowHttpDowngrade: nextAllowDowngrade,
+          timeoutMs
+        }).then(finishResolve).catch(finishReject);
       }
 
       if (res.statusCode && res.statusCode >= 400) {
@@ -93,18 +122,23 @@ function requestHtmlWithMetadata(
             (errBody.includes('cloudflare') || errBody.includes('Just a moment') || errBody.includes('challenge'))
           ) {
             // Return challenge HTML so parsePortalHtml flags hitlRequired (Bug B4)
-            return resolve({ html: errBody, finalUrl: url, cookies: nextCookies });
+            return finishResolve({ html: errBody, finalUrl: url, cookies: nextCookies });
           }
           const httpErr: any = new Error(`HTTP ${res.statusCode} from portal server`);
           httpErr.statusCode = res.statusCode;
-          return reject(httpErr);
+          return finishReject(httpErr);
         });
+        res.on('aborted', () => finishReject(new Error('Portal HTML stream aborted')));
+        res.on('error', err => finishReject(err));
         return;
       }
 
       const chunks: Buffer[] = [];
       res.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
       res.on('end', () => {
+        if ((res as any).complete === false) {
+          return finishReject(new Error('Portal HTML response truncated before completion'));
+        }
         const fullBuf = Buffer.concat(chunks);
         let charset: BufferEncoding = 'utf8';
         const ct = String(res.headers?.['content-type'] || '');
@@ -131,8 +165,10 @@ function requestHtmlWithMetadata(
         } catch {
           html = fullBuf.toString('utf8');
         }
-        resolve({ html, finalUrl: url, cookies: nextCookies });
+        finishResolve({ html, finalUrl: url, cookies: nextCookies });
       });
+      res.on('aborted', () => finishReject(new Error('Portal HTML stream aborted')));
+      res.on('error', err => finishReject(err));
     };
 
     const req = method === 'POST'
@@ -146,7 +182,7 @@ function requestHtmlWithMetadata(
         return requestHtmlWithMetadata(url, {
           ...options,
           useLegacyTls: true
-        }).then(resolve).catch(() => reject(err));
+        }).then(finishResolve).catch(() => finishReject(err));
       }
       // 2. Only fall back to plain HTTP if legacy TLS already failed with wrong version number and we weren't redirected from HTTP
       if (isHttps && useLegacyTls && allowHttpDowngrade && /wrong version number/i.test(msg)) {
@@ -156,13 +192,13 @@ function requestHtmlWithMetadata(
           redirectCount: redirectCount + 1,
           useLegacyTls: false,
           allowHttpDowngrade: false
-        }).then(resolve).catch(() => reject(err));
+        }).then(finishResolve).catch(() => finishReject(err));
       }
-      reject(err);
+      finishReject(err);
     });
     req.on('timeout', () => {
       req.destroy();
-      reject(new Error('Connection timed out'));
+      finishReject(new Error('Connection timed out'));
     });
 
     if (method === 'POST' && formBody !== undefined) {
@@ -177,21 +213,24 @@ export function fetchHtmlWithMetadata(
   redirectCount: number = 0,
   cookieStr?: string,
   useLegacyTls: boolean = false,
-  allowHttpDowngrade: boolean = true
+  allowHttpDowngrade: boolean = true,
+  timeoutMs?: number
 ): Promise<HtmlFetchResult> {
   return requestHtmlWithMetadata(url, {
     method: 'GET',
     cookieStr,
     redirectCount,
     useLegacyTls,
-    allowHttpDowngrade
+    allowHttpDowngrade,
+    timeoutMs
   });
 }
 
 export function postFormWithMetadata(
   url: string,
   formBody: string,
-  cookieStr?: string
+  cookieStr?: string,
+  timeoutMs?: number
 ): Promise<HtmlFetchResult> {
   return requestHtmlWithMetadata(url, {
     method: 'POST',
@@ -199,7 +238,8 @@ export function postFormWithMetadata(
     cookieStr,
     redirectCount: 0,
     useLegacyTls: false,
-    allowHttpDowngrade: false
+    allowHttpDowngrade: false,
+    timeoutMs
   });
 }
 

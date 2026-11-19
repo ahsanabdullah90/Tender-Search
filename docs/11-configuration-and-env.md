@@ -69,7 +69,7 @@ C:\Tender_Tracker/
       db/                   # SQLite connection, schema migrations, and repositories/
       routes/               # Modular Express domain routers (tenders, portals, tracks, scan, system)
       scrapers/             # Modular scrapers (htmlFetcher, crawlerDeps, portalParsers, tenderAnalysis, ingestPipeline, healer, crawlerEngine, etc.)
-      services/             # Domain services (deduplicator, documentExtractor, dossierManager, ocrService, localOcrService, urlSafety, embeddingService, ingestWorker, retention, scheduler, etc.)
+      services/             # Domain services (deduplicator, documentExtractor, dossierManager, ocrService, localOcrService, urlSafety, networkMonitor, embeddingService, ingestWorker, retention, scheduler, etc.)
   tests/                    # Full Vitest suite across node & jsdom runners
   docs/                     # Comprehensive architecture and operational documentation
 ```

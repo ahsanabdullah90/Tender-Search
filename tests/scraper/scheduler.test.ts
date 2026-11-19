@@ -2,6 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db, initDatabase, getPortalHealthList, updatePortalHealth, setAppSetting } from '../../src/server/db/index.js';
 import { updateDigestSettings } from '../../src/server/db/repositories/systemRepo.js';
 import { initStartupScheduler, stopStartupScheduler, schedulerDeps, maybeDispatchDailyDigest, getPktDateKey } from '../../src/server/services/scheduler.js';
+import {
+  networkMonitorDeps,
+  resetNetworkMonitorForTests,
+  setDeepScanPending,
+  isDeepScanPending,
+  checkNetworkHealth
+} from '../../src/server/services/networkMonitor.js';
 
 describe('scheduler and startup watchdog', () => {
   let originalScan: any;
@@ -19,6 +26,7 @@ describe('scheduler and startup watchdog', () => {
     stopStartupScheduler();
     schedulerDeps.startCrawlerScan = originalScan;
     schedulerDeps.backupDatabase = originalBackup;
+    resetNetworkMonitorForTests();
   });
 
   it('resets stuck scanning portals to error on startup (Bug B3)', () => {
@@ -229,6 +237,37 @@ describe('scheduler and startup watchdog', () => {
 
       initStartupScheduler();
       expect(schedulerDeps.startCrawlerScan).toHaveBeenCalledWith(undefined, false, { depth: 'deep' });
+    });
+
+    it('Refinement #4b: 2-minute worker interval auto-resumes deferred deep scan on network recovery and skips digest when offline', async () => {
+      vi.useFakeTimers();
+      try {
+        setAppSetting('last_full_scan_at', new Date().toISOString());
+        networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 30 });
+        setDeepScanPending(true);
+
+        initStartupScheduler();
+        (schedulerDeps.startCrawlerScan as any).mockClear();
+
+        await vi.advanceTimersByTimeAsync(2 * 60 * 1000 + 50);
+        expect(schedulerDeps.startCrawlerScan).toHaveBeenCalledWith(undefined, false, { depth: 'deep' });
+        expect(isDeepScanPending()).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const origSend = schedulerDeps.sendDigestWebhook;
+      schedulerDeps.sendDigestWebhook = vi.fn().mockResolvedValue(undefined);
+      try {
+        networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' });
+        await checkNetworkHealth({ force: true });
+        updateDigestSettings({ enabled: true, webhookUrl: 'https://hooks.example.test/pkt', withinHours: 48 });
+        const res = await maybeDispatchDailyDigest();
+        expect(res).toEqual({ sent: false, reason: 'offline' });
+        expect(schedulerDeps.sendDigestWebhook).not.toHaveBeenCalled();
+      } finally {
+        schedulerDeps.sendDigestWebhook = origSend;
+      }
     });
   });
 });
