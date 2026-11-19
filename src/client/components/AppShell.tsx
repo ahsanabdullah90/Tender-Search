@@ -1,6 +1,6 @@
-import React from 'react';
-import { Inbox, Kanban, SlidersHorizontal, RefreshCw, Monitor, Sun, Moon } from 'lucide-react';
-import { ScanStatus, NetworkStatus } from '../../shared/types';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { Inbox, Kanban, SlidersHorizontal, RefreshCw, Monitor, Sun, Moon, Wifi, WifiOff, AlertTriangle } from 'lucide-react';
+import { ScanStatus, NetworkStatus, NetworkState } from '../../shared/types';
 import { ThemePref } from '../theme';
 import { Button } from '../ui';
 
@@ -91,22 +91,22 @@ export function AppShell({
     : null;
   const isFullScanStale = fullScanAgeHours !== null && fullScanAgeHours >= 24;
 
+  const netLabelId = useId();
+  const netDetailId = useId();
+
   const netState = networkStatus?.state ?? null;
   const isOffline = netState === 'offline';
   const isDegraded = netState === 'degraded';
   const deepPaused = Boolean(networkStatus?.heavyTasksPaused);
 
   const netContainerClass = isOffline
-    ? 'rounded-lg bg-danger-soft px-2 py-1.5 text-danger'
+    ? 'rounded-lg bg-danger-soft px-2 py-1.5 text-danger forced-colors:border forced-colors:border-[CanvasText]'
     : isDegraded
-      ? 'rounded-lg bg-warn-soft px-2 py-1.5 text-warn'
+      ? 'rounded-lg bg-warn-soft px-2 py-1.5 text-warn forced-colors:border forced-colors:border-[CanvasText]'
       : 'rounded-lg px-2 py-1.5 text-ink-muted';
 
-  const netDotClass = isOffline
-    ? 'bg-danger'
-    : isDegraded
-      ? 'animate-pulse bg-warn'
-      : 'bg-ok';
+  const NetIcon = isOffline ? WifiOff : isDegraded ? AlertTriangle : Wifi;
+  const netIconClass = isOffline ? 'text-danger' : isDegraded ? 'text-warn' : 'text-ok';
 
   const netLabel = isOffline
     ? 'Network: Offline'
@@ -128,6 +128,52 @@ export function AppShell({
           .filter(Boolean)
           .join(' · ')
       : '';
+
+  const [politeAnnouncement, setPoliteAnnouncement] = useState('');
+  const [assertiveAnnouncement, setAssertiveAnnouncement] = useState('');
+  const prevNetStateRef = useRef<NetworkState | null>(null);
+  const wasCheckingRef = useRef(false);
+  const prevPausedReasonRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (checkingNetwork) {
+      wasCheckingRef.current = true;
+      setPoliteAnnouncement('');
+      setAssertiveAnnouncement('');
+      return;
+    }
+    const completedRecheck = wasCheckingRef.current;
+    wasCheckingRef.current = false;
+    if (!netState) return;
+
+    const prevState = prevNetStateRef.current;
+    prevNetStateRef.current = netState;
+
+    const stateChanged = prevState !== null && prevState !== netState;
+    const initialAbnormal = prevState === null && netState !== 'online';
+    if (!stateChanged && !initialAbnormal && !completedRecheck) return;
+
+    if (netState === 'offline') {
+      setPoliteAnnouncement('');
+      setAssertiveAnnouncement(netSubtitle ? `Network offline. ${netSubtitle}.` : 'Network offline.');
+    } else if (netState === 'degraded') {
+      setAssertiveAnnouncement('');
+      setPoliteAnnouncement(netSubtitle ? `Network slow. ${netSubtitle}.` : 'Network slow.');
+    } else {
+      setAssertiveAnnouncement('');
+      setPoliteAnnouncement(
+        prevState && prevState !== 'online' ? 'Network restored. Connection is healthy.' : 'Network healthy.'
+      );
+    }
+  }, [netState, checkingNetwork, netSubtitle]);
+
+  const visiblePausedReason = !scanning && scanStatus.pausedReason ? scanStatus.pausedReason : null;
+  useEffect(() => {
+    if (visiblePausedReason && visiblePausedReason !== prevPausedReasonRef.current) {
+      setPoliteAnnouncement(visiblePausedReason);
+    }
+    prevPausedReasonRef.current = visiblePausedReason;
+  }, [visiblePausedReason]);
 
   return (
     <div className="flex min-h-screen bg-bg text-ink">
@@ -157,18 +203,22 @@ export function AppShell({
         </nav>
 
         <div className="mt-auto flex flex-col gap-3">
+          <div role="status" className="sr-only" data-testid="status-announcer">
+            {politeAnnouncement}
+          </div>
+          <div role="alert" className="sr-only" data-testid="alert-announcer">
+            {assertiveAnnouncement}
+          </div>
           {networkStatus && (
             <div
               data-testid="network-status-indicator"
-              role="status"
-              aria-live="polite"
               title={networkStatus.reason || undefined}
               className={`flex flex-col gap-0.5 ${netContainerClass}`}
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2 text-xs font-medium">
-                  <span className={`h-2 w-2 shrink-0 rounded-full ${netDotClass}`} />
-                  <span className="truncate">{netLabel}</span>
+                  <NetIcon aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${netIconClass}`} />
+                  <span id={netLabelId} className="truncate">{netLabel}</span>
                 </div>
                 {onRecheckNetwork && (
                   <button
@@ -176,22 +226,29 @@ export function AppShell({
                     onClick={onRecheckNetwork}
                     disabled={checkingNetwork}
                     aria-label="Recheck network connectivity"
+                    aria-describedby={netSubtitle ? `${netLabelId} ${netDetailId}` : netLabelId}
                     title="Recheck network connectivity"
-                    className="shrink-0 cursor-pointer rounded p-0.5 opacity-80 transition hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="inline-flex min-h-6 min-w-6 shrink-0 cursor-pointer items-center justify-center rounded p-1 opacity-80 transition hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    <RefreshCw className={`h-3.5 w-3.5 ${checkingNetwork ? 'animate-spin' : ''}`} />
+                    <RefreshCw
+                      aria-hidden="true"
+                      className={`h-3.5 w-3.5 ${checkingNetwork ? 'motion-safe:animate-spin' : ''}`}
+                    />
                   </button>
                 )}
               </div>
               {netSubtitle && (
-                <div className="pl-4 text-[11px] leading-snug opacity-90" data-testid="network-status-detail">
+                <div id={netDetailId} className="pl-5 text-[11px] leading-snug opacity-90" data-testid="network-status-detail">
                   {netSubtitle}
                 </div>
               )}
             </div>
           )}
           <div className="flex items-center gap-2 px-2 text-xs text-ink-muted">
-            <span className={`h-2 w-2 shrink-0 rounded-full ${scanning ? 'animate-pulse bg-warn' : isFullScanStale ? 'bg-danger' : 'bg-ok'}`} />
+            <span
+              aria-hidden="true"
+              className={`h-2 w-2 shrink-0 rounded-full ${scanning ? 'motion-safe:animate-pulse bg-warn' : isFullScanStale ? 'bg-danger' : 'bg-ok'}`}
+            />
             <span>{syncText}</span>
           </div>
           {scanning && scanStatus.activePortals && scanStatus.activePortals.length > 1 && (
@@ -219,22 +276,23 @@ export function AppShell({
               ].filter(Boolean).join(' · ')}
             </div>
           )}
-          {!scanning && scanStatus.pausedReason && (
+          {visiblePausedReason && (
             <div
               data-testid="scan-paused-reason"
               className="px-2 text-[11px] leading-snug text-warn"
             >
-              {scanStatus.pausedReason}
+              {visiblePausedReason}
             </div>
           )}
           <div className="flex items-center gap-1.5">
             <Button
               onClick={onRunScan}
               disabled={scanning || isOffline}
+              aria-describedby={isOffline && netSubtitle ? netDetailId : undefined}
               title={isOffline ? 'Scan paused while offline' : isDegraded ? 'Quick scan (serial mode on slow network)' : 'Run quick scan'}
               className="flex-1"
             >
-              <RefreshCw className={`h-4 w-4 ${scanning ? 'animate-spin' : ''}`} />
+              <RefreshCw aria-hidden="true" className={`h-4 w-4 ${scanning ? 'motion-safe:animate-spin' : ''}`} />
               {scanning ? 'Scanning…' : 'Scan now'}
             </Button>
             {onRunDeepScan && (
@@ -244,6 +302,7 @@ export function AppShell({
                 onClick={onRunDeepScan}
                 disabled={scanning || deepPaused}
                 aria-label="Run deep multi-page scan"
+                aria-describedby={deepPaused && netSubtitle ? netDetailId : undefined}
                 title={deepPaused ? 'Deep scan held until network connection is healthy' : 'Deep scan (scans deeper archive pages per portal)'}
                 className="shrink-0"
               >

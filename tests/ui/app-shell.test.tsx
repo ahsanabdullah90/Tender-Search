@@ -377,4 +377,261 @@ describe('AppShell component', () => {
 
     expect(screen.queryByTestId('scan-paused-reason')).not.toBeInTheDocument();
   });
+
+  it('manages centralized polite and assertive live-region announcements without poll spam', () => {
+    const onlineNet: NetworkStatus = {
+      state: 'online',
+      latencyMs: 42,
+      checkedAt: '2026-11-19T10:00:00Z',
+      reason: 'Healthy',
+      heavyTasksPaused: false,
+      deferredHeavyTasks: { deepScanPending: false, pendingDocumentJobs: 0 },
+    };
+    const degradedNet: NetworkStatus = {
+      state: 'degraded',
+      latencyMs: 1900,
+      checkedAt: '2026-11-19T10:01:00Z',
+      reason: 'High latency',
+      heavyTasksPaused: true,
+      deferredHeavyTasks: { deepScanPending: true, pendingDocumentJobs: 2 },
+    };
+    const offlineNet: NetworkStatus = {
+      state: 'offline',
+      latencyMs: null,
+      checkedAt: '2026-11-19T10:02:00Z',
+      reason: 'No internet connection',
+      heavyTasksPaused: true,
+      deferredHeavyTasks: { deepScanPending: false, pendingDocumentJobs: 0 },
+    };
+
+    const { rerender } = render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        networkStatus={onlineNet}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    const statusAnnouncer = screen.getByTestId('status-announcer');
+    const alertAnnouncer = screen.getByTestId('alert-announcer');
+    expect(statusAnnouncer).toHaveAttribute('role', 'status');
+    expect(statusAnnouncer).not.toHaveAttribute('aria-live');
+    expect(alertAnnouncer).toHaveAttribute('role', 'alert');
+    expect(alertAnnouncer).not.toHaveAttribute('aria-live');
+    expect(statusAnnouncer).toHaveTextContent('');
+    expect(alertAnnouncer).toHaveTextContent('');
+
+    // Background 60s poll latency fluctuations stay silent
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        networkStatus={{ ...onlineNet, latencyMs: 38 }}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(statusAnnouncer).toHaveTextContent('');
+    expect(alertAnnouncer).toHaveTextContent('');
+
+    // Degraded state announces politely
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        networkStatus={degradedNet}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(statusAnnouncer).toHaveTextContent(
+      'Network slow. Heavy tasks paused · Deep scan held · 2 doc(s) queued.'
+    );
+    expect(alertAnnouncer).toHaveTextContent('');
+
+    // Offline drop announces assertively via role="alert"
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        networkStatus={offlineNet}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(alertAnnouncer).toHaveTextContent('Network offline. Scans & downloads paused.');
+    expect(statusAnnouncer).toHaveTextContent('');
+
+    // Recovery announces politely
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        networkStatus={onlineNet}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(statusAnnouncer).toHaveTextContent('Network restored. Connection is healthy.');
+    expect(alertAnnouncer).toHaveTextContent('');
+
+    // Interstitial checking state clears announcements without noisy "Checking..." speech
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        networkStatus={onlineNet}
+        checkingNetwork={true}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(statusAnnouncer).toHaveTextContent('');
+    expect(alertAnnouncer).toHaveTextContent('');
+
+    // Completed manual recheck announces confirmed state
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        networkStatus={onlineNet}
+        checkingNetwork={false}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(statusAnnouncer).toHaveTextContent('Network healthy.');
+
+    // Scan pausedReason announces politely when idle
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{ ...idleScan, pausedReason: 'Slow network detected — deep scan held' }}
+        onRunScan={vi.fn()}
+        networkStatus={onlineNet}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(statusAnnouncer).toHaveTextContent('Slow network detected — deep scan held');
+  });
+
+  it('keeps interactive controls outside live regions with accessible target size, motion-safe classes, and forced-colors borders', () => {
+    const degradedNet: NetworkStatus = {
+      state: 'degraded',
+      latencyMs: 2200,
+      checkedAt: '2026-11-19T10:00:00Z',
+      reason: 'High latency',
+      heavyTasksPaused: true,
+      deferredHeavyTasks: { deepScanPending: true, pendingDocumentJobs: 1 },
+    };
+    const offlineNet: NetworkStatus = {
+      state: 'offline',
+      latencyMs: null,
+      checkedAt: '2026-11-19T10:01:00Z',
+      reason: 'No internet connection',
+      heavyTasksPaused: true,
+      deferredHeavyTasks: { deepScanPending: false, pendingDocumentJobs: 0 },
+    };
+
+    const { rerender } = render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        onRunDeepScan={vi.fn()}
+        networkStatus={degradedNet}
+        checkingNetwork={true}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    const indicator = screen.getByTestId('network-status-indicator');
+    expect(indicator).not.toHaveAttribute('role');
+    expect(indicator).not.toHaveAttribute('aria-live');
+    expect(indicator.className).toContain('forced-colors:border');
+    expect(indicator.innerHTML).not.toContain('animate-pulse');
+
+    const recheckBtn = screen.getByRole('button', { name: /Recheck network connectivity/i });
+    expect(recheckBtn.closest('[role="status"], [role="alert"]')).toBeNull();
+    expect(recheckBtn.className).toContain('min-h-6');
+    expect(recheckBtn.className).toContain('min-w-6');
+    expect(recheckBtn).toHaveAccessibleDescription(/Network: Slow.*Heavy tasks paused/);
+
+    const svgs = indicator.querySelectorAll('svg');
+    expect(svgs.length).toBeGreaterThanOrEqual(2);
+    svgs.forEach(svg => expect(svg).toHaveAttribute('aria-hidden', 'true'));
+    const recheckIcon = recheckBtn.querySelector('svg');
+    expect(recheckIcon?.getAttribute('class')).toContain('motion-safe:animate-spin');
+
+    expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toHaveAccessibleDescription(
+      /Heavy tasks paused/
+    );
+
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={idleScan}
+        onRunScan={vi.fn()}
+        onRunDeepScan={vi.fn()}
+        networkStatus={offlineNet}
+        checkingNetwork={false}
+        onRecheckNetwork={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    expect(screen.getByTestId('network-status-indicator').className).toContain('forced-colors:border');
+    expect(screen.getByRole('button', { name: /Scan now/i })).toHaveAccessibleDescription(/Scans & downloads paused/);
+  });
 });
