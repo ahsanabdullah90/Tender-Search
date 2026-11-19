@@ -939,15 +939,6 @@ export function removeSelfSecondarySources(): number {
   return changed;
 }
 
-export function updateTenderAttachmentUrlsIfEmpty(id: string, attachmentUrls: string[]): boolean {
-  if (!attachmentUrls || attachmentUrls.length === 0) return false;
-  const row = db.prepare('SELECT attachment_urls FROM tenders WHERE id = ?').get(id) as { attachment_urls?: string } | undefined;
-  if (!row) return false;
-  const existing = safeJsonParse<string[]>(row.attachment_urls, []);
-  if (existing.length > 0) return false;
-  return db.prepare('UPDATE tenders SET attachment_urls = ? WHERE id = ?').run(JSON.stringify(attachmentUrls), id).changes > 0;
-}
-
 /** Adds document links seen on a re-scan to the stored list (union, order kept). */
 export function mergeTenderAttachmentUrls(id: string, attachmentUrls: string[]): boolean {
   if (!attachmentUrls || attachmentUrls.length === 0) return false;

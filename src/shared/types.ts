@@ -129,15 +129,6 @@ export interface CorrigendumLog {
   detected_at: string;
 }
 
-export interface PipelineAuditLog {
-  id: string;
-  tender_id: string;
-  previous_status: string | null;
-  new_status: string;
-  notes: string | null;
-  created_at: string;
-}
-
 export interface DomainTrack {
   id: string;
   name: string;

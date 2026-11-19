@@ -213,11 +213,15 @@ function isDirectDocLink(url?: string | null): boolean {
   return Boolean(url && (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url)));
 }
 
+function isDownloadableCandidateLink(url?: string | null): boolean {
+  return Boolean(url && (!/\.(html?|aspx?|php|jsp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url) || /\/pdf\?file=/i.test(url)));
+}
+
 function collectRowDocumentUrls(directUrl?: string | null, attachmentUrlsRaw?: string | null): string[] {
   const urls: string[] = [];
   if (isDirectDocLink(directUrl)) urls.push(directUrl!);
   for (const u of safeJsonParse<string[]>(attachmentUrlsRaw || '[]', [])) {
-    if (u && !urls.includes(u)) urls.push(u);
+    if (u && isDownloadableCandidateLink(u) && !urls.includes(u)) urls.push(u);
   }
   return urls.slice(0, 5);
 }

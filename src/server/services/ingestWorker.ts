@@ -6,6 +6,8 @@ import {
   releaseExpiredLeases,
   refreshTenderDocFetchStatus,
   getJobSummaryForTender,
+  enqueueDocumentJobs,
+  getJobsForTender,
   IngestJob
 } from '../db/repositories/ingestJobsRepo.js';
 import {
@@ -19,6 +21,7 @@ import { deriveDossierLabel } from './dossierManager.js';
 import { extractFromDocument, DocumentExtractionResult } from './documentExtractor.js';
 import { maxFileBytes, tryConsumeDailyVision } from './ingestBudget.js';
 import { crawlerDeps, currentScanStatus, readCachedDossier } from '../scrapers/crawlerEngine.js';
+import { isDownloadableCandidateUrl, UPFRONT_MAX_DOCS } from '../scrapers/ingestPipeline.js';
 import { applyDocumentScopeToTracks, matchTracks } from '../scrapers/trackMatcher.js';
 import { applyDocumentResultToTender } from './documentApply.js';
 import { Tender } from '../../shared/types.js';
@@ -81,8 +84,11 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
     const label = job.label || deriveDossierLabel(job.url, 'Tender Document');
     const doc = await crawlerDeps.downloadAndCacheDossier(tender.id, job.url, label);
     if (!doc) {
-      failJob(job.id, 'Download failed');
+      const status = failJob(job.id, 'Download failed');
       refreshTenderDocFetchStatus(tender.id);
+      if (status === 'failed') {
+        finalizeAwaitingScopeAfterJobFailure(tender.id);
+      }
       return 'failed';
     }
 
@@ -144,9 +150,50 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
     refreshTenderDocFetchStatus(current.id);
     return 'completed';
   } catch (err: any) {
-    failJob(job.id, err?.message || String(err));
-    if (getTenderById(job.tender_id)) refreshTenderDocFetchStatus(job.tender_id);
+    const status = failJob(job.id, err?.message || String(err));
+    if (getTenderById(job.tender_id)) {
+      refreshTenderDocFetchStatus(job.tender_id);
+      if (status === 'failed') {
+        finalizeAwaitingScopeAfterJobFailure(job.tender_id);
+      }
+    }
     return 'failed';
+  }
+}
+
+/**
+ * When a document job for an 'awaiting_scope' tender permanently fails and no active jobs
+ * remain, either enqueue any unqueued downloadable attachments or (if at least one document was
+ * already read with no track match) delete and suppress the tender as 'no-track-match'.
+ * If no document has ever succeeded (summary.done === 0), keep the tender per DOC-9.
+ */
+function finalizeAwaitingScopeAfterJobFailure(tenderId: string): void {
+  const current = getTenderById(tenderId);
+  if (!current || current.ingestion_status !== 'awaiting_scope') return;
+
+  const summary = getJobSummaryForTender(tenderId);
+  if (summary.pending + summary.processing > 0) return;
+
+  const existingUrls = new Set(getJobsForTender(tenderId).map(j => j.url));
+  const remainingUrls = (current.attachment_urls || []).filter(
+    u => u && isDownloadableCandidateUrl(u) && !existingUrls.has(u)
+  );
+  if (remainingUrls.length > 0) {
+    const added = enqueueDocumentJobs(
+      tenderId,
+      remainingUrls.slice(0, UPFRONT_MAX_DOCS).map(url => ({
+        url,
+        label: deriveDossierLabel(url, `${current.title.slice(0, 30)}_Doc`)
+      }))
+    );
+    if (added > 0) {
+      refreshTenderDocFetchStatus(tenderId);
+      return;
+    }
+  }
+
+  if (summary.done > 0) {
+    deleteTenders([tenderId], 'no-track-match');
   }
 }
 

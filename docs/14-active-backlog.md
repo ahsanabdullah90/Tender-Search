@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-13 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, and Offline `local_ocr` Fallback).
+**Last updated:** 2026-11-16 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, and Offline `local_ocr` Fallback).
 
 This document tracks **active operational items and approved non-breaking feature plans**. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 
@@ -26,7 +26,13 @@ All approved non-breaking improvement plans are implemented and moved to the Com
 
 ---
 
-## 3. Recently Completed Register Items (2026-11-11 – 2026-11-13)
+## 3. Recently Completed Register Items (2026-11-11 – 2026-11-16)
+
+- **`awaiting_scope` Lifecycle Hardening & Live DB Maintenance (`2026-11-16`):**
+  - Filtered non-downloadable `.html`/`.aspx`/`.php`/`.jsp` links in `orderDocumentCandidates` (`src/server/scrapers/ingestPipeline.ts`) and `collectRowDocumentUrls` (`src/server/db/repositories/ingestJobsRepo.ts`) via `isDownloadableCandidateUrl` (preserving `/pdf?file=` and `?wpdmdl=` endpoints).
+  - Updated `reScoreTendersAgainstTracks` (`src/server/db/repositories/tracksRepo.ts`) to include `extracted_text` via `applyDocumentScopeToTracks` and updated `saveDomainTrack` to keep `minilm` track embeddings intact when `name` and `positive_keywords` are unchanged.
+  - Added `finalizeAwaitingScopeAfterJobFailure` in `src/server/services/ingestWorker.ts` to advance or finalize `awaiting_scope` tenders when a remaining job permanently fails, and added `graceDays` override support to `runRetentionCycle` (`src/server/services/retention.ts`).
+  - Executed live maintenance on `./data/tender_tracker.db`: cleared 74 `.html` queue jobs (re-queuing 14 downloadable PDFs), cleaned 253 stale `awaiting_scope` rows, 11 expired Inbox rows, and 3 aged-out Passed rows, and backfilled `all-MiniLM-L6-v2` embeddings to `179/179` (`100%`) tenders.
 
 - **Plans E & F Non-Breaking Rollout (`2026-11-13`):**
   - **Plan E (#6 — Separate Dev Watch vs. Production Runtime):** Added `esbuild` compiled server bundle (`npm run build:server` -> `dist-server/server.mjs`), updated `npm start` to execute pure Node with `--production`, fixed `PROJECT_ROOT` / `projectRoot` discovery across `src/server/db/connection.ts` and `server.ts`, added `TESSDATA_DIR` (`data/tessdata/`), and updated `scripts/launch.cmd` + `start-tender-tracker.bat` to auto-build if missing and run `npm start` instead of `npm run dev`.

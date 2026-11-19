@@ -112,6 +112,7 @@ export {
   referencesOnlyPriorYears,
   computeTenderId,
   isDirectDocumentUrl,
+  isDownloadableCandidateUrl,
   orderDocumentCandidates,
   fetchAndReadDocumentsUpfront,
   applyRescannedDeadline,

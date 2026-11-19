@@ -455,16 +455,8 @@ export async function initEmbeddingModel(forceInitInTest = false): Promise<boole
 
 /**
  * Generates a 384-dimensional neural ONNX embedding asynchronously if the ONNX pipeline is loaded,
- * or falls back seamlessly to `computeFastSemanticEmbedding`.
- */
-export async function generateEmbeddingAsync(rawText: string): Promise<Float32Array> {
-  return (await generateEmbeddingWithSpaceAsync(rawText)).vec;
-}
-
-/**
- * Like generateEmbeddingAsync, but also reports which vector space the result is in, so callers
- * that persist it can tag the BLOB correctly. Falls back to the fast space when the model is
- * not loaded (e.g. during startup) or inference fails.
+ * or falls back seamlessly to `computeFastSemanticEmbedding`, reporting which vector space the
+ * result is in so callers that persist it can tag the BLOB correctly.
  */
 export async function generateEmbeddingWithSpaceAsync(rawText: string): Promise<{ vec: Float32Array; space: EmbeddingSpace }> {
   const norm = normalizeEmbeddingText(rawText);

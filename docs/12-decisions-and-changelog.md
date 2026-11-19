@@ -126,6 +126,11 @@
   - Refactored `docs/13-north-star-quality-standard.md` §4 into immutable acceptance criteria separated from volatile metrics in `docs/14-active-backlog.md`.
   - Added `src/server/services/urlSafety.ts` (`validateExternalHttpUrl`) enforcing HTTP(S)-only external URLs on portal and digest webhook routes, rejecting loopback, RFC1918 private IPs, and link-local metadata ranges (`SEC-5`).
   - Strengthened `tests/unit/docs-consistency.test.ts` to enforce code-to-documentation synchronization across schemas, server modules, canonical portals, baseline versions, and requirement proofs.
+- **`awaiting_scope` Lifecycle, Rescoring & Document Queue Hardening (Maintenance Update, November 16, 2026)**:
+  - Added `isDownloadableCandidateUrl` filtering in `src/server/scrapers/ingestPipeline.ts` and `src/server/db/repositories/ingestJobsRepo.ts` so non-downloadable `.html`/`.aspx`/`.php`/`.jsp` viewer links do not displace real PDFs or generate guaranteed-fail `document_ingest_jobs`.
+  - Updated `reScoreTendersAgainstTracks` in `src/server/db/repositories/tracksRepo.ts` to re-evaluate stored `extracted_text` via `applyDocumentScopeToTracks`, and updated `saveDomainTrack` to preserve existing `minilm` track embeddings when `name` and `positive_keywords` are unchanged.
+  - Updated `processJob` (`src/server/services/ingestWorker.ts`) with `finalizeAwaitingScopeAfterJobFailure` so `awaiting_scope` tenders with permanently failed jobs either queue remaining downloadable attachments or finalize as `no-track-match` once a prior document was read without matching.
+  - Added optional `graceDays` override to `runRetentionCycle` (`src/server/services/retention.ts`) and ran a live DB cleanup + MiniLM backfill on `./data/tender_tracker.db` (`179/179` tenders indexed with `all-MiniLM-L6-v2`).
 
 ### Version 1.8.0 (November 13, 2026)
 - **Structured Go / No-Go Bid Brief (`BID-1`)**:

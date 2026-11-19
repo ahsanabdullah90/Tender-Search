@@ -1,6 +1,6 @@
 import { db, safeJsonParse } from '../connection.js';
 import { DomainTrack, CorrigendumLog } from '../../../shared/types.js';
-import { containsKeyword } from '../../scrapers/trackMatcher.js';
+import { containsKeyword, applyDocumentScopeToTracks } from '../../scrapers/trackMatcher.js';
 import {
   buildTrackEmbeddingText,
   buildTenderEmbeddingText,
@@ -51,20 +51,34 @@ export function getAllDomainTracks(): DomainTrack[] {
 
 export function saveDomainTrack(track: { id?: string; name: string; positive_keywords: string[]; negative_keywords: string[]; is_active?: number }) {
   const id = track.id || 'track-' + Date.now();
-  const existing = track.id ? db.prepare('SELECT id FROM domain_tracks WHERE id = ?').get(track.id) : null;
+  const existingById = track.id
+    ? (db.prepare('SELECT id, name, positive_keywords, embedding FROM domain_tracks WHERE id = ?').get(track.id) as TrackEmbeddingBackfillRow | undefined)
+    : undefined;
+  const existingForEmbedding = existingById || (
+    db.prepare('SELECT id, name, positive_keywords, embedding FROM domain_tracks WHERE name = ?').get(track.name) as TrackEmbeddingBackfillRow | undefined
+  );
+
+  const posJson = JSON.stringify(track.positive_keywords);
+  const preserveEmbedding =
+    existingForEmbedding &&
+    existingForEmbedding.embedding &&
+    existingForEmbedding.name === track.name &&
+    existingForEmbedding.positive_keywords === posJson;
 
   const trackText = buildTrackEmbeddingText({
     name: track.name,
     positive_keywords: track.positive_keywords || []
   });
-  const embeddingBuf = serializeEmbedding(computeFastSemanticEmbedding(trackText));
+  const embeddingBuf = preserveEmbedding
+    ? existingForEmbedding.embedding!
+    : serializeEmbedding(computeFastSemanticEmbedding(trackText));
 
-  if (existing) {
+  if (existingById) {
     db.prepare(`
       UPDATE domain_tracks
       SET name = ?, positive_keywords = ?, negative_keywords = ?, is_active = ?, embedding = ?
       WHERE id = ?
-    `).run(track.name, JSON.stringify(track.positive_keywords), JSON.stringify(track.negative_keywords), track.is_active ?? 1, embeddingBuf, id);
+    `).run(track.name, posJson, JSON.stringify(track.negative_keywords), track.is_active ?? 1, embeddingBuf, id);
   } else {
     db.prepare(`
       INSERT INTO domain_tracks (id, name, positive_keywords, negative_keywords, is_active, embedding)
@@ -74,7 +88,7 @@ export function saveDomainTrack(track: { id?: string; name: string; positive_key
         negative_keywords = excluded.negative_keywords,
         is_active = excluded.is_active,
         embedding = excluded.embedding
-    `).run(id, track.name, JSON.stringify(track.positive_keywords), JSON.stringify(track.negative_keywords), track.is_active ?? 1, embeddingBuf);
+    `).run(id, track.name, posJson, JSON.stringify(track.negative_keywords), track.is_active ?? 1, embeddingBuf);
   }
 
   // Re-evaluate tenders against tracks when track rules change
@@ -100,7 +114,7 @@ export function reScoreTendersAgainstTracks() {
     })
   }));
 
-  const tenders = db.prepare('SELECT id, title, description, organization, reference_no, embedding, portal_id, pipeline_status, is_bookmarked, ingestion_status FROM tenders').all() as any[];
+  const tenders = db.prepare('SELECT id, title, description, organization, reference_no, extracted_text, embedding, portal_id, pipeline_status, is_bookmarked, ingestion_status FROM tenders').all() as any[];
 
   const updateStmt = db.prepare(`
     UPDATE tenders SET domain_tracks = ?, matched_keywords = ?, match_score = ?, semantic_score = ?, embedding = COALESCE(embedding, ?), ingestion_status = ? WHERE id = ?
@@ -143,7 +157,7 @@ export function reScoreTendersAgainstTracks() {
         }
       }
 
-      const allMatchedKeywords = exactKeywords.length > 0
+      let allMatchedKeywords = exactKeywords.length > 0
         ? Array.from(new Set(exactKeywords))
         : Array.from(new Set(semanticTags));
 
@@ -152,6 +166,20 @@ export function reScoreTendersAgainstTracks() {
         matchScore = Math.min(100, Math.max(30, exactKeywords.length * 20));
       } else if (semanticDiscoveryScores.length > 0) {
         matchScore = Math.max(...semanticDiscoveryScores);
+      }
+
+      if (tender.extracted_text && tender.extracted_text.trim()) {
+        const rescored = applyDocumentScopeToTracks(
+          { matchedTracks, matchedKeywords: allMatchedKeywords },
+          { title: tender.title, organization: tender.organization, description: tender.description, referenceNo: tender.reference_no },
+          tender.extracted_text,
+          tracks
+        );
+        if (rescored.tracks.length > 0) {
+          matchedTracks.splice(0, matchedTracks.length, ...rescored.tracks);
+          allMatchedKeywords = rescored.keywords;
+          if (matchScore < 30) matchScore = 30;
+        }
       }
 
       let nextIngestionStatus = tender.ingestion_status;

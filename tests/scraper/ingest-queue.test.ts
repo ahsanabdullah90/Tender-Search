@@ -81,6 +81,24 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
     expect(urls).toHaveLength(5);
   });
 
+  it('filters non-downloadable .html/.aspx links out of document candidates while retaining /pdf?file= and ?wpdmdl=', () => {
+    const urls = orderDocumentCandidates({
+      directUrl: 'https://bpptwo.vdc.services:5451/Tenders',
+      attachmentUrls: [
+        'https://bpptwo.vdc.services:9446/Reports/Works/BiddingDocumentWorks.html?id=101',
+        'https://bpptwo.vdc.services:9446/Reports/GoodsProcurement/NITDocument.html?id=101',
+        'https://epms.ppra.gov.pk/public/tenders/pdf?file=notice.pdf',
+        'https://fde.gov.pk/?wpdmdl=5521',
+        'https://bpptwo.vdc.services:9446/Images/BOQManual/real-boq.pdf'
+      ]
+    });
+    expect(urls).toEqual([
+      'https://epms.ppra.gov.pk/public/tenders/pdf?file=notice.pdf',
+      'https://fde.gov.pk/?wpdmdl=5521',
+      'https://bpptwo.vdc.services:9446/Images/BOQManual/real-boq.pdf'
+    ]);
+  });
+
   describe('ingest', () => {
     it('reads an undated tender\'s document locally before insert and records provenance (no Gemini)', async () => {
       const vision = vi.spyOn(ocrSvc, 'extractTenderFromImage');
@@ -613,6 +631,59 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(getJobsForTender(tender!.id).length).toBe(1);
       const suppressed = db.prepare('SELECT 1 FROM deleted_tenders WHERE id = ?').get(tender?.id);
       expect(suppressed).toBeUndefined();
+    });
+
+    it('finalizes awaiting_scope tender when a remaining job fails permanently (queues 3rd PDF first, else deletes as no-track-match)', async () => {
+      db.prepare(`DELETE FROM domain_tracks`).run();
+      db.prepare(`
+        INSERT INTO domain_tracks (id, name, positive_keywords, negative_keywords, is_active)
+        VALUES ('track-it', 'IT & Software', '["servers", "laptops"]', '[]', 1)
+      `).run();
+
+      const nonMatchPdf = 'https://x.pk/uploads/2026/11/Notice-Unrelated.pdf';
+      const failingPdf = 'https://x.pk/uploads/2026/11/Corrupted-Doc.pdf';
+      const thirdMatchPdf = 'https://x.pk/uploads/2026/11/Third-Annex.pdf';
+
+      serveDocuments({
+        [nonMatchPdf]: noticePdf(10, ['Scope of Work: Agricultural cattle fodder']),
+        [failingPdf]: new Error('HTTP 500'),
+        [thirdMatchPdf]: noticePdf(10, ['Scope of Work: Supply of rack servers'])
+      });
+
+      // 1. With a 3rd unqueued downloadable PDF: failing the 2nd job enqueues the 3rd PDF
+      const resWith3 = await processAndSaveTender({
+        title: 'Tender Notice No 303',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/303',
+        attachmentUrls: [nonMatchPdf, failingPdf, thirdMatchPdf]
+      }, portal(), tracks);
+      expect(resWith3.awaitingScope).toBe(true);
+      const idWith3 = (db.prepare(`SELECT id FROM tenders WHERE title = 'Tender Notice No 303'`).get() as any).id;
+      db.prepare(`UPDATE document_ingest_jobs SET max_attempts = 1 WHERE tender_id = ? AND url = ?`).run(idWith3, failingPdf);
+
+      await processDocumentQueue(5);
+      // After nonMatchPdf succeeded and failingPdf permanently failed, thirdMatchPdf was queued
+      const jobsAfterFail = getJobsForTender(idWith3);
+      expect(jobsAfterFail.some(j => j.url === thirdMatchPdf && j.status === 'pending')).toBe(true);
+      // Next worker run reads thirdMatchPdf and releases tender
+      await processDocumentQueue(5);
+      expect(getTenderById(idWith3)?.ingestion_status).toBe('ready');
+
+      // 2. With only 2 attachments (1 non-matching PDF + 1 permanently failing PDF): tender is deleted as no-track-match
+      const resWith2 = await processAndSaveTender({
+        title: 'Tender Notice No 304',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/304',
+        attachmentUrls: [nonMatchPdf, failingPdf]
+      }, portal(), tracks);
+      expect(resWith2.awaitingScope).toBe(true);
+      const idWith2 = (db.prepare(`SELECT id FROM tenders WHERE title = 'Tender Notice No 304'`).get() as any).id;
+      db.prepare(`UPDATE document_ingest_jobs SET max_attempts = 1 WHERE tender_id = ? AND url = ?`).run(idWith2, failingPdf);
+
+      await processDocumentQueue(5);
+      expect(getTenderById(idWith2)).toBeNull();
+      const supRow = db.prepare(`SELECT reason FROM deleted_tenders WHERE id = ?`).get(idWith2) as { reason: string } | undefined;
+      expect(supRow?.reason).toBe('no-track-match');
     });
   });
 });

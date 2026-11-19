@@ -50,6 +50,11 @@ import {
   updateDigestSettings
 } from '../../src/server/db/repositories/systemRepo.js';
 import { runAuditCleanup } from '../../src/server/db/schema.js';
+import {
+  serializeEmbedding,
+  getEmbeddingSpace,
+  EMBEDDING_DIM
+} from '../../src/server/services/embeddingService.js';
 
 describe('Database and Repository Layer', () => {
   beforeEach(() => {
@@ -443,6 +448,42 @@ describe('Database and Repository Layer', () => {
       expect(JSON.parse(demoted.domain_tracks)).toEqual([]);
       expect(keptReview.ingestion_status).toBe('ready');
       expect(keptBookmarked.ingestion_status).toBe('ready');
+    });
+
+    it('preserves extracted_text track matches during rescoring and keeps minilm track embeddings when keywords stay unchanged', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, extracted_text, domain_tracks, matched_keywords, match_score, pipeline_status, is_bookmarked, ingestion_status)
+        VALUES
+          ('t-doc-awaiting', 't-doc-awaiting', 'punjab_eproc', 'Punjab PPRA', 'REF-DOC-1', 'Notice Inviting Bids', 'Generic Authority', 'https://example.com/doc1', 'Supply and installation of solar panels and net metering inverter', '[]', '[]', 0, 'New Opportunity', 0, 'awaiting_scope'),
+          ('t-doc-ready', 't-doc-ready', 'punjab_eproc', 'Punjab PPRA', 'REF-DOC-2', 'Tender Notice No 900', 'Generic Authority', 'https://example.com/doc2', 'Supply of solar inverter system', '["Solar & Clean Energy"]', '["solar"]', 40, 'New Opportunity', 0, 'ready')
+      `).run();
+
+      const trackId = saveDomainTrack({
+        name: 'Embedding Preservation Track',
+        positive_keywords: ['photovoltaic', 'microgrid'],
+        negative_keywords: [],
+        is_active: 1
+      });
+      const minilmBlob = serializeEmbedding(new Float32Array(EMBEDDING_DIM).fill(0.05), 'minilm')!;
+      db.prepare('UPDATE domain_tracks SET embedding = ? WHERE id = ?').run(minilmBlob, trackId);
+
+      // Updating negative_keywords / is_active without changing name or positive_keywords preserves minilm
+      saveDomainTrack({
+        id: trackId,
+        name: 'Embedding Preservation Track',
+        positive_keywords: ['photovoltaic', 'microgrid'],
+        negative_keywords: ['geyser'],
+        is_active: 0
+      });
+      const savedRow = db.prepare('SELECT embedding FROM domain_tracks WHERE id = ?').get(trackId) as { embedding: Buffer };
+      expect(getEmbeddingSpace(savedRow.embedding)).toBe('minilm');
+
+      const docAwaiting = db.prepare('SELECT ingestion_status, domain_tracks FROM tenders WHERE id = ?').get('t-doc-awaiting') as any;
+      const docReady = db.prepare('SELECT ingestion_status, domain_tracks FROM tenders WHERE id = ?').get('t-doc-ready') as any;
+      expect(docAwaiting.ingestion_status).toBe('ready');
+      expect(JSON.parse(docAwaiting.domain_tracks)).toContain('Solar & Clean Energy');
+      expect(docReady.ingestion_status).toBe('ready');
+      expect(JSON.parse(docReady.domain_tracks)).toContain('Solar & Clean Energy');
     });
   });
 

@@ -95,14 +95,21 @@ export function isDirectDocumentUrl(url?: string | null): boolean {
   return Boolean(url && (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url)));
 }
 
+export function isDownloadableCandidateUrl(url?: string | null): boolean {
+  return Boolean(url && (!/\.(html?|aspx?|php|jsp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url) || /\/pdf\?file=/i.test(url)));
+}
+
 /**
- * Deduplicates a tender's document links (direct document first), sorts them so corrigenda are
- * read before primary documents and those before everything else, and caps them at 5.
+ * Deduplicates a tender's document links (direct document first), filters out non-downloadable
+ * HTML/server-page links, sorts them so corrigenda are read before primary documents and those
+ * before everything else, and caps them at 5.
  */
 export function orderDocumentCandidates(item: Pick<RawScrapedItem, 'directUrl' | 'attachmentUrls'>): string[] {
   const urls: string[] = [];
   if (isDirectDocumentUrl(item.directUrl)) urls.push(item.directUrl);
-  for (const u of item.attachmentUrls || []) if (u && !urls.includes(u)) urls.push(u);
+  for (const u of item.attachmentUrls || []) {
+    if (u && isDownloadableCandidateUrl(u) && !urls.includes(u)) urls.push(u);
+  }
   return urls
     .map((u, i) => ({ u, i, p: documentJobPriority(u) }))
     .sort((a, b) => a.p - b.p || a.i - b.i)

@@ -49,7 +49,7 @@ export interface RetentionStatus {
 /**
  * Runs the automated lifecycle retention daemon
  */
-export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolean } = {}): RetentionReport {
+export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolean; graceDays?: number } = {}): RetentionReport {
   const isDryRun = Boolean(options.dryRun);
   const enabled = getAppSetting('retention_auto_clean') !== 'false';
 
@@ -73,7 +73,10 @@ export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolea
     return report;
   }
 
-  const graceDays = Math.max(1, parseInt(getAppSetting('retention_grace_days') || '2', 10));
+  const configuredGrace = parseInt(getAppSetting('retention_grace_days') || '2', 10);
+  const graceDays = options.graceDays !== undefined
+    ? Math.max(0, options.graceDays)
+    : (isNaN(configuredGrace) ? 2 : Math.max(0, configuredGrace));
   const passedRetentionDays = Math.max(1, parseInt(getAppSetting('retention_passed_days') || '10', 10));
   const batchCap = 200;
 
