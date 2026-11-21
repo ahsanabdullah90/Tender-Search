@@ -11,6 +11,7 @@ import {
   getDocumentQueueCounts
 } from '../db/index.js';
 import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
+import { scrapeSppraPortal } from './sppraApi.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { getHumanJitterDelay, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, ScraperErrorCode, ScanDepth, DomainTrack, DocumentQueueStatus } from '../../shared/types.js';
@@ -570,6 +571,19 @@ export async function scrapePortal(
   portal: PortalDefinition & { sessionCookies?: string },
   options?: { depth?: ScanDepth; degradedMode?: boolean }
 ): Promise<ScrapeResult> {
+  // Sindh SPPRA (portalsindh.eprocure.gov.pk) serves its public tender board via the official EPADS WSO2 JSON API.
+  if (portal.id === 'sppra') {
+    const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
+    const knownMap = depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null;
+    const spResult = await scrapeSppraPortal(portal, {
+      depth,
+      knownMap,
+      timeoutMs: options?.degradedMode ? 45000 : 20000
+    });
+    spResult.items = sanitizeScrapedItems(spResult.items, portal);
+    return spResult;
+  }
+
   const htmlTimeoutMs = options?.degradedMode
     ? (portal.tendersUrl.includes('epms.ppra.gov.pk') ? 55000 : 45000)
     : undefined;

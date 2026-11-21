@@ -2,7 +2,7 @@ import * as cheerio from 'cheerio';
 import { BidBrief } from '../../shared/types.js';
 import { PortalDefinition } from './portalList.js';
 import { isValidReferenceNo } from '../services/deduplicator.js';
-import { parseDateString, extractDatesFromText, DATE_CANDIDATE_PATTERN } from './dateParser.js';
+import { parseDateString, extractDatesFromText, normalizeExtractedDate, DATE_CANDIDATE_PATTERN } from './dateParser.js';
 
 export interface RawScrapedItem {
   referenceNo?: string;
@@ -546,6 +546,50 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         closingDate,
         description: '',
         attachmentUrls
+      });
+    });
+    if (items.length > 0) return { items, hitlRequired: false };
+  }
+
+  // 3d. Structured Sindh SPPRA EPADS Angular Cards (section.card with EPADS-S-... tender numbers)
+  const spCards = $('section.card').filter((_, el) => /EPADS-S-\d+/i.test($(el).text()));
+  if (spCards.length > 0) {
+    spCards.each((_, el) => {
+      const card = $(el);
+      const cardText = card.text().replace(/\s+/g, ' ').trim();
+      if (/Status:\s*(Closed|Cancelled|Completed|Awarded)/i.test(cardText)) return;
+
+      const headings = card.find('h6').map((__, h) => $(h).text().replace(/\s+/g, ' ').trim()).get().filter(Boolean);
+      const refNo = headings.find(h => /^EPADS-S-\d+/i.test(h)) || cardText.match(/\b(EPADS-S-\d+)\b/i)?.[1];
+      const title = headings.find(h => !/^EPADS-S-\d+/i.test(h) && !/^Department Name:/i.test(h) && h.length > 5) || '';
+      if (!title) return;
+
+      const deptMatch = cardText.match(/Department Name:\s*([^\n]+?)(?=\s+Status:|\s+Published Date:|$)/i);
+      const organization = deptMatch?.[1]?.trim() || portal.name;
+      const locMatch = cardText.match(/Location:\s*([^\n]+?)(?=\s+Published Date:|\s+View\/Download|$)/i);
+      const rawLoc = locMatch?.[1]?.trim();
+      const location = rawLoc ? (/sindh/i.test(rawLoc) ? rawLoc : `${rawLoc}, Sindh`) : 'Sindh, Pakistan';
+
+      const pubMatch = cardText.match(/Published Date:\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*[AP]M)?)/i);
+      const closeMatch = cardText.match(/Closing Date:\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*[AP]M)?)/i);
+      const { publishDate: fallbackPub, closingDate: fallbackClose } = extractDatesFromText(cardText);
+      const publishDate = (pubMatch ? normalizeExtractedDate(pubMatch[1]) : undefined) || fallbackPub || undefined;
+      const closingDate = (closeMatch ? normalizeExtractedDate(closeMatch[1]) : undefined) || fallbackClose;
+
+      const directUrl = refNo
+        ? `${portal.baseUrl.replace(/\/$/, '')}/#/?tender=${encodeURIComponent(refNo)}`
+        : portal.tendersUrl;
+
+      items.push({
+        referenceNo: refNo,
+        title,
+        organization,
+        location,
+        directUrl,
+        publishDate,
+        closingDate,
+        description: cleanRowSummary(cardText, title, card),
+        attachmentUrls: collectRowAttachments($, el, portal)
       });
     });
     if (items.length > 0) return { items, hitlRequired: false };

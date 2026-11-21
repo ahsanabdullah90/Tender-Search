@@ -21,6 +21,7 @@ import { summarizeTenderTextWithAI } from '../services/ocrService.js';
 import { tryConsumeDailyAiText } from '../services/ingestBudget.js';
 import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
 import { isGenericListingUrl, collectRowAttachments, parseEpmsDetailHtml, cleanRowSummary } from './portalParsers.js';
+import { extractSppraPublishedDocId, fetchSppraPublishedDocuments } from './sppraApi.js';
 import { orderDocumentCandidates } from './ingestPipeline.js';
 import { crawlerDeps } from './crawlerDeps.js';
 
@@ -199,9 +200,28 @@ async function runFetchDocumentsForTender(
     await downloadAndAttachUrl(knownUrls[idx], idx);
   }
 
-  // Step B: Inspect detail page HTML when no dossiers were cached yet, forceRefresh is set, or EPMS needs metadata/attachments.
+  // Step B: Inspect detail source (SPPRA published-docs API or HTML detail page) when needed.
   let detailPageChecked = false;
-  if (
+  const spPublishedDocId = tender.portal_id === 'sppra' ? extractSppraPublishedDocId(tender.direct_url) : null;
+  if (spPublishedDocId && (dossiers.length < 2 || Boolean(options.forceRefresh))) {
+    try {
+      const discoveredUrls = await fetchSppraPublishedDocuments(spPublishedDocId);
+      detailPageChecked = true;
+      if (discoveredUrls.length > 0) {
+        mergeTenderAttachmentUrls(tender.id, discoveredUrls);
+      }
+      for (let idx = 0; idx < discoveredUrls.slice(0, 5).length; idx++) {
+        if (dossiers.length >= 5) break;
+        await downloadAndAttachUrl(discoveredUrls[idx], dossiers.length + idx);
+      }
+    } catch (err: any) {
+      console.warn(`[FetchDocs] Could not fetch SPPRA published docs for ${tender.id} (pdid=${spPublishedDocId}):`, err.message);
+      if (options.throwOnDetailError && dossiers.length === 0) {
+        throw err;
+      }
+    }
+  } else if (
+    tender.portal_id !== 'sppra' &&
     tender.direct_url &&
     tender.direct_url.startsWith('http') &&
     !isDirectFile &&

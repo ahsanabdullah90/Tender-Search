@@ -151,13 +151,14 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
       const result = parsePortalHtml(html, portal);
       expect(result.hitlRequired).toBe(false);
-      expect(result.items.length).toBe(1);
+      expect(result.items.length).toBe(2);
 
       const item = result.items[0];
-      expect(item.referenceNo).toBe('SPPRA-EDU-2026-901');
-      expect(item.title).toContain('Educational Textbooks');
-      expect(item.closingDate).toContain('2026-06-18');
-      expect(item.publishDate).toContain('2026-06-02');
+      expect(item.referenceNo).toBe('EPADS-S-26110847166');
+      expect(item.title).toContain('250KW Solar Energy System');
+      expect(item.organization).toBe('ICCBS University of Karachi');
+      expect(item.closingDate).toContain('2026-12-22');
+      expect(item.publishDate).toContain('2026-11-20');
     });
 
     it('parses Federal PPRA (EPMS) fixture items accurately', () => {

@@ -1,0 +1,458 @@
+import { RawScrapedItem, ScrapeResult } from './portalParsers.js';
+import { PortalDefinition } from './portalList.js';
+import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
+import { maxFileBytes } from '../services/ingestBudget.js';
+import { reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from '../services/networkMonitor.js';
+
+export const SPPRA_API_BASE = 'https://apiprd.eprocure.gov.pk';
+export const SPPRA_LIST_URL = `${SPPRA_API_BASE}/websiteportal/publicportal/1.0.0/api/v1/publicportal/getallpublictenders`;
+export const SPPRA_DOCS_URL = `${SPPRA_API_BASE}/websiteportal/publicportal/1.0.0/api/v1/publicportal/getallpublisheddocumentdetailbypdid`;
+export const SPPRA_DOWNLOAD_URL = `${SPPRA_API_BASE}/documentmanagementsystem/dmspublicapi/1.0.0/api/v1/dmspublicapi/downloadportalfilebyguid`;
+export const SPPRA_PORTAL_ORIGIN = 'https://portalsindh.eprocure.gov.pk';
+export const SPPRA_OFFICE_ID = 31640;
+export const SPPRA_DEFAULT_PAGE_SIZE = 50;
+
+export const SPPRA_PUBLIC_HEADERS: Record<string, string> = {
+  accept: 'application/json, text/plain, */*',
+  'accept-language': 'en-US,en;q=0.9',
+  authorization: 'Basic YWRtaW46cHByYTEy',
+  'content-type': 'application/json',
+  officedetail: 'Sindh-PPRA-Dev',
+  origin: SPPRA_PORTAL_ORIGIN,
+  referer: `${SPPRA_PORTAL_ORIGIN}/`
+};
+
+export interface SppraTenderRecord {
+  publishedDocumentID?: number;
+  tR_DocumentTemplateID?: number;
+  procurementPlansDetailID?: number;
+  name?: string | null;
+  description?: string | null;
+  documentId?: number | null;
+  documentGUID?: string | null;
+  ppraTenderNumber?: string | null;
+  tenderNumber?: string | null;
+  tenderNumbers?: string | null;
+  publishDate?: string | null;
+  lastSubmissionDate?: string | null;
+  bidOpeningDate?: string | null;
+  bidValidityDate?: string | null;
+  departmentName?: string | null;
+  statusName?: string | null;
+  location?: string | null;
+  procurementCategory?: string | null;
+  estimatedCost?: string | number | null;
+  procurementMethod?: string | null;
+  procurementProcedure?: string | null;
+}
+
+export interface SppraPublishedDocRecord {
+  dmS_FileID?: number | null;
+  dmS_FileGUID?: string | null;
+  documentTemplateName?: string | null;
+  displayName?: string | null;
+  isCorrigendum?: number | boolean | null;
+}
+
+export interface SppraDownloadFileParams {
+  fileId: number;
+  guid: string;
+  label?: string;
+}
+
+const CLOSED_STATUS_RE = /\b(closed|cancelled|canceled|completed|awarded|archived|expired|dropped)\b/i;
+
+/**
+ * Builds a synthetic HTTPS URL representing a Sindh SPPRA DMS file downloadable via
+ * `downloadportalfilebyguid` POST API.
+ */
+export function buildSppraDownloadUrl(fileId: number, guid: string, label?: string): string {
+  const url = new URL(SPPRA_DOWNLOAD_URL);
+  url.searchParams.set('id', String(fileId));
+  url.searchParams.set('guid', guid.trim());
+  if (label && label.trim()) {
+    url.searchParams.set('name', label.trim());
+  }
+  return url.toString();
+}
+
+/**
+ * Parses a synthetic Sindh SPPRA DMS download URL back into `{ fileId, guid, label }`.
+ */
+export function parseSppraDownloadUrl(rawUrl: string): SppraDownloadFileParams | null {
+  if (!rawUrl || !rawUrl.includes('downloadportalfilebyguid')) return null;
+  try {
+    const parsed = new URL(rawUrl);
+    if (!parsed.hostname.endsWith('eprocure.gov.pk')) return null;
+    if (!parsed.pathname.toLowerCase().includes('downloadportalfilebyguid')) return null;
+    const idStr = parsed.searchParams.get('id');
+    const guid = parsed.searchParams.get('guid')?.trim();
+    const label = parsed.searchParams.get('name')?.trim() || undefined;
+    const fileId = idStr ? Number(idStr) : NaN;
+    if (!Number.isFinite(fileId) || fileId <= 0 || !guid) return null;
+    return { fileId, guid, label };
+  } catch {
+    return null;
+  }
+}
+
+export function isSppraDownloadUrl(rawUrl: string): boolean {
+  return parseSppraDownloadUrl(rawUrl) !== null;
+}
+
+/**
+ * Extracts `publishedDocumentID` from a SPPRA tender `direct_url` (`.../#/?tender=...&pdid=717150`).
+ */
+export function extractSppraPublishedDocId(directUrl?: string | null): number | null {
+  if (!directUrl) return null;
+  const match = directUrl.match(/[?&]pdid=(\d+)/i);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function parseSppraIsoDate(raw?: string | null): string | undefined {
+  if (!raw) return undefined;
+  const s = String(raw).trim();
+  if (!s || s.startsWith('0001-01-01')) return undefined;
+  // SPPRA returns local Pakistan Standard Time (UTC+05:00) timestamps without timezone suffix, e.g. "2026-12-22T11:30:00"
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m) {
+    const [, y, mo, d, hh = '23', mm = '59', ss = '00'] = m;
+    const iso = `${y}-${mo}-${d}T${hh}:${mm}:${ss}+05:00`;
+    const dt = new Date(iso);
+    if (!Number.isNaN(dt.getTime())) {
+      return dt.toISOString();
+    }
+  }
+  return normalizeExtractedDate(s) ?? undefined;
+}
+
+function formatEstimatedCostPkr(raw?: string | number | null): string | undefined {
+  if (raw === null || raw === undefined || raw === '') return undefined;
+  const num = Number(String(raw).replace(/,/g, '').trim());
+  if (!Number.isFinite(num) || num <= 0) return undefined;
+  if (num >= 1_000_000) {
+    const m = (num / 1_000_000).toFixed(2).replace(/\.00$/, '');
+    return `PKR ${m}M (${num.toLocaleString('en-US')})`;
+  }
+  return `PKR ${num.toLocaleString('en-US')}`;
+}
+
+/**
+ * Maps a single raw SPPRA EPADS JSON record into a normalized `ScrapedTender`.
+ * Returns `null` for non-open (closed/cancelled/completed) or malformed records.
+ */
+export function mapSppraRecordToScrapedTender(record: SppraTenderRecord): RawScrapedItem | null {
+  const title = (record.name || '').replace(/\s+/g, ' ').trim();
+  if (!title || title.length < 4) return null;
+
+  const statusName = (record.statusName || '').trim();
+  if (statusName && CLOSED_STATUS_RE.test(statusName)) {
+    return null;
+  }
+
+  const referenceNo = (record.tenderNumbers || record.tenderNumber || record.ppraTenderNumber || '').trim() || undefined;
+  const organization = (record.departmentName || '').replace(/\s+/g, ' ').trim() || 'Sindh Public Procurement Regulatory Authority';
+
+  const rawLocation = (record.location || '').replace(/\s+/g, ' ').trim();
+  const location = rawLocation
+    ? (/sindh/i.test(rawLocation) ? rawLocation : `${rawLocation}, Sindh`)
+    : 'Sindh, Pakistan';
+
+  const publishDate = parseSppraIsoDate(record.publishDate);
+  const closingDate = parseSppraIsoDate(record.lastSubmissionDate);
+
+  const pdid = Number(record.publishedDocumentID);
+  const queryParts: string[] = [];
+  if (referenceNo) queryParts.push(`tender=${encodeURIComponent(referenceNo)}`);
+  if (Number.isFinite(pdid) && pdid > 0) queryParts.push(`pdid=${pdid}`);
+  const directUrl = queryParts.length > 0
+    ? `${SPPRA_PORTAL_ORIGIN}/#/?${queryParts.join('&')}`
+    : `${SPPRA_PORTAL_ORIGIN}/#/`;
+
+  const attachmentUrls: string[] = [];
+  if (record.documentId && Number(record.documentId) > 0 && record.documentGUID && String(record.documentGUID).trim()) {
+    attachmentUrls.push(
+      buildSppraDownloadUrl(Number(record.documentId), String(record.documentGUID).trim(), 'Tender Notice')
+    );
+  }
+
+  const descParts: string[] = [];
+  if (record.description && record.description.trim()) {
+    descParts.push(record.description.trim());
+  } else {
+    descParts.push(title);
+  }
+  const metaParts: string[] = [];
+  if (referenceNo) metaParts.push(`Ref: ${referenceNo}`);
+  if (organization) metaParts.push(`Department: ${organization}`);
+  if (rawLocation) metaParts.push(`Location: ${location}`);
+  const costLabel = formatEstimatedCostPkr(record.estimatedCost);
+  if (costLabel) metaParts.push(`Estimated Cost: ${costLabel}`);
+  if (closingDate) metaParts.push(`Closing: ${formatClosingDate(closingDate) || closingDate}`);
+  if (record.procurementMethod) metaParts.push(`Method: ${record.procurementMethod}`);
+  if (record.procurementProcedure) metaParts.push(`Procedure: ${record.procurementProcedure}`);
+
+  const description = metaParts.length > 0
+    ? `${descParts.join(' — ')} | ${metaParts.join(' • ')}`
+    : descParts.join(' — ');
+
+  return {
+    title,
+    organization,
+    referenceNo,
+    publishDate,
+    closingDate,
+    location,
+    directUrl,
+    description,
+    attachmentUrls: attachmentUrls.length > 0 ? attachmentUrls : undefined
+  };
+}
+
+/**
+ * Fetches one page of active public tenders from the Sindh SPPRA EPADS JSON API.
+ */
+export async function fetchSppraTendersPage(
+  pageNumber: number = 1,
+  pageSize: number = SPPRA_DEFAULT_PAGE_SIZE,
+  timeoutMs: number = 20000
+): Promise<{ totalRecords: number; records: SppraTenderRecord[] }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(SPPRA_LIST_URL, {
+      method: 'POST',
+      headers: SPPRA_PUBLIC_HEADERS,
+      signal: controller.signal,
+      body: JSON.stringify({
+        pagination: {
+          pageNumber: String(pageNumber),
+          pageSize: String(pageSize),
+          orderBy: '',
+          orderByColumnName: '',
+          approvalStatusID: 0,
+          refTypeID: 0
+        },
+        filter: {
+          sortOrder: '',
+          activityStatus: null,
+          keywords: '',
+          tenderNo: '',
+          departmentName: null,
+          dateOfAdvertisement: null,
+          closingDate: null,
+          selectedWorth: null
+        },
+        loggedInUserID: 1,
+        loggedInUserOfficeID: SPPRA_OFFICE_ID
+      })
+    });
+
+    if (!res.ok) {
+      const err: any = new Error(`SPPRA API HTTP ${res.status} on page ${pageNumber}`);
+      err.statusCode = res.status;
+      throw err;
+    }
+
+    const json: any = await res.json();
+    const records: SppraTenderRecord[] = Array.isArray(json?.data?.records) ? json.data.records : [];
+    const totalRecords = Number(json?.data?.totalRecords ?? records.length) || records.length;
+    return { totalRecords, records };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Scrapes Sindh SPPRA via its official public EPADS JSON API with quick/deep pagination
+ * and DB early-stop when page >= 2 repeats already-known unchanged notices.
+ */
+export async function scrapeSppraPortal(
+  portal: PortalDefinition,
+  options?: {
+    depth?: 'quick' | 'deep';
+    knownMap?: Map<string, { closing_date?: string | null; title?: string | null }> | null;
+    timeoutMs?: number;
+  }
+): Promise<ScrapeResult> {
+  const depth = options?.depth === 'deep' ? 'deep' : 'quick';
+  const maxPages = portal.pagination
+    ? (depth === 'deep'
+        ? (portal.pagination.deepMaxPages ?? portal.pagination.maxPages)
+        : (portal.pagination.quickMaxPages ?? portal.pagination.maxPages))
+    : 2;
+
+  const allItems: RawScrapedItem[] = [];
+  const seenKeys = new Set<string>();
+  let pagesScanned = 0;
+
+  for (let page = 1; page <= maxPages; page++) {
+    const { records } = await fetchSppraTendersPage(page, SPPRA_DEFAULT_PAGE_SIZE, options?.timeoutMs ?? 20000);
+    pagesScanned++;
+    if (records.length === 0) break;
+
+    let addedOnPage = 0;
+    let knownUnchanged = 0;
+
+    for (const rec of records) {
+      const mapped = mapSppraRecordToScrapedTender(rec);
+      if (!mapped) continue;
+      const key = (mapped.referenceNo || mapped.directUrl || mapped.title).toLowerCase();
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+
+      if (page >= 2 && options?.knownMap && mapped.directUrl) {
+        const existing = options.knownMap.get(mapped.directUrl.toLowerCase());
+        if (existing && (existing.closing_date || '') === (mapped.closingDate || '')) {
+          knownUnchanged++;
+        }
+      }
+
+      allItems.push(mapped);
+      addedOnPage++;
+    }
+
+    if (addedOnPage === 0) break;
+    if (page >= 2 && options?.knownMap && addedOnPage > 0 && knownUnchanged / addedOnPage >= 0.85) {
+      break;
+    }
+    if (records.length < SPPRA_DEFAULT_PAGE_SIZE) break;
+  }
+
+  return {
+    items: allItems,
+    hitlRequired: false,
+    pagesScanned
+  };
+}
+
+/**
+ * Fetches PA Published Documents (Standard Bidding Document, Corrigenda, BOQ, etc.)
+ * for a Sindh SPPRA tender by its `publishedDocumentID`.
+ */
+export async function fetchSppraPublishedDocuments(
+  publishedDocumentId: number,
+  timeoutMs: number = 15000
+): Promise<string[]> {
+  if (!Number.isFinite(publishedDocumentId) || publishedDocumentId <= 0) return [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(SPPRA_DOCS_URL, {
+      method: 'POST',
+      headers: SPPRA_PUBLIC_HEADERS,
+      signal: controller.signal,
+      body: JSON.stringify({
+        Id: publishedDocumentId,
+        loggedInUserID: 1,
+        loggedInUserOfficeID: 1
+      })
+    });
+    if (!res.ok) {
+      const err: any = new Error(`SPPRA published docs HTTP ${res.status} for pdid=${publishedDocumentId}`);
+      err.statusCode = res.status;
+      throw err;
+    }
+    const json: any = await res.json();
+    const list: SppraPublishedDocRecord[] = Array.isArray(json?.data) ? json.data : [];
+    const urls: string[] = [];
+    const seen = new Set<string>();
+    for (const item of list) {
+      const fileId = Number(item.dmS_FileID);
+      const guid = (item.dmS_FileGUID || '').trim();
+      if (!Number.isFinite(fileId) || fileId <= 0 || !guid) continue;
+      const isCorr = item.isCorrigendum === 1 || item.isCorrigendum === true;
+      const rawLabel = (item.displayName || item.documentTemplateName || '').trim();
+      const label = isCorr
+        ? (rawLabel && /corrigendum/i.test(rawLabel) ? rawLabel : 'Corrigendum')
+        : (rawLabel || 'Standard Bidding Document');
+      const u = buildSppraDownloadUrl(fileId, guid, label);
+      if (!seen.has(u)) {
+        seen.add(u);
+        urls.push(u);
+      }
+    }
+    return urls;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Downloads a Sindh SPPRA DMS file via `downloadportalfilebyguid` POST API, decodes its
+ * base64 payload into a raw `Buffer`, and attaches `contentType` and `contentDisposition`
+ * metadata compatible with `dossierManager` and `tenderAnalysis`.
+ */
+export async function downloadSppraFileBuffer(
+  rawUrl: string,
+  options?: { signal?: AbortSignal; maxBytes?: number; timeoutMs?: number }
+): Promise<Buffer> {
+  const params = parseSppraDownloadUrl(rawUrl);
+  if (!params) {
+    throw new Error(`Invalid SPPRA download URL: ${rawUrl}`);
+  }
+  if (options?.signal?.aborted) {
+    throw new Error('File download aborted');
+  }
+
+  const timeoutMs = options?.timeoutMs ?? 45000;
+  const limitBytes = options?.maxBytes ?? maxFileBytes();
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  if (options?.signal) {
+    options.signal.addEventListener('abort', onParentAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
+
+  try {
+    const res = await fetch(SPPRA_DOWNLOAD_URL, {
+      method: 'POST',
+      headers: SPPRA_PUBLIC_HEADERS,
+      signal: controller.signal,
+      body: JSON.stringify({
+        loggedInUserOfficeID: SPPRA_OFFICE_ID,
+        loggedInUserID: 1,
+        ID: params.fileId,
+        idsList: params.guid
+      })
+    });
+
+    if (!res.ok) {
+      const err: any = new Error(`SPPRA file download HTTP ${res.status}`);
+      err.statusCode = res.status;
+      throw err;
+    }
+
+    const json: any = await res.json();
+    const base64Bytes = json?.data?.bytes;
+    if (typeof base64Bytes !== 'string' || base64Bytes.length < 16) {
+      throw new Error(`SPPRA DMS returned empty file payload for file ID ${params.fileId}`);
+    }
+
+    const buf = Buffer.from(base64Bytes, 'base64');
+    if (buf.length > limitBytes) {
+      throw new Error(`File too large (${(buf.length / 1024 / 1024).toFixed(1)} MB)`);
+    }
+
+    reportNetworkOutcome('apiprd.eprocure.gov.pk', true, {
+      durationMs: Date.now() - startedAt,
+      slowThresholdMs: PASSIVE_SLOW_DOC_MS
+    });
+
+    const contentType = (json?.data?.contentType || 'application/pdf').trim();
+    const fileName = (json?.data?.fileName || '').trim();
+    (buf as any).contentType = contentType;
+    if (fileName) {
+      (buf as any).contentDisposition = `attachment; filename="${fileName.replace(/"/g, '')}"`;
+    }
+    return buf;
+  } finally {
+    clearTimeout(timer);
+    if (options?.signal) {
+      options.signal.removeEventListener('abort', onParentAbort);
+    }
+  }
+}

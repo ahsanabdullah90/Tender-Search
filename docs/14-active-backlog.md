@@ -14,7 +14,7 @@ This document tracks **active operational items and approved non-breaking featur
   - `punjab_eproc`: Primary Punjab provincial source (`https://eproc.punjab.gov.pk/ActiveTenders.aspx`, ASP.NET postback pagination bumped to `quickMaxPages: 3` / `deepMaxPages: 10`), aggregating tenders across Punjab departments and authorities centrally.
 - **Removed / Blocked Portals (`deleted_portals` in live DB; canonical entries retained in `PORTAL_DEFINITIONS` per `HEAL-7`):**
   - `kppra`: KP government portal migrated to EPADS (`kp.eprocure.gov.pk`), access-walled / timing out (`offline_broken`); archived out of active scans via `deletePortal`.
-  - `sppra`: Sindh SPPRA (`portalsindh.eprocure.gov.pk`) returns a FortiWeb WAF block (`Attack ID: 20000051`) / HTTP timeout; archived out of active scans via `deletePortal`.
+  - `sppra`: Restored Sindh SPPRA (`https://portalsindh.eprocure.gov.pk/#/`) as the sole active Sindh portal via `src/server/scrapers/sppraApi.ts` (`tier: 'http'`, direct EPADS WSO2 public JSON API + DMS PDF downloads for NIT and PA Published Documents), with Angular `<section class="card">` DOM fallback in `portalParsers.ts` and full unit/contract tests (`tests/unit/sppra-api.test.ts`).
   - `psda`: Individual Punjab authority (`psda.punjab.gov.pk/tenders`) consistently displays `"No Opening"`; Punjab tenders are covered centrally via `punjab_eproc`, so `psda` was archived via `deletePortal`.
   - `gilgit`: `gilgitbaltistan.gov.pk` lacks a dedicated public tenders board (`offline_broken`); archived via `deletePortal`.
 

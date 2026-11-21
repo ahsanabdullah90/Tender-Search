@@ -1,5 +1,5 @@
 export interface PaginationConfig {
-  kind: 'query' | 'path' | 'postback' | 'click';
+  kind: 'query' | 'path' | 'postback' | 'click' | 'api';
   param?: string;
   pathPattern?: string;
   maxPages: number;
@@ -58,15 +58,15 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     id: 'sppra',
     name: 'Sindh SPPRA (portalsindh.eprocure.gov.pk)',
     category: 'Regulatory',
-    tier: 'playwright',
+    tier: 'http',
     baseUrl: 'https://portalsindh.eprocure.gov.pk',
-    tendersUrl: 'https://portalsindh.eprocure.gov.pk',
+    tendersUrl: 'https://portalsindh.eprocure.gov.pk/#/',
     fileCode: 'SPPRA',
-    description: 'Sindh Public Procurement Authority (12,900+ live tenders with full filters)',
+    description: 'Sindh Public Procurement Regulatory Authority EPADS public portal (13,500+ live tenders via public JSON API & DMS PDFs)',
     defaultKeywords: ['masonry', 'solarization', 'curriculum', 'toner', 'infrastructure'],
     accessMode: 'public',
-    verifiedStatus: 'Working — Massive repository, public access',
-    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 2, deepMaxPages: 5 }
+    verifiedStatus: 'Working — Live SPPRA EPADS public JSON API & DMS PDF downloads',
+    pagination: { kind: 'api', maxPages: 3, quickMaxPages: 2, deepMaxPages: 6 }
   },
   {
     id: 'kppra',

@@ -12,6 +12,7 @@ import {
 } from './dossierStore.js';
 import { maxFileBytes } from './ingestBudget.js';
 import { sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError } from '../scrapers/baseScraper.js';
+import { isSppraDownloadUrl, parseSppraDownloadUrl, downloadSppraFileBuffer } from '../scrapers/sppraApi.js';
 import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from './networkMonitor.js';
 
 // Same folder the rest of the app uses (honours TENDER_DATA_DIR).
@@ -26,6 +27,16 @@ if (!fs.existsSync(DOSSIERS_ROOT)) {
  * humanizes standard URL slugs, and disambiguates generic labels with an index.
  */
 export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, index?: number): string {
+  // 0. Check for Sindh SPPRA synthetic DMS download URL (?name=...)
+  const spParams = parseSppraDownloadUrl(remoteUrl);
+  if (spParams?.label) {
+    const base = spParams.label.trim();
+    if (typeof index === 'number' && index > 1 && !base.endsWith(` ${index}`)) {
+      return `${base} ${index}`;
+    }
+    return base;
+  }
+
   try {
     const rawFilename = path.basename(remoteUrl.split('?')[0]);
 
@@ -315,6 +326,9 @@ export function fetchFileBuffer(
   options?: DownloadDossierOptions,
   useLegacyTls: boolean = false
 ): Promise<Buffer> {
+  if (isSppraDownloadUrl(url)) {
+    return downloadSppraFileBuffer(url, options);
+  }
   return new Promise((resolve, reject) => {
     if (options?.signal?.aborted) {
       return reject(new Error('File download aborted'));

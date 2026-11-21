@@ -115,6 +115,9 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–21, 2026)
+- **Sindh SPPRA Restoration via Official EPADS Public JSON API & DMS PDF Fetcher (November 21, 2026)**:
+  - Added `src/server/scrapers/sppraApi.ts` integrating the official Sindh SPPRA EPADS public WSO2 API (`getallpublictenders`, `getallpublisheddocumentdetailbypdid`, `downloadportalfilebyguid` on `apiprd.eprocure.gov.pk`) with `pageSize: 50` quick/deep pagination, SQLite early-stop, PKT timestamp normalization, PKR estimated cost metadata, and synthetic DMS download URLs seamlessly decoded by `dossierManager.ts` (`fetchFileBuffer` / `deriveDossierLabel`) and `tenderAnalysis.ts` (`fetchDocumentsForTender`).
+  - Upgraded `sppra` in `portalList.ts` from `playwright` to `http` (`tier: 'http'`, `tendersUrl: 'https://portalsindh.eprocure.gov.pk/#/'`, `pagination.kind: 'api'`), added a deterministic Angular `<section class="card">` fallback parser in `portalParsers.ts`, updated `tests/fixtures/portals/sppra/page.html`, added `tests/unit/sppra-api.test.ts`, and restored `sppra` as the sole active Sindh portal in `./data/tender_tracker.db`.
 - **Live Sidebar Queue Telemetry, Per-Tender Processing Status & Parser/Network Polish (November 20–21, 2026)**:
   - Extended `DocumentQueueCounts` / `DocumentQueueStatus` (`ingestJobsRepo.ts`, `types.ts`, `scan.routes.ts`, `crawlerEngine.ts`) with distinct tender/listing/active-processing counters (`readyTenders`, `awaitingScopeTenders`, `processing`, `processingTenders`, `activeTenderIds`), hydrated per-tender job counts (`doc_jobs_pending`, `doc_jobs_processing`, `doc_jobs_done`, `doc_jobs_failed`) in `tendersRepo.ts`, and added `reconcileStaleTenderDocFetchStatuses()` to startup/drain hygiene.
   - Connected immediate `claimDueJobs` worker broadcasts (`ingestWorker.ts`) and on-demand `getInFlightDocFetchTenderIds()` updates (`tenderAnalysis.ts`) over SSE without unnecessary `/api/tenders` reloads on discarded `awaiting_scope` batches.
