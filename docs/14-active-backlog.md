@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-19 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, Standalone Desktop Window & System Tray, and Network Health Monitor & Anti-Corruption Safeguards).
+**Last updated:** 2026-11-21 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, Standalone Desktop Window & System Tray, and Network Health Monitor & Anti-Corruption Safeguards).
 
 This document tracks **active operational items and approved non-breaking feature plans**. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 
@@ -26,7 +26,33 @@ All approved non-breaking improvement plans are implemented and moved to the Com
 
 ---
 
-## 3. Recently Completed Register Items (2026-11-11 – 2026-11-19)
+## 3. Recently Completed Register Items (2026-11-11 – 2026-11-21)
+
+- **PSDF Title Sanitization & Passive Network Threshold Tuning (`2026-11-21`):**
+  - Added `stripLiteralHtmlTags` in `src/server/scrapers/portalParsers.ts` (and `sanitizeScrapedItems`) to strip/reject HTML-encoded `<img>` icon tags from PSDF titles, removed the malformed historical row `tender-psdf-40a989667fde1421` from `./data/tender_tracker.db`, and tuned `PASSIVE_SLOW_HTML_MS` (`22s`) / `PASSIVE_WINDOW_MS` (`2m`) in `src/server/services/networkMonitor.ts` to avoid false slow-network pauses after healthy multi-page scans.
+
+- **Live Sidebar Queue Telemetry & Per-Tender Processing Status (`2026-11-20`):**
+  - Extended `DocumentQueueCounts` / `DocumentQueueStatus` (`src/server/db/repositories/ingestJobsRepo.ts`, `src/shared/types.ts`) with distinct tender/listing/active-processing counts (`readyTenders`, `awaitingScopeTenders`, `processing`, `processingTenders`, `activeTenderIds`), added `reconcileStaleTenderDocFetchStatuses()` startup/drain self-healing, and hydrated per-tender job counters (`doc_jobs_pending`, `doc_jobs_processing`, `doc_jobs_done`, `doc_jobs_failed`) in `src/server/db/repositories/tendersRepo.ts`.
+  - Connected immediate `claimDueJobs` worker heartbeats and on-demand `getInFlightDocFetchTenderIds()` updates (`ingestWorker.ts`, `tenderAnalysis.ts`, `crawlerEngine.ts`, `scan.routes.ts`) over SSE (`doc_queue_progress` vs `documents_updated`) without extra `/api/tenders` refetch noise on discarded `awaiting_scope` items.
+  - Updated `src/client/components/AppShell.tsx`, `TenderRow.tsx`, `Detail.tsx`, `InboxScreen.tsx`, `PipelineScreen.tsx`, and `App.tsx` with the live sidebar breakdown card (files, tenders, active processing, and scope queue) and unified `getTenderDocProcessingState` badges across Inbox & Pipeline rows, cards, detail headers, Saved Documents banners, and Summary empty states.
+
+- **Scanned PDF Rasterization Stability, Gemini Quota Cooldown, Lease Recovery & Tray Self-Healing (`2026-11-20`):**
+  - Fixed native `@napi-rs/canvas` + `pdfjs-dist` crash and `CanvasFillRule` error during scanned-PDF fallback in `src/server/services/localOcrService.ts` by binding native `Path2D`/`ImageData`/`DOMMatrix`/`Image` globals on `globalThis`, disabling `OffscreenCanvas`, wrapping 9-arg `ctx.drawImage(CanvasElement, ...)` via PNG-backed `Image`, and isolating per-page renders cleanly.
+  - Added per-model `429 RESOURCE_EXHAUSTED` (30m) and `503`/`504` (60s) cooldowns in `src/server/services/ocrService.ts` (`resetModelCooldownsForTests`) and passed `allowAiCrossCheck: false` in `src/server/services/ingestWorker.ts` so background document extraction runs purely locally on digital PDFs without burning API quota on transient fallbacks.
+  - Added `releaseExpiredLeases()` to `initStartupScheduler()` (`src/server/services/scheduler.ts`), bounded automatic crash recovery (up to 3 restarts per 10 minutes) in `scripts/tray-app.ps1`, and stabilized V8 coverage worker concurrency (`maxWorkers: 2` in `vitest.config.ts`).
+
+- **Streamlined Automatic Document Fetching & Queue Prioritization (`2026-11-19`):**
+  - Fixed background queue starvation in `src/server/db/repositories/ingestJobsRepo.ts` (`claimDueJobs` now prioritizes bookmarked/tracked `ready` tenders first, then open `ready` Inbox tenders by soonest `closing_date`, ahead of hidden `awaiting_scope` listings; `enqueueDocumentJobs` inspects both `label` and `url` so `/BiddingDocuments/` URLs receive `JOB_PRIORITY.primary`).
+  - Added startup queue hygiene (`pruneAlreadyCachedPendingJobs`, `markDocumentJobsDoneForUrls`, `getDocumentQueueCounts`), `DETAIL_DISCOVER_LABEL` / `isDetailPageDiscoveryUrl` auto-discovery for dedicated `epms_ppra` and `fde` detail pages, and `hasTenderExtractedText` (`src/server/db/repositories/tendersRepo.ts`).
+  - Eliminated upfront scan stalling on dated direct-PDF rows and duplicate re-scan job enqueueing in `src/server/scrapers/ingestPipeline.ts` (`needsUpfront = !item.closingDate && candidates.length > 0`, filtering already-cached `cached_dossiers` URLs on re-scan).
+  - Streamlined `fetchDocumentsForTender` (`src/server/scrapers/tenderAnalysis.ts`) with in-flight deduplication, `!forceRefresh` cache short-circuiting, stored `attachment_urls` downloading ahead of HTML detail checks, `isHtmlContent` rejection, and `document_ingest_jobs`/`doc_fetch_status` reconciliation.
+  - Upgraded `src/server/services/ingestWorker.ts` (`processDocumentQueue` per-tender-safe concurrency `3` + `drainDocumentQueue` fast Inbox drain) and `src/server/services/scheduler.ts` (`crawlerDeps.onScanFinished` post-scan kickoff + 4s startup drain), streaming live `doc_queue_progress` and `documents_updated` SSE events via `src/server/routes/scan.routes.ts`.
+  - Updated `src/client/App.tsx`, `src/client/components/AppShell.tsx`, and `src/client/components/inbox/Detail.tsx` (`hasAutoFetchableDocuments`) to auto-fetch on tender open, preserve unsaved notes on same-tender SSE refreshes, render live sidebar queue progress, and reload tenders/KPIs/corrigenda on `documents_updated`.
+
+- **Unified Canonical Dossier Naming & Corrigendum Superscript Date Parsing (`2026-11-19`):**
+  - Unified portal downloads (`dossierManager.ts`), on-demand fetches (`tenderAnalysis.ts`), and manual uploads onto `saveTenderDocument` (`src/server/services/dossierStore.ts`) using clean hash-free filenames (`{PORTAL}_{Ref_or_Title}_{DocType}-{N}{-vK}.{ext}`) capped at 100 chars on clean word boundaries.
+  - Enhanced `inferDocType` (URL path clues such as `/BiddingDocuments/`, `/BOQManual/`, `/Tenders/` + `Content-Disposition`) and added heading-based `inferDocTypeFromText` + `renameDossierToCanonical` so downloaded PDFs upgrade automatically to accurate `Corrigendum`, `Bidding-Document`, `BOQ`, `RFP`, etc. names on disk and in the UI.
+  - Added startup idempotent filename migration (`migrateDossierFilenames`), local PDF/DOCX text reclassification (`reclassifyExistingDossiersFromText`), and `recheckEarlierDeadlineReviewTenders` (`src/server/services/scheduler.ts`, `src/server/db/repositories/tendersRepo.ts`), plus superscript-spaced ordinal (`Nov 20 th, 2026`) and leading submission-time (`03:00 PM, on ...`) parsing (`src/server/scrapers/dateParser.ts`, `src/server/services/documentExtractor.ts`).
 
 - **Sidebar Accessibility Hardening, Node 22 Runtime & Repository Hygiene (`2026-11-19`):**
   - Updated `src/client/components/AppShell.tsx` (`bb87903`) per `modern-web-guidance` (`accessibility`, `motion`, `color`) with centralized polite/assertive live regions outside interactive controls, ≥24px Recheck target size, `aria-describedby` scan-button descriptions, shape-distinct network icons, `forced-colors` borders, and `motion-safe` animation gating (`tests/ui/app-shell.test.tsx`).

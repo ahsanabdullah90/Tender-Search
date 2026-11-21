@@ -14,10 +14,18 @@ import {
   setAppSetting,
   backfillExistingTenderDocumentJobs,
   requeueFailedJobs,
-  pruneOldDailyVisionCounters
+  pruneOldDailyVisionCounters,
+  DETAIL_DISCOVER_LABEL
 } from '../../src/server/db/index.js';
-import { processAndSaveTender, crawlerDeps, currentScanStatus, orderDocumentCandidates } from '../../src/server/scrapers/crawlerEngine.js';
-import { processDocumentQueue } from '../../src/server/services/ingestWorker.js';
+import {
+  processAndSaveTender,
+  crawlerDeps,
+  currentScanStatus,
+  orderDocumentCandidates,
+  addProgressListener,
+  removeProgressListener
+} from '../../src/server/scrapers/crawlerEngine.js';
+import { processDocumentQueue, drainDocumentQueue } from '../../src/server/services/ingestWorker.js';
 import { networkMonitorDeps, resetNetworkMonitorForTests, checkNetworkHealth } from '../../src/server/services/networkMonitor.js';
 import { beginScanBudget, endScanBudget } from '../../src/server/services/ingestBudget.js';
 import { findSubmissionDeadlines } from '../../src/server/services/documentExtractor.js';
@@ -737,6 +745,151 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(transientJob.attempts).toBe(0);
       expect(transientJob.status).toBe('pending');
       expect(deadJob.attempts).toBe(1);
+    });
+
+    it('re-scan skips already-cached cached_dossiers URLs and queues only new attachments', async () => {
+      const existingPdf = 'https://x.pk/uploads/2026/11/already-have.pdf';
+      const newPdf = 'https://x.pk/uploads/2026/11/corrigendum-new.pdf';
+      const future = new Date(Date.now() + 8 * DAY).toISOString();
+      const item = {
+        title: 'Supply of Rack Servers',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/tenders/rescan-dedup',
+        closingDate: future,
+        attachmentUrls: [existingPdf]
+      };
+
+      await processAndSaveTender(item, portal(), tracks);
+      const t = getAllTenders()[0];
+      serveDocuments({ [existingPdf]: noticePdf(8) });
+      await processDocumentQueue(5);
+      expect(getTenderById(t.id)?.doc_fetch_status).toBe('complete');
+
+      // Re-scan with the exact same URL: must NOT re-queue or flip status back to pending
+      await processAndSaveTender(item, portal(), tracks);
+      expect(getJobsForTender(t.id)).toHaveLength(1);
+      expect(getJobsForTender(t.id)[0].status).toBe('done');
+      expect(getTenderById(t.id)?.doc_fetch_status).toBe('complete');
+
+      // Re-scan with a newly added attachment: queues only the new URL
+      await processAndSaveTender({ ...item, attachmentUrls: [existingPdf, newPdf] }, portal(), tracks);
+      const jobs = getJobsForTender(t.id);
+      expect(jobs).toHaveLength(2);
+      expect(jobs.find(j => j.url === newPdf)?.status).toBe('pending');
+    });
+
+    it('queues epms_ppra detail-page discovery, discovers PDFs via worker, and defers transient detail errors', async () => {
+      const epmsPortal = PORTAL_DEFINITIONS.find(p => p.id === 'epms_ppra')!;
+      const detailUrl = 'https://epms.ppra.gov.pk/public/tenders/tender-details/TS0000099999E';
+      const pdfUrl = 'https://epms.ppra.gov.pk/pdf?file=dGVuZGVyL3NvbGFyLWJpZC5wZGY=';
+
+      await processAndSaveTender({
+        referenceNo: 'TS0000099999E',
+        title: 'Supply of Solar Panels and Inverters',
+        organization: 'Federal PPRA',
+        directUrl: detailUrl,
+        closingDate: new Date(Date.now() + 10 * DAY).toISOString(),
+        attachmentUrls: []
+      }, epmsPortal, tracks);
+
+      const saved = getAllTenders()[0];
+      expect(saved.doc_fetch_status).toBe('pending');
+      const queued = getJobsForTender(saved.id);
+      expect(queued).toHaveLength(1);
+      expect(queued[0].label).toBe(DETAIL_DISCOVER_LABEL);
+
+      // 1. Transient error on detail HTML defers without burning attempts
+      const htmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml').mockRejectedValueOnce(new Error('Connection timed out'));
+      const deferredReport = await processDocumentQueue(5);
+      expect(deferredReport.deferred).toBe(1);
+      expect(getJobsForTender(saved.id)[0].attempts).toBe(0);
+
+      // Reset retry window and succeed on next run
+      db.prepare(`UPDATE document_ingest_jobs SET next_retry_at = datetime('now', '-1 minute') WHERE tender_id = ?`).run(saved.id);
+      htmlSpy.mockResolvedValueOnce(`<html><body><a href="/pdf?file=dGVuZGVyL3NvbGFyLWJpZC5wZGY=">Bidding Doc</a></body></html>`);
+      const bufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockResolvedValueOnce(noticePdf(10));
+
+      const okReport = await processDocumentQueue(5);
+      expect(okReport.completed).toBe(1);
+      const after = getTenderById(saved.id)!;
+      expect(after.doc_fetch_status).toBe('complete');
+      expect(after.cached_dossiers).toHaveLength(1);
+      expect(after.attachment_urls).toContain(pdfUrl);
+      expect(bufSpy).toHaveBeenCalledWith(pdfUrl);
+    });
+
+    it('processes distinct tenders concurrently while keeping per-tender job order sequential (corrigendum before RFP)', async () => {
+      const orderByTender: string[] = [];
+      const corrUrl = 'https://x.pk/uploads/2026/11/Corrigendum-1.pdf';
+      const rfpUrl = 'https://x.pk/uploads/2026/11/RFP-Servers.pdf';
+      const otherUrl = 'https://x.pk/uploads/2026/11/Other-Laptops.pdf';
+
+      await processAndSaveTender({
+        title: 'Supply of Rack Servers Cluster',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/t/seq-1',
+        closingDate: new Date(Date.now() + 5 * DAY).toISOString(),
+        attachmentUrls: [rfpUrl, corrUrl]
+      }, portal(), tracks);
+      await processAndSaveTender({
+        title: 'Supply of Laptops Batch',
+        organization: 'PSEB',
+        directUrl: 'https://x.pk/t/seq-2',
+        closingDate: new Date(Date.now() + 6 * DAY).toISOString(),
+        attachmentUrls: [otherUrl]
+      }, portal(), tracks);
+
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId: string, url: string) => {
+        if (url === corrUrl || url === rfpUrl) orderByTender.push(url);
+        const dir = path.resolve(DOSSIERS_DIR, tenderId);
+        fs.mkdirSync(dir, { recursive: true });
+        const name = path.basename(url);
+        const buf = noticePdf(6);
+        fs.writeFileSync(path.join(dir, name), buf);
+        return { label: name, localPath: `/api/dossiers/${tenderId}/${name}`, originalUrl: url, mimeType: 'application/pdf', sha256: `sha-${name}`, sizeBytes: buf.length };
+      });
+
+      const report = await processDocumentQueue(10, 3);
+      expect(report.completed).toBe(3);
+      expect(orderByTender).toEqual([corrUrl, rfpUrl]);
+    });
+
+    it('drainDocumentQueue drains ready jobs across batches, emits documents_updated, and pauses if a scan starts (OPS-4)', async () => {
+      const events: string[] = [];
+      const listener = (_s: any, ev?: string) => { if (ev) events.push(ev); };
+      addProgressListener(listener);
+
+      try {
+        for (let i = 1; i <= 3; i++) {
+          const url = `https://x.pk/uploads/2026/11/batch-servers-${i}.pdf`;
+          await processAndSaveTender({
+            title: `Supply of Rack Servers Batch ${i}`,
+            organization: 'PSEB',
+            directUrl: `https://x.pk/t/batch-${i}`,
+            closingDate: new Date(Date.now() + (i + 2) * DAY).toISOString(),
+            attachmentUrls: [url]
+          }, portal(), tracks);
+        }
+        serveDocuments({
+          'https://x.pk/uploads/2026/11/batch-servers-1.pdf': noticePdf(3),
+          'https://x.pk/uploads/2026/11/batch-servers-2.pdf': noticePdf(4),
+          'https://x.pk/uploads/2026/11/batch-servers-3.pdf': noticePdf(5)
+        });
+
+        const drained = await drainDocumentQueue({ maxBatches: 5, batchSize: 2, concurrency: 2 });
+        expect(drained.completed).toBe(3);
+        expect(events).toContain('documents_updated');
+        expect(currentScanStatus.docQueue?.isFetching).toBe(false);
+        expect(currentScanStatus.docQueue?.readyPending).toBe(0);
+
+        // OPS-4: refuses to start draining while a scan is active
+        currentScanStatus.isScanning = true;
+        const skipped = await drainDocumentQueue();
+        expect(skipped.skipped).toBe('scan_running');
+      } finally {
+        currentScanStatus.isScanning = false;
+        removeProgressListener(listener);
+      }
     });
   });
 });

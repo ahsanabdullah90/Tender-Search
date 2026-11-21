@@ -56,12 +56,35 @@ export const CANDIDATE_MODELS = [
   'gemini-3.8-flash'
 ];
 
+const QUOTA_COOLDOWN_MS = 30 * 60 * 1000;
+const OVERLOAD_COOLDOWN_MS = 60 * 1000;
+const modelCooldownUntil = new Map<string, number>();
+
+export function resetModelCooldownsForTests(): void {
+  modelCooldownUntil.clear();
+}
+
+function isQuotaExhaustedError(err: unknown): boolean {
+  const status = (err as any)?.status ?? (err as any)?.code;
+  if (status === 429) return true;
+  const msg = String((err as any)?.message || err || '');
+  return /\b429\b|RESOURCE_EXHAUSTED|quota\s+exceeded/i.test(msg);
+}
+
+function isTransientOverloadError(err: unknown): boolean {
+  const status = (err as any)?.status ?? (err as any)?.code;
+  if (status === 503 || status === 504) return true;
+  const msg = String((err as any)?.message || err || '');
+  return /\b50[34]\b|UNAVAILABLE|DEADLINE_EXCEEDED|Service Unavailable/i.test(msg);
+}
+
 let cachedClient: { key: string; client: GoogleGenAI } | null = null;
 
 export function getAiClient(apiKey: string): GoogleGenAI {
   if (cachedClient && cachedClient.key === apiKey) {
     return cachedClient.client;
   }
+  modelCooldownUntil.clear();
   const client = new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -167,8 +190,16 @@ async function generateWithFallback(
   ai: GoogleGenAI,
   params: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>
 ): Promise<string | null> {
+  const now = Date.now();
+  const activeModels = CANDIDATE_MODELS.filter(m => (modelCooldownUntil.get(m) ?? 0) <= now);
+  if (activeModels.length === 0) {
+    console.warn('[Gemini] All candidate models are currently in quota/overload cooldown; skipping request.');
+    return null;
+  }
+
   let lastErr: unknown = null;
-  for (const model of CANDIDATE_MODELS) {
+  for (let i = 0; i < activeModels.length; i++) {
+    const model = activeModels[i];
     try {
       const response = await ai.models.generateContent({
         ...params,
@@ -179,10 +210,18 @@ async function generateWithFallback(
       }
     } catch (err: any) {
       lastErr = err;
-      console.warn(`[Gemini] Model ${model} generation attempt failed:`, err?.message || err);
+      if (isQuotaExhaustedError(err)) {
+        modelCooldownUntil.set(model, Date.now() + QUOTA_COOLDOWN_MS);
+        console.warn(`[Gemini] Model ${model} quota exhausted (429); cooling down for 30m:`, err?.message || err);
+      } else if (isTransientOverloadError(err)) {
+        modelCooldownUntil.set(model, Date.now() + OVERLOAD_COOLDOWN_MS);
+        console.warn(`[Gemini] Model ${model} overloaded (503/504); cooling down for 60s:`, err?.message || err);
+      } else {
+        console.warn(`[Gemini] Model ${model} generation attempt failed:`, err?.message || err);
+      }
       // Brief pause before trying fallback model if rate-limited or experiencing high demand
-      if (model !== CANDIDATE_MODELS[CANDIDATE_MODELS.length - 1]) {
-        await new Promise(resolve => setTimeout(resolve, 800));
+      if (i < activeModels.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 250));
       }
     }
   }

@@ -13,7 +13,7 @@ import {
   TriangleAlert,
   Upload
 } from 'lucide-react';
-import { Tender, CorrigendumLog } from '../../../shared/types';
+import { Tender, CorrigendumLog, DocumentQueueStatus } from '../../../shared/types';
 import { Button, Chip } from '../../ui';
 import { DeleteTenderModal } from './DeleteTenderModal';
 import { HighlightedDescription } from './HighlightedDescription';
@@ -136,9 +136,116 @@ export function SectionTitle({ children }: { children: React.ReactNode }) {
 
 export const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
 
+export interface TenderDocProcessingState {
+  kind: 'processing' | 'queued' | 'failed' | 'complete' | 'listing_only';
+  savedCount: number;
+  pendingCount: number;
+  processingCount: number;
+  failedCount: number;
+  shortLabel: string;
+  bannerTitle: string;
+  bannerDetail: string;
+  tone: 'accent' | 'warn' | 'ok' | 'neutral';
+}
+
+export function getTenderDocProcessingState(
+  t: Tender,
+  docQueue?: DocumentQueueStatus,
+  isFetchingLocal: boolean = false
+): TenderDocProcessingState {
+  const savedCount = asList(t.cached_dossiers).length;
+  const processingCount = t.doc_jobs_processing ?? 0;
+  const pendingCount = t.doc_jobs_pending ?? 0;
+  const failedCount = t.doc_jobs_failed ?? 0;
+  const inActiveQueue = Boolean(docQueue?.activeTenderIds?.includes(t.id));
+  const isProcessing = Boolean(isFetchingLocal || processingCount > 0 || inActiveQueue);
+
+  if (isProcessing) {
+    return {
+      kind: 'processing',
+      savedCount,
+      pendingCount,
+      processingCount,
+      failedCount,
+      shortLabel: savedCount > 0 ? 'Processing more…' : 'Processing…',
+      bannerTitle: processingCount > 0 ? `Actively processing ${processingCount} file(s)…` : 'Downloading & extracting documents…',
+      bannerDetail: pendingCount > 0
+        ? `${pendingCount} additional file(s) queued next.`
+        : savedCount > 0
+          ? `${savedCount} document(s) already saved; updating metadata and text index.`
+          : 'Reading portal documents, dates, and scope right now.',
+      tone: 'accent'
+    };
+  }
+
+  if (pendingCount > 0 || t.doc_fetch_status === 'pending') {
+    const q = pendingCount > 0 ? pendingCount : 1;
+    return {
+      kind: 'queued',
+      savedCount,
+      pendingCount: q,
+      processingCount,
+      failedCount,
+      shortLabel: savedCount > 0 ? `+${q} queued` : `Queued (${q})`,
+      bannerTitle: pendingCount > 0 ? `Queued for processing (${pendingCount} file(s))` : 'Queued for background processing',
+      bannerDetail: savedCount > 0
+        ? `${savedCount} document(s) saved; remaining file(s) will process automatically or on Fetch Documents.`
+        : 'Waiting in the background document queue — click Fetch Documents to pull now.',
+      tone: 'accent'
+    };
+  }
+
+  if (t.doc_fetch_status === 'failed' || t.doc_fetch_status === 'partial' || (savedCount === 0 && failedCount > 0)) {
+    return {
+      kind: 'failed',
+      savedCount,
+      pendingCount,
+      processingCount,
+      failedCount,
+      shortLabel: 'Retry docs',
+      bannerTitle: t.doc_fetch_status === 'partial' || savedCount > 0
+        ? `Partial download (${savedCount} saved, ${failedCount || 1} failed)`
+        : 'Document download failed',
+      bannerDetail: 'Some portal files could not be downloaded. Click Retry document fetch to try again.',
+      tone: 'warn'
+    };
+  }
+
+  if (savedCount > 0 || t.doc_fetch_status === 'complete') {
+    return {
+      kind: 'complete',
+      savedCount,
+      pendingCount,
+      processingCount,
+      failedCount,
+      shortLabel: savedCount > 0 ? `${savedCount} saved` : 'Processed',
+      bannerTitle: savedCount > 0
+        ? `Processed · ${savedCount} ${savedCount === 1 ? 'document' : 'documents'} saved`
+        : 'Processed · Portal checked',
+      bannerDetail: savedCount > 0
+        ? 'Files downloaded and indexed for deadline and keyword matching.'
+        : 'Portal page was checked; no pending document jobs remain.',
+      tone: 'ok'
+    };
+  }
+
+  return {
+    kind: 'listing_only',
+    savedCount,
+    pendingCount,
+    processingCount,
+    failedCount,
+    shortLabel: 'Listing only',
+    bannerTitle: 'Portal listing only · No downloadable files provided',
+    bannerDetail: 'This notice did not publish PDF/Word attachments on the portal. Click Fetch Documents to re-check or upload a notice manually.',
+    tone: 'neutral'
+  };
+}
+
 export interface DetailProps {
   tender: Tender;
   corrigenda: CorrigendumLog[];
+  docQueue?: DocumentQueueStatus;
   onTrack?: () => void;
   onPass?: () => void;
   stageActions?: React.ReactNode;
@@ -150,10 +257,23 @@ export interface DetailProps {
   onTenderDeleted?: (tenderId: string) => void;
 }
 
+/** True when an opened tender has no saved files yet, is not Passed/failed, and has a fetchable attachment or detail page. */
+export function hasAutoFetchableDocuments(t: Tender): boolean {
+  if (asList(t.cached_dossiers).length > 0) return false;
+  if (t.pipeline_status === 'Passed' || t.doc_fetch_status === 'failed') return false;
+  const attUrls = asList<string>(t.attachment_urls);
+  if (attUrls.some(u => typeof u === 'string' && /^https?:\/\//i.test(u))) return true;
+  const directUrl = t.direct_url || '';
+  if (/epms\.ppra\.gov\.pk\/public\/tenders\/tender-details\//i.test(directUrl)) return true;
+  if (/fde\.gov\.pk\/download\/[^/?#]+/i.test(directUrl) && !/\/download-category\//i.test(directUrl)) return true;
+  return false;
+}
+
 /** Detail Pane exported for both Inbox and Pipeline */
 export function Detail({
   tender,
   corrigenda,
+  docQueue,
   onTrack,
   onPass,
   stageActions,
@@ -166,8 +286,12 @@ export function Detail({
 }: DetailProps) {
   const [currentTender, setCurrentTender] = useState<Tender>(tender);
   const [notes, setNotes] = useState(tender.status_notes || '');
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
   const [noteState, setNoteState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
   const lastSavedNotesRef = useRef(tender.status_notes || '');
+  const prevTenderIdRef = useRef<string>(tender.id);
+  const autoFetchedIdsRef = useRef<Set<string>>(new Set());
   const [analyzing, setAnalyzing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [fetchingDocs, setFetchingDocs] = useState(false);
@@ -192,23 +316,71 @@ export function Detail({
 
   useEffect(() => {
     setCurrentTender(tender);
-    setNotes(tender.status_notes || '');
-    lastSavedNotesRef.current = tender.status_notes || '';
-    setNoteState('idle');
-    setAiStatusMessage(null);
-    setEditingDetails(false);
-    setPreviewPdfIndex(null);
-    setCopiedSummary(false);
-    setEditForm({
-      title: tender.title || '',
-      organization: tender.organization || '',
-      reference_no: tender.reference_no || '',
-      closing_date: tender.closing_date ? tender.closing_date.slice(0, 10) : '',
-      estimated_value: tender.estimated_value || '',
-      direct_url: tender.direct_url || '',
-      description: tender.description || '',
-    });
+    if (prevTenderIdRef.current !== tender.id) {
+      prevTenderIdRef.current = tender.id;
+      setNotes(tender.status_notes || '');
+      lastSavedNotesRef.current = tender.status_notes || '';
+      setNoteState('idle');
+      setAiStatusMessage(null);
+      setEditingDetails(false);
+      setPreviewPdfIndex(null);
+      setCopiedSummary(false);
+      setEditForm({
+        title: tender.title || '',
+        organization: tender.organization || '',
+        reference_no: tender.reference_no || '',
+        closing_date: tender.closing_date ? tender.closing_date.slice(0, 10) : '',
+        estimated_value: tender.estimated_value || '',
+        direct_url: tender.direct_url || '',
+        description: tender.description || '',
+      });
+    } else if (notesRef.current === lastSavedNotesRef.current) {
+      // Same tender refreshed via SSE: preserve unsaved operator notes while keeping clean sync
+      setNotes(tender.status_notes || '');
+      lastSavedNotesRef.current = tender.status_notes || '';
+    }
   }, [tender]);
+
+  useEffect(() => {
+    if (!hasAutoFetchableDocuments(tender) || autoFetchedIdsRef.current.has(tender.id)) {
+      return;
+    }
+    autoFetchedIdsRef.current.add(tender.id);
+    const controller = new AbortController();
+    setFetchingDocs(true);
+
+    void fetch(`/api/tenders/${tender.id}/fetch-documents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ forceRefresh: false }),
+      signal: controller.signal
+    })
+      .then(async res => {
+        if (!res.ok || controller.signal.aborted) return;
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+        if (data.expired) {
+          setAiStatusMessage({ text: data.message || 'Deadline has passed: tender removed from the Inbox.' });
+          onTenderDeleted?.(tender.id);
+        } else if (data.tender) {
+          setCurrentTender(data.tender);
+          onTenderUpdated?.(data.tender);
+        }
+      })
+      .catch(() => {
+        // Best-effort auto-fetch on view; operator can still retry via Fetch Documents
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setFetchingDocs(false);
+        }
+      });
+
+    return () => {
+      controller.abort();
+      setFetchingDocs(false);
+    };
+  }, [tender.id]);
 
   const keywords = asList<string>(currentTender.matched_keywords);
   const files = asList<{ label?: string; localPath: string; mimeType?: string; docType?: string; sizeBytes?: number }>(currentTender.cached_dossiers);
@@ -458,6 +630,7 @@ export function Detail({
   };
 
   const provenance = deadlineProvenance(currentTender);
+  const docState = getTenderDocProcessingState(currentTender, docQueue, fetchingDocs);
 
   const confirmDeleteTender = async (tenderId: string) => {
     const res = await fetch(`/api/tenders/${tenderId}`, { method: 'DELETE' });
@@ -550,15 +723,20 @@ export function Detail({
             onClick={handleFetchDocuments}
             disabled={fetchingDocs}
             className="gap-1.5"
-            title="Download documents directly from this portal page"
+            title="Download or refresh documents from this portal now"
           >
-            <Download className={`h-4 w-4 ${fetchingDocs ? 'animate-bounce text-accent' : ''}`} />
+            <Download aria-hidden="true" className={`h-4 w-4 ${fetchingDocs ? 'motion-safe:animate-bounce text-accent' : ''}`} />
             {fetchingDocs ? 'Fetching docs…' : 'Fetch Documents'}
           </Button>
 
-          {currentTender.doc_fetch_status === 'pending' && (
-            <span className="inline-flex items-center gap-1.5 text-xs text-ink-muted" role="status">
-              <RotateCw className="h-3.5 w-3.5 animate-spin" /> Fetching documents in the background…
+          {docState.kind === 'processing' && !fetchingDocs && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-accent">
+              <RotateCw aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" /> {docState.bannerTitle}
+            </span>
+          )}
+          {docState.kind === 'queued' && !fetchingDocs && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
+              <RotateCw aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" /> Fetching documents in the background…
             </span>
           )}
           {(currentTender.doc_fetch_status === 'failed' || currentTender.doc_fetch_status === 'partial') && (
@@ -766,6 +944,10 @@ export function Detail({
             </div>
           ) : currentTender.description && currentTender.description.trim() ? (
             <HighlightedDescription text={currentTender.description} keywords={keywords} />
+          ) : docState.kind === 'processing' || docState.kind === 'queued' ? (
+            <div className="rounded-lg border border-dashed border-line bg-surface-2 px-4 py-3 text-sm text-ink-muted">
+              Documents for this tender are currently {docState.kind === 'processing' ? 'being processed' : 'queued for background extraction'}. Summary and scope details will appear automatically once extracted, or click <span className="font-semibold text-ink">Fetch Documents</span> to run now.
+            </div>
           ) : (
             <div className="rounded-lg border border-dashed border-line bg-surface-2 px-4 py-3 text-sm text-ink-muted">
               No detailed scope was provided on the portal listing page. Click <span className="font-semibold text-ink">Extract with AI</span> to analyze the portal page, or upload a tender notice image/PDF below.
@@ -870,8 +1052,45 @@ export function Detail({
               </Button>
             </div>
           </div>
+          <div
+            data-testid="tender-doc-status"
+            className={`mb-2.5 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
+              docState.tone === 'accent'
+                ? 'border-accent/30 bg-accent-soft text-accent'
+                : docState.tone === 'warn'
+                  ? 'border-warn/30 bg-warn-soft text-warn'
+                  : docState.tone === 'ok'
+                    ? 'border-ok/30 bg-ok-soft text-ok'
+                    : 'border-line bg-surface-2 text-ink-muted'
+            }`}
+          >
+            {docState.kind === 'processing' && (
+              <>
+                <RotateCw aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0 motion-safe:animate-spin" />
+                <progress className="sr-only" aria-label={docState.bannerTitle} />
+              </>
+            )}
+            <div className="min-w-0">
+              <div className="font-semibold">{docState.bannerTitle}</div>
+              <div className="mt-0.5 text-[11px] opacity-90">{docState.bannerDetail}</div>
+            </div>
+          </div>
           {files.length === 0 ? (
-            <p className="text-ink-muted">No documents saved yet. They are fetched during scans, or you can upload a tender image/PDF manually.</p>
+            fetchingDocs ? (
+              <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-sm text-ink-muted">
+                <RotateCw aria-hidden="true" className="h-4 w-4 shrink-0 motion-safe:animate-spin text-accent" />
+                <span>Downloading documents from portal…</span>
+                <progress className="sr-only" aria-label="Downloading tender documents" />
+              </div>
+            ) : docState.kind === 'processing' || docState.kind === 'queued' ? (
+              <p className="text-ink-muted">
+                Queued for automatic download — documents will appear here shortly, or click Fetch Documents to pull them now.
+              </p>
+            ) : (
+              <p className="text-ink-muted">
+                No documents saved yet. Click Fetch Documents to check the portal now, or upload a tender image/PDF manually.
+              </p>
+            )
           ) : (
             <div className="space-y-3">
               {files.map((file, i) => {

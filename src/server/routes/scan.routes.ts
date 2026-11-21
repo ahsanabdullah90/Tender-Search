@@ -1,11 +1,14 @@
 import { Router } from 'express';
 import { getAppSetting } from '../db/repositories/systemRepo.js';
-import { ScanDepth } from '../../shared/types.js';
+import { getDocumentQueueCounts } from '../db/index.js';
+import { ScanDepth, ScanStatus } from '../../shared/types.js';
 import {
   startCrawlerScan,
   currentScanStatus,
   addProgressListener,
-  removeProgressListener
+  removeProgressListener,
+  mergeLiveDocQueueStatus,
+  ScanProgressEventType
 } from '../scrapers/crawlerEngine.js';
 
 export const scanRouteDeps = {
@@ -14,6 +17,38 @@ export const scanRouteDeps = {
 };
 
 export const scanRouter = Router();
+
+function withLiveDocQueue(status: ScanStatus): ScanStatus {
+  let counts = {
+    readyPending: 0,
+    readyTenders: 0,
+    awaitingScopePending: 0,
+    awaitingScopeTenders: 0,
+    totalPending: 0,
+    processing: 0,
+    processingTenders: 0,
+    activeTenderIds: [] as string[]
+  };
+  try {
+    counts = getDocumentQueueCounts();
+  } catch {}
+  return {
+    ...status,
+    docQueue: mergeLiveDocQueueStatus({
+      isFetching: Boolean(status.docQueue?.isFetching || counts.processing > 0),
+      readyPending: counts.readyPending,
+      readyTenders: counts.readyTenders,
+      awaitingScopePending: counts.awaitingScopePending,
+      awaitingScopeTenders: counts.awaitingScopeTenders,
+      totalPending: counts.totalPending,
+      processing: counts.processing,
+      processingTenders: counts.processingTenders,
+      activeTenderIds: counts.activeTenderIds,
+      completedInRun: status.docQueue?.completedInRun ?? 0,
+      lastUpdatedAt: status.docQueue?.lastUpdatedAt ?? null
+    })
+  };
+}
 
 scanRouter.post('/start', async (req, res) => {
   const portalId = req.body?.portalId || (req.query?.portalId as string | undefined);
@@ -25,7 +60,7 @@ scanRouter.post('/start', async (req, res) => {
 
 scanRouter.get('/status', (_req, res) => {
   const fullScanAt = getAppSetting('last_full_scan_at') || null;
-  res.json({ ...currentScanStatus, lastFullScanTimestamp: fullScanAt });
+  res.json(withLiveDocQueue({ ...currentScanStatus, lastFullScanTimestamp: fullScanAt }));
 });
 
 const handleScanSse = (req: any, res: any) => {
@@ -34,11 +69,11 @@ const handleScanSse = (req: any, res: any) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const sendStatus = (status: any) => {
-    res.write(`data: ${JSON.stringify({ type: 'scan_progress', status })}\n\n`);
+  const sendStatus = (status: ScanStatus, eventType: ScanProgressEventType = 'scan_progress') => {
+    res.write(`data: ${JSON.stringify({ type: eventType, status: withLiveDocQueue(status) })}\n\n`);
   };
 
-  sendStatus(currentScanStatus);
+  sendStatus(currentScanStatus, 'scan_progress');
   addProgressListener(sendStatus);
 
   req.on('close', () => {

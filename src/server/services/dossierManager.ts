@@ -1,10 +1,15 @@
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import https from 'https';
 import http from 'http';
 import { CachedDossier } from '../../shared/types.js';
 import { DOSSIERS_DIR, getTenderById } from '../db/index.js';
+import {
+  formatDocTypeDisplayLabel,
+  getPortalFileCode,
+  inferDocType,
+  saveTenderDocument
+} from './dossierStore.js';
 import { maxFileBytes } from './ingestBudget.js';
 import { sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError } from '../scrapers/baseScraper.js';
 import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from './networkMonitor.js';
@@ -73,8 +78,19 @@ export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, in
     }
   } catch {}
 
-  const base = fallbackLabel && fallbackLabel.trim() ? fallbackLabel.trim() : 'Bidding Document';
-  if (typeof index === 'number' && index > 1) {
+  const urlInferred = inferDocType('', remoteUrl);
+  const urlFallback = urlInferred !== 'other' ? formatDocTypeDisplayLabel(urlInferred) : 'Bidding Document';
+  const isNoisyOrGeneric =
+    !fallbackLabel ||
+    !fallbackLabel.trim() ||
+    /_Doc(\s+\d+)?$/i.test(fallbackLabel.trim()) ||
+    /^(bidding document|tender document|document|notice|tender notice|tender notice image)(\s+\d+)?$/i.test(
+      fallbackLabel.trim()
+    );
+  const base = isNoisyOrGeneric
+    ? (fallbackLabel && /^(tender notice image)$/i.test(fallbackLabel.trim()) ? fallbackLabel.trim() : urlFallback)
+    : fallbackLabel.trim();
+  if (typeof index === 'number' && index > 1 && !base.endsWith(` ${index}`)) {
     return `${base} ${index}`;
   }
   return base;
@@ -85,6 +101,11 @@ export interface DownloadDossierOptions {
   maxBytes?: number;
   timeoutMs?: number;
   onError?: (err: Error, meta: { isTransientNetwork: boolean }) => void;
+  tenderMeta?: {
+    portalId?: string | null;
+    referenceNo?: string | null;
+    title?: string | null;
+  };
 }
 
 export function isHtmlContent(buffer: Buffer, contentTypeHeader?: string): boolean {
@@ -165,11 +186,13 @@ export async function downloadAndCacheDossier(
   docIndex?: number,
   options?: DownloadDossierOptions
 ): Promise<CachedDossier | null> {
-  const tenderDir = path.resolve(DOSSIERS_ROOT, tenderId);
-
-  // Derive smart label if passed label is generic or empty
+  // Derive smart label if passed label is generic, empty, or legacy *_Doc fallback
   let effectiveLabel = label?.trim() || 'Bidding Document';
-  if (!label || /^(bidding document|tender document|document|notice|tender notice image)$/i.test(label.trim())) {
+  if (
+    !label ||
+    /_Doc(\s+\d+)?$/i.test(label.trim()) ||
+    /^(bidding document|tender document|document|notice|tender notice|tender notice image)(\s+\d+)?$/i.test(label.trim())
+  ) {
     effectiveLabel = deriveDossierLabel(remoteUrl, label, docIndex);
   }
 
@@ -194,80 +217,41 @@ export async function downloadAndCacheDossier(
       return null;
     }
 
-    if (!fs.existsSync(tenderDir)) {
-      fs.mkdirSync(tenderDir, { recursive: true });
-    }
-    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-
     // Extension is chosen strictly from magic bytes, Content-Type, or URL (never the label) (B4)
     const { ext, mimeType } = detectExtensionAndMime(buffer, ctHeader, remoteUrl);
+    const cdHeader = (buffer as any)?.contentDisposition as string | undefined;
 
-    // Build base name from effectiveLabel without taking extension from label
-    const cleanBase = effectiveLabel.replace(/\.[a-zA-Z0-9]{2,5}$/i, '').replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'document';
-    let filename = `${cleanBase}${ext}`;
-    let finalPath = path.resolve(tenderDir, filename);
-    let finalLabel = effectiveLabel;
-
-    if (fs.existsSync(finalPath)) {
-      const existingBuffer = fs.readFileSync(finalPath);
-      const existingHash = crypto.createHash('sha256').update(existingBuffer).digest('hex');
-      if (existingHash !== hash) {
-        // Only mark (Updated) when the SAME URL returns different bytes (B4)
-        let isSameUrl = false;
-        try {
-          const t = getTenderById(tenderId);
-          if (t && Array.isArray(t.cached_dossiers)) {
-            const match = t.cached_dossiers.find(d => d.originalUrl === remoteUrl);
-            if (match && match.sha256 !== hash) {
-              isSameUrl = true;
-            }
-          } else if (!t) {
-            isSameUrl = true;
-          }
-        } catch {
-          isSameUrl = true;
-        }
-
-        if (isSameUrl) {
-          filename = `${cleanBase}_v2_${Date.now()}${ext}`;
-          finalPath = path.resolve(tenderDir, filename);
-          if (!finalLabel.includes('Updated')) {
-            finalLabel = `${finalLabel} (Updated)`;
-          }
-        } else {
-          // Different URL collision: disambiguate with index, no "(Updated)"
-          let counter = 2;
-          while (fs.existsSync(path.resolve(tenderDir, `${cleanBase}_${counter}${ext}`))) {
-            counter++;
-          }
-          filename = `${cleanBase}_${counter}${ext}`;
-          finalPath = path.resolve(tenderDir, filename);
-          if (!finalLabel.includes(String(counter))) {
-            finalLabel = `${finalLabel} ${counter}`;
-          }
-        }
-      }
-    }
-
-    const tmpPath = `${finalPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-    fs.writeFileSync(tmpPath, buffer);
+    let tender: ReturnType<typeof getTenderById> | undefined;
     try {
-      fs.renameSync(tmpPath, finalPath);
-    } catch (renameErr) {
-      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
-      throw renameErr;
-    }
+      tender = getTenderById(tenderId);
+    } catch {}
 
-    const webUrl = `/api/dossiers/${encodeURIComponent(tenderId)}/${encodeURIComponent(filename)}`;
+    const portalId = tender?.portal_id ?? options?.tenderMeta?.portalId ?? null;
+    const referenceNo = tender?.reference_no ?? options?.tenderMeta?.referenceNo ?? null;
+    const title = tender?.title ?? options?.tenderMeta?.title ?? null;
 
-    return {
-      label: finalLabel,
-      localPath: webUrl,
+    let remoteBasename: string | undefined;
+    try {
+      const candidateName = path.basename(new URL(remoteUrl).pathname);
+      if (candidateName && candidateName !== '/' && !/^download$/i.test(candidateName)) {
+        remoteBasename = decodeURIComponent(candidateName);
+      }
+    } catch {}
+
+    return saveTenderDocument(tenderId, buffer, {
+      portalCode: portalId ? getPortalFileCode(portalId) : undefined,
+      referenceNo,
+      title,
+      label: effectiveLabel,
       originalUrl: remoteUrl,
+      originalName: remoteBasename,
+      contentDisposition: cdHeader,
+      extension: ext,
       mimeType,
-      sha256: hash,
-      sizeBytes: buffer.length
-    };
+      index: docIndex,
+      existingDossiers: Array.isArray(tender?.cached_dossiers) ? tender.cached_dossiers : undefined,
+      source: 'portal_scrape'
+    });
   } catch (err) {
     const errObj = err instanceof Error ? err : new Error(String(err));
     const transient = isTransientNetworkError(errObj);
@@ -290,39 +274,37 @@ export function saveManualDossier(
   label?: string,
   explicitMimeType?: string
 ): CachedDossier {
-  const tenderDir = path.resolve(DOSSIERS_ROOT, tenderId);
-  if (!fs.existsSync(tenderDir)) {
-    fs.mkdirSync(tenderDir, { recursive: true });
-  }
+  let tender: ReturnType<typeof getTenderById> | undefined;
+  try {
+    tender = getTenderById(tenderId);
+  } catch {}
 
-  let safeFilename = (originalFilename || 'attachment.png').replace(/[^a-zA-Z0-9._-]/g, '_');
-  if (!safeFilename.includes('.')) {
-    const ext = explicitMimeType === 'application/pdf' ? '.pdf' : explicitMimeType === 'image/png' ? '.png' : '.jpg';
-    safeFilename += ext;
-  }
+  const rawExt = path.extname(originalFilename || '');
+  const ext =
+    rawExt ||
+    (explicitMimeType === 'application/pdf'
+      ? '.pdf'
+      : explicitMimeType === 'image/png'
+        ? '.png'
+        : explicitMimeType === 'image/webp'
+          ? '.webp'
+          : '.jpg');
 
-  let finalPath = path.resolve(tenderDir, safeFilename);
-  const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-
-  if (fs.existsSync(finalPath)) {
-    const ext = path.extname(safeFilename);
-    const base = path.basename(safeFilename, ext);
-    safeFilename = `${base}_${Date.now()}${ext}`;
-    finalPath = path.resolve(tenderDir, safeFilename);
-  }
-
-  fs.writeFileSync(finalPath, buffer);
-
-  const mimeType = explicitMimeType || getMimeType(safeFilename);
-  const webUrl = `/api/dossiers/${encodeURIComponent(tenderId)}/${encodeURIComponent(safeFilename)}`;
+  const doc = saveTenderDocument(tenderId, buffer, {
+    portalCode: tender?.portal_id ? getPortalFileCode(tender.portal_id) : undefined,
+    referenceNo: tender?.reference_no ?? null,
+    title: tender?.title ?? null,
+    label: label?.trim(),
+    originalName: originalFilename || `attachment${ext}`,
+    extension: ext,
+    mimeType: explicitMimeType,
+    existingDossiers: Array.isArray(tender?.cached_dossiers) ? tender.cached_dossiers : undefined,
+    source: 'manual_upload'
+  });
 
   return {
-    label: label?.trim() || path.basename(safeFilename, path.extname(safeFilename)).replace(/[_-]+/g, ' '),
-    localPath: webUrl,
-    originalUrl: webUrl,
-    mimeType,
-    sha256: hash,
-    sizeBytes: buffer.length
+    ...doc,
+    originalUrl: doc.originalUrl || doc.localPath
   };
 }
 

@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db, initDatabase, getPortalHealthList, updatePortalHealth, setAppSetting } from '../../src/server/db/index.js';
 import { updateDigestSettings } from '../../src/server/db/repositories/systemRepo.js';
-import { initStartupScheduler, stopStartupScheduler, schedulerDeps, maybeDispatchDailyDigest, getPktDateKey } from '../../src/server/services/scheduler.js';
+import {
+  initStartupScheduler,
+  stopStartupScheduler,
+  schedulerDeps,
+  maybeDispatchDailyDigest,
+  getPktDateKey,
+  recheckEarlierDeadlineReviewTenders
+} from '../../src/server/services/scheduler.js';
 import {
   networkMonitorDeps,
   resetNetworkMonitorForTests,
@@ -13,19 +20,23 @@ import {
 describe('scheduler and startup watchdog', () => {
   let originalScan: any;
   let originalBackup: any;
+  let originalReclassify: any;
 
   beforeEach(() => {
     initDatabase();
     originalScan = schedulerDeps.startCrawlerScan;
     originalBackup = schedulerDeps.backupDatabase;
+    originalReclassify = schedulerDeps.reclassifyExistingDossiersFromText;
     schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({ isScanning: false });
     schedulerDeps.backupDatabase = vi.fn().mockResolvedValue({ success: true, skipped: true });
+    schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
   });
 
   afterEach(() => {
     stopStartupScheduler();
     schedulerDeps.startCrawlerScan = originalScan;
     schedulerDeps.backupDatabase = originalBackup;
+    schedulerDeps.reclassifyExistingDossiersFromText = originalReclassify;
     resetNetworkMonitorForTests();
   });
 
@@ -268,6 +279,72 @@ describe('scheduler and startup watchdog', () => {
       } finally {
         schedulerDeps.sendDigestWebhook = origSend;
       }
+    });
+
+    it('wires crawlerDeps.onScanFinished to schedulerDeps.drainDocumentQueue and cleans up on stopStartupScheduler', async () => {
+      const { crawlerDeps } = await import('../../src/server/scrapers/crawlerEngine.js');
+      const origDrain = schedulerDeps.drainDocumentQueue;
+      const drainMock = vi.fn().mockResolvedValue({ claimed: 0, completed: 0, failed: 0, deferred: 0, expired: 0 });
+      schedulerDeps.drainDocumentQueue = drainMock;
+
+      try {
+        setAppSetting('last_full_scan_at', new Date().toISOString());
+        initStartupScheduler();
+        expect(typeof crawlerDeps.onScanFinished).toBe('function');
+        crawlerDeps.onScanFinished?.();
+        expect(drainMock).toHaveBeenCalledTimes(1);
+
+        stopStartupScheduler();
+        expect(crawlerDeps.onScanFinished).toBeNull();
+      } finally {
+        schedulerDeps.drainDocumentQueue = origDrain;
+      }
+    });
+
+    it('recheckEarlierDeadlineReviewTenders restores PEIMA extended deadline and clears false review flag', () => {
+      db.prepare(`
+        INSERT INTO tenders (
+          id, canonical_id, portal_id, portal_name, title, organization, direct_url,
+          closing_date, closing_date_formatted, deadline_source, deadline_confidence,
+          needs_review, review_reason, extracted_text, pipeline_status, ingestion_status
+        ) VALUES (
+          't-peima-review', 't-peima-review', 'punjab_eproc', 'Punjab PPRA',
+          'Rehabilitation Of Dangerous PSSP School Buildings Under PEIMA', 'SED', 'https://eproc.punjab.gov.pk/detail/1',
+          '2026-11-12T06:00:00.000Z', '12 Nov 2026, 11:00 AM PKT', 'corrigendum_doc', 'high',
+          1, 'deadline_moved_earlier: 20 Nov 2026, 02:00 PM PKT -> 12 Nov 2026, 11:00 AM PKT',
+          'AMENDMENT NO-02 Invitation for e-Bids Submission Date and Time (12-11-26, 11:00 AM) - The bid submission date is extended - Bid Submission Date and Time 03:00 PM, on Nov 20 th, 2026 (Date).',
+          'New Opportunity', 'ready'
+        )
+      `).run();
+
+      const resolved = recheckEarlierDeadlineReviewTenders();
+      expect(resolved).toBe(1);
+
+      const updated = db.prepare(`SELECT closing_date, closing_date_formatted, needs_review, review_reason FROM tenders WHERE id = 't-peima-review'`).get() as any;
+      expect(updated.closing_date).toBe('2026-11-20T10:00:00.000Z');
+      expect(updated.closing_date_formatted).toContain('20 Nov 2026');
+      expect(updated.needs_review).toBe(0);
+      expect(updated.review_reason).toBeNull();
+    });
+
+    it('releases expired processing document leases back to pending on initStartupScheduler', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, title, organization, direct_url, pipeline_status, ingestion_status)
+        VALUES ('t-lease-rec', 't-lease-rec', 'punjab_eproc', 'Punjab PPRA', 'Solar Works', 'SED', 'https://eproc.punjab.gov.pk/lease/1', 'New Opportunity', 'ready')
+      `).run();
+
+      const expiredLease = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      db.prepare(`
+        INSERT INTO document_ingest_jobs (id, tender_id, url, label, priority, status, attempts, max_attempts, lease_until)
+        VALUES ('job-lease-1', 't-lease-rec', 'https://eproc.punjab.gov.pk/doc1.pdf', 'Tender Notice', 100, 'processing', 1, 3, ?)
+      `).run(expiredLease);
+
+      setAppSetting('last_full_scan_at', new Date().toISOString());
+      initStartupScheduler();
+
+      const job = db.prepare(`SELECT status, lease_until FROM document_ingest_jobs WHERE id = 'job-lease-1'`).get() as any;
+      expect(job.status).toBe('pending');
+      expect(job.lease_until).toBeNull();
     });
   });
 });

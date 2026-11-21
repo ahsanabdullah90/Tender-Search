@@ -8,7 +8,9 @@ export const crawlerDeps = {
   sleep: (ms: number) => sleep(ms),
   downloadAndCacheDossier: (tenderId: string, url: string, label?: string, options?: DownloadDossierOptions) =>
     downloadAndCacheDossier(tenderId, url, label || deriveDossierLabel(url, 'Tender Document'), undefined, undefined, options),
-  fetchFileBuffer: (url: string, cookie?: string, options?: DownloadDossierOptions) => fetchFileBuffer(url, cookie, 0, options)
+  fetchFileBuffer: (url: string, cookie?: string, options?: DownloadDossierOptions) => fetchFileBuffer(url, cookie, 0, options),
+  onScanFinished: null as (() => void) | null,
+  onDocFetchChange: null as (() => void) | null
 };
 
 /**

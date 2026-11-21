@@ -267,15 +267,86 @@ export function AppShell({
                 : `Last full scan: ${fullScanAgeHours < 1 ? 'just now' : `${Math.round(fullScanAgeHours)}h ago`}`}
             </div>
           )}
-          {((scanStatus.documentsDeferred ?? 0) > 0 || (scanStatus.visionDeferred ?? 0) > 0 || (scanStatus.heldForScope ?? 0) > 0) && (
-            <div className="px-2 text-[11px] leading-snug text-ink-muted" data-testid="scan-deferred">
-              {[
-                (scanStatus.documentsDeferred ?? 0) > 0 && `${scanStatus.documentsDeferred} document(s) moved to background`,
-                (scanStatus.visionDeferred ?? 0) > 0 && `${scanStatus.visionDeferred} scanned notice(s) waiting for Vision`,
-                (scanStatus.heldForScope ?? 0) > 0 && `${scanStatus.heldForScope} listing(s) held for document scope`
-              ].filter(Boolean).join(' · ')}
-            </div>
-          )}
+          {(() => {
+            const dq = scanStatus.docQueue;
+            const hasLiveDocQueue = !scanning && Boolean(dq && (dq.isFetching || dq.totalPending > 0 || (dq.processing ?? 0) > 0));
+            const deferredLines = [
+              (scanStatus.documentsDeferred ?? 0) > 0 && !hasLiveDocQueue && `${scanStatus.documentsDeferred} document(s) moved to background`,
+              (scanStatus.visionDeferred ?? 0) > 0 && `${scanStatus.visionDeferred} scanned notice(s) waiting for Vision`,
+              (scanStatus.heldForScope ?? 0) > 0 && !hasLiveDocQueue && `${scanStatus.heldForScope} listing(s) held for document scope`
+            ].filter(Boolean);
+            return deferredLines.length > 0 ? (
+              <div className="px-2 text-[11px] leading-snug text-ink-muted" data-testid="scan-deferred">
+                {deferredLines.join(' · ')}
+              </div>
+            ) : null;
+          })()}
+          {!scanning &&
+            scanStatus.docQueue &&
+            (scanStatus.docQueue.isFetching ||
+              scanStatus.docQueue.totalPending > 0 ||
+              (scanStatus.docQueue.processing ?? 0) > 0) && (() => {
+              const dq = scanStatus.docQueue!;
+              const processingFiles = dq.processing ?? 0;
+              const processingTenders = dq.processingTenders ?? 0;
+              const isActivelyProcessing = dq.isFetching || processingFiles > 0;
+              const headline = isActivelyProcessing && dq.readyPending > 0
+                ? `Downloading Inbox docs (${dq.readyPending} left)`
+                : isActivelyProcessing && dq.awaitingScopePending > 0
+                  ? `Checking unmatched listings (${dq.awaitingScopePending} left)`
+                  : isActivelyProcessing
+                    ? 'Processing tender documents…'
+                    : dq.readyPending > 0
+                      ? `Inbox docs queued (${dq.readyPending})`
+                      : `Scope check queued (${dq.awaitingScopePending} files)`;
+
+              return (
+                <div
+                  className="flex flex-col gap-1 rounded-lg border border-line bg-surface-2 px-2.5 py-2 text-[11px] leading-snug text-ink-muted forced-colors:border"
+                  data-testid="doc-queue-indicator"
+                >
+                  <div className="flex items-center gap-1.5 font-medium text-ink">
+                    {isActivelyProcessing && (
+                      <>
+                        <RefreshCw aria-hidden="true" className="h-3 w-3 shrink-0 motion-safe:animate-spin text-accent" />
+                        <progress
+                          className="sr-only"
+                          aria-label={
+                            dq.readyPending > 0
+                              ? 'Downloading Inbox documents'
+                              : dq.awaitingScopePending > 0
+                                ? 'Checking unmatched listings'
+                                : 'Processing tender documents'
+                          }
+                        />
+                      </>
+                    )}
+                    <span>{headline}</span>
+                  </div>
+                  {(processingFiles > 0 || dq.readyPending > 0 || dq.awaitingScopePending > 0) && (
+                    <div className="flex flex-col gap-0.5 pl-0.5 text-[10px] text-ink-muted">
+                      {processingFiles > 0 && (
+                        <div className="font-medium text-accent">
+                          Active now: {processingTenders || 1} {(processingTenders || 1) === 1 ? 'tender' : 'tenders'} · {processingFiles} {processingFiles === 1 ? 'file' : 'files'}
+                        </div>
+                      )}
+                      {dq.readyPending > 0 && (
+                        <div>
+                          Inbox queue: {dq.readyPending} {dq.readyPending === 1 ? 'file' : 'files'}
+                          {dq.readyTenders ? ` · ${dq.readyTenders} ${dq.readyTenders === 1 ? 'tender' : 'tenders'}` : ''}
+                        </div>
+                      )}
+                      {dq.awaitingScopePending > 0 && (
+                        <div>
+                          Scope queue: {dq.awaitingScopePending} {dq.awaitingScopePending === 1 ? 'file' : 'files'}
+                          {dq.awaitingScopeTenders ? ` · ${dq.awaitingScopeTenders} ${dq.awaitingScopeTenders === 1 ? 'listing' : 'listings'}` : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           {visiblePausedReason && (
             <div
               data-testid="scan-paused-reason"

@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
-import { Archive, ExternalLink, TriangleAlert } from 'lucide-react';
-import { Tender, CorrigendumLog, OpportunityStatus } from '../../shared/types';
+import { Archive, ExternalLink, Paperclip, RotateCw, TriangleAlert } from 'lucide-react';
+import { Tender, CorrigendumLog, OpportunityStatus, DocumentQueueStatus } from '../../shared/types';
 import { Button, Chip, DeadlineChip, EmptyState, Panel, SlideOver, Tabs } from '../ui';
-import { Detail, deadlineProvenance, useTick } from './InboxScreen';
+import { Detail, deadlineProvenance, getTenderDocProcessingState, useTick } from './InboxScreen';
 import { PassConfirmModal } from './pipeline/PassConfirmModal';
 
 type View = 'board' | 'gantt';
@@ -10,11 +10,13 @@ type View = 'board' | 'gantt';
 interface PipelineScreenProps {
   tenders: Tender[];
   corrigenda: CorrigendumLog[];
+  docQueue?: DocumentQueueStatus;
   onStatusChange: (tenderId: string, status: OpportunityStatus) => Promise<void>;
   onAcknowledgeCorrigendum: (logId: string) => Promise<void>;
   onSaveNotes: (tenderId: string, notes: string) => Promise<void>;
   onToggleBookmark: (tenderId: string) => void;
   onSetResultDate: (tenderId: string, date: string | null) => void;
+  onTenderUpdated?: (tender: Tender) => void;
   focusId?: string | null;
 }
 
@@ -37,11 +39,12 @@ function elapsedShare(t: Tender) {
   return Math.min(1, Math.max(0, (Date.now() - start) / (end - start)));
 }
 
-function Card({ tender, onOpen }: { tender: Tender; onOpen: () => void }) {
+function Card({ tender, docQueue, onOpen }: { tender: Tender; docQueue?: DocumentQueueStatus; onOpen: () => void }) {
   const share = elapsedShare(tender);
   const urgent = tender.closing_date ? new Date(tender.closing_date).getTime() - Date.now() < DAY : false;
   const open = tender.pipeline_status === 'Under Review' || tender.pipeline_status === 'Preparing Bid';
   const provenance = deadlineProvenance(tender);
+  const docState = getTenderDocProcessingState(tender, docQueue);
   return (
     <button onClick={onOpen} className="block w-full cursor-pointer rounded-lg border border-line bg-surface p-3 text-left hover:border-accent">
       <div className="line-clamp-2 text-sm font-semibold leading-snug">{tender.title}</div>
@@ -55,19 +58,43 @@ function Card({ tender, onOpen }: { tender: Tender; onOpen: () => void }) {
         <div className="flex flex-wrap items-center gap-1.5">
           {tender.pipeline_status === 'Won' ? <Chip tone="ok">Won</Chip> : <DeadlineChip closingDate={tender.closing_date} />}
           {Boolean(tender.needs_review) && <Chip tone="danger">Review</Chip>}
+          {(docState.kind === 'processing' || docState.kind === 'queued' || docState.kind === 'failed') && (
+            <span
+              data-testid="card-doc-status"
+              title={docState.bannerTitle}
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ${
+                docState.kind === 'processing'
+                  ? 'bg-accent-soft text-accent'
+                  : docState.kind === 'failed'
+                    ? 'bg-warn-soft text-warn'
+                    : 'bg-surface-2 text-ink-muted'
+              }`}
+            >
+              {docState.kind === 'processing' && <RotateCw aria-hidden="true" className="h-3 w-3 motion-safe:animate-spin" />}
+              {docState.shortLabel}
+            </span>
+          )}
           {provenance.tone !== 'neutral' && (
             <span title={provenance.title}>
               <Chip tone={provenance.tone}>{provenance.label}</Chip>
             </span>
           )}
         </div>
-        {Boolean(tender.has_corrigendum) && <TriangleAlert className="h-4 w-4 text-warn" aria-label="Amended" />}
+        <span className="flex items-center gap-1.5">
+          {docState.savedCount > 0 && (
+            <span className="inline-flex items-center gap-0.5 font-mono text-xs text-ink-muted" title={`${docState.savedCount} saved document(s)`}>
+              <Paperclip className="h-3.5 w-3.5" />
+              {docState.savedCount}
+            </span>
+          )}
+          {Boolean(tender.has_corrigendum) && <TriangleAlert className="h-4 w-4 text-warn" aria-label="Amended" />}
+        </span>
       </div>
     </button>
   );
 }
 
-function Board({ tenders, onOpen }: { tenders: Tender[]; onOpen: (t: Tender) => void }) {
+function Board({ tenders, docQueue, onOpen }: { tenders: Tender[]; docQueue?: DocumentQueueStatus; onOpen: (t: Tender) => void }) {
   return (
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
       {STAGES.map(stage => {
@@ -89,7 +116,7 @@ function Board({ tenders, onOpen }: { tenders: Tender[]; onOpen: (t: Tender) => 
             {list.length === 0 ? (
               <div className="rounded-lg border border-dashed border-line px-3 py-8 text-center text-ink-muted">Nothing here</div>
             ) : (
-              list.map(t => <Card key={t.id} tender={t} onOpen={() => onOpen(t)} />)
+              list.map(t => <Card key={t.id} tender={t} docQueue={docQueue} onOpen={() => onOpen(t)} />)
             )}
           </div>
         );
@@ -248,7 +275,7 @@ export function PipelineScreen(props: PipelineScreenProps) {
       {working.length === 0 && view === 'board' ? (
         <Panel><EmptyState title="No tenders in your pipeline" body="Choose Track this bid on a tender in the Inbox and it will appear here." /></Panel>
       ) : view === 'board' ? (
-        <Board tenders={working} onOpen={t => setOpenId(t.id)} />
+        <Board tenders={working} docQueue={props.docQueue} onOpen={t => setOpenId(t.id)} />
       ) : (
         <Gantt tenders={working} onOpen={t => setOpenId(t.id)} />
       )}
@@ -301,12 +328,14 @@ export function PipelineScreen(props: PipelineScreenProps) {
             <Detail
               tender={open}
               corrigenda={corrigenda}
+              docQueue={props.docQueue}
               stageActions={stageButtons}
               onPass={() => setPassTarget(open)}
               onSetResultDate={date => props.onSetResultDate(open.id, date)}
               onAcknowledgeCorrigendum={props.onAcknowledgeCorrigendum}
               onSaveNotes={props.onSaveNotes}
               onToggleBookmark={() => props.onToggleBookmark(open.id)}
+              onTenderUpdated={props.onTenderUpdated}
             />
           </div>
         )}

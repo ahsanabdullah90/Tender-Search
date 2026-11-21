@@ -9,12 +9,13 @@ import {
   Undo2,
   X
 } from 'lucide-react';
-import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus, PortalHealth } from '../../shared/types';
+import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus, PortalHealth, DocumentQueueStatus } from '../../shared/types';
 import { Button, EmptyState, Panel, Popover } from '../ui';
 import { DeadlineRunway, PortalPills, PortalSummaryItem, Detail, TenderRow, AddTenderModal, useTick } from './inbox';
 
 export {
   Detail,
+  getTenderDocProcessingState,
   deadlineProvenance,
   humanReviewReason,
   asList,
@@ -46,6 +47,7 @@ export interface InboxScreenProps {
   onTenderDeleted?: (tenderId: string) => void;
   portalSummary?: PortalSummaryItem[];
   portals?: PortalHealth[];
+  docQueue?: DocumentQueueStatus;
 }
 
 export function InboxScreen(props: InboxScreenProps) {
@@ -702,6 +704,7 @@ export function InboxScreen(props: InboxScreenProps) {
                 )}
                 <TenderRow
                   tender={t}
+                  docQueue={props.docQueue}
                   selected={t.id === selected?.id}
                   unread={!isTenderViewed(t)}
                   onSelect={() => {
@@ -718,6 +721,7 @@ export function InboxScreen(props: InboxScreenProps) {
               <Detail
                 tender={selected}
                 corrigenda={corrigenda}
+                docQueue={props.docQueue}
                 onTrack={() => act(selected, 'Under Review')}
                 onPass={() => act(selected, 'Passed')}
                 onSetResultDate={date => {

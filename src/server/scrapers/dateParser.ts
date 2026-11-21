@@ -63,10 +63,10 @@ export function parseDateString(raw: string): string | null {
   // Exclude known non-date text noise
   if (/^(not available|n\/a|none|null|undefined|-+)$/i.test(str)) return null;
 
-  // Strip optional leading weekday, ordinal suffixes (1st, 2nd, 3rd, 4th..31st), normalize military time, and commas
+  // Strip optional leading weekday, ordinal suffixes (1st, 20 th, 2nd, 3rd, 4th..31st), normalize military time, and commas
   const cleanStr = str
     .replace(/^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b,?\s*/i, '')
-    .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1')
+    .replace(/(\d{1,2})\s*(?:st|nd|rd|th)\b/gi, '$1')
     .replace(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:hrs?|hours?)\b/gi, '$1:$2')
     .replace(/\b([01]?\d|2[0-3])([0-5]\d)\s*(?:hrs?|hours?)\b/gi, '$1:$2')
     .replace(/,/g, ' ')
@@ -399,7 +399,7 @@ export function inferPublishDateFromUrl(url: string | null | undefined): string 
   return `${m[1]}-${m[2]}-${String(lastDay).padStart(2, '0')}`;
 }
 
-export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:st|nd|rd|th)?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:st|nd|rd|th)?(?:\\s*,|\\s*,\\s*|[-/.\\s]+)\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
+export const DATE_CANDIDATE_PATTERN = `(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{1,2}(?:\\s*(?:st|nd|rd|th))?[-/.\\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?,?[-/.\\s]+\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?[-/.\\s]+\\d{1,2}(?:\\s*(?:st|nd|rd|th))?(?:\\s*,|\\s*,\\s*|[-/.\\s]+)\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?)?|\\d{4}-\\d{2}-\\d{2}(?:[\\sT]\\d{1,2}:\\d{2}(?::\\d{2})?)?)`;
 
 /**
  * Extracts and disambiguates publish dates vs closing dates using labels and chronological sorting (Bug B7)

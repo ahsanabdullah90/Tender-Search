@@ -6,7 +6,8 @@ import {
   discoverTenderLinkWithAI,
   parseAndRepairTenderJson,
   CANDIDATE_MODELS,
-  getAiClient
+  getAiClient,
+  resetModelCooldownsForTests
 } from '../../src/server/services/ocrService.js';
 
 const { mockGenerateContent, expectedOcr } = vi.hoisted(() => {
@@ -42,6 +43,7 @@ describe('ocrService', () => {
   beforeEach(() => {
     delete process.env.GEMINI_API_KEY;
     mockGenerateContent.mockReset();
+    resetModelCooldownsForTests();
   });
 
   afterEach(() => {
@@ -177,6 +179,39 @@ describe('ocrService', () => {
       mockGenerateContent.mockReset();
       mockGenerateContent.mockRejectedValue(new Error('Quota exceeded'));
       expect(await extractTenderFromImage(dummyBuffer)).toBeNull();
+    });
+
+    it('puts 429 RESOURCE_EXHAUSTED models in cooldown and skips them on subsequent calls', async () => {
+      process.env.GEMINI_API_KEY = 'cooldown-test-key';
+      const dummyBuffer = Buffer.from('fake image data');
+
+      // First call: model[0] returns 429 RESOURCE_EXHAUSTED, model[1] succeeds
+      mockGenerateContent
+        .mockRejectedValueOnce(new Error('429 RESOURCE_EXHAUSTED quota exceeded'))
+        .mockResolvedValueOnce({ text: JSON.stringify(expectedOcr) });
+
+      const first = await extractTenderFromImage(dummyBuffer);
+      expect(first).toEqual(expectedOcr);
+      expect(mockGenerateContent.mock.calls[0][0].model).toBe(CANDIDATE_MODELS[0]);
+      expect(mockGenerateContent.mock.calls[1][0].model).toBe(CANDIDATE_MODELS[1]);
+
+      // Second call: model[0] is in cooldown, so it immediately starts at model[1]
+      mockGenerateContent.mockClear();
+      mockGenerateContent.mockResolvedValueOnce({ text: JSON.stringify(expectedOcr) });
+      const second = await extractTenderFromImage(dummyBuffer);
+      expect(second).toEqual(expectedOcr);
+      expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+      expect(mockGenerateContent.mock.calls[0][0].model).toBe(CANDIDATE_MODELS[1]);
+
+      // Exhaust remaining models -> subsequent call skips network entirely
+      mockGenerateContent.mockReset();
+      mockGenerateContent.mockRejectedValue(new Error('429 RESOURCE_EXHAUSTED'));
+      expect(await extractTenderFromImage(dummyBuffer)).toBeNull();
+      const callsBeforeSkip = mockGenerateContent.mock.calls.length;
+      expect(callsBeforeSkip).toBe(CANDIDATE_MODELS.length - 1);
+
+      expect(await extractTenderFromImage(dummyBuffer)).toBeNull();
+      expect(mockGenerateContent.mock.calls.length).toBe(callsBeforeSkip);
     });
   });
 

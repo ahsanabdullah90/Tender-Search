@@ -12,5 +12,5 @@
     "allowJs": true,
     "jsx": "react-jsx"
   },
-  "exclude": ["dist", "dist-server", ".claude"]
+  "exclude": ["dist", "dist-server", "data", "data-sample", ".claude"]
 }

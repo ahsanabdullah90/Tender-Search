@@ -34,9 +34,26 @@ export interface EnqueueJobInput {
 }
 
 export const JOB_PRIORITY = { corrigendum: 10, primary: 20, other: 50 } as const;
+export const DETAIL_DISCOVER_LABEL = '__detail_discover__';
 
 /** Retry delays after the 1st, 2nd, 3rd... failed attempt (minutes). The last value repeats. */
 export const JOB_BACKOFF_MINUTES = [2, 10, 30];
+
+/**
+ * Dedicated tender detail pages whose listing row omits downloadable PDF/attachment links,
+ * so the background worker must inspect the detail page HTML once to discover them.
+ * Generic listing URLs and unrelated sites are excluded so tests and non-document links stay untouched.
+ */
+export function isDetailPageDiscoveryUrl(url?: string | null, portalId?: string | null): boolean {
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  if (isDirectDocLink(url)) return false;
+  if (/epms\.ppra\.gov\.pk\/public\/tenders\/tender-details\//i.test(url)) return true;
+  if (portalId === 'epms_ppra' && /\/tender-details\//i.test(url)) return true;
+  if (/fde\.gov\.pk\/download\/[^/?#]+/i.test(url) && !/\/download-category\//i.test(url) && !/[?&]wpdmdl=\d+/i.test(url)) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Corrigenda/addenda/extensions first (they can change the deadline), then the main bidding
@@ -67,12 +84,17 @@ export function enqueueDocumentJobs(tenderId: string, jobs: EnqueueJobInput[]): 
   const tx = db.transaction(() => {
     for (const job of jobs) {
       if (!job.url) continue;
+      const priority =
+        job.priority ??
+        (job.label === DETAIL_DISCOVER_LABEL
+          ? JOB_PRIORITY.primary
+          : documentJobPriority(`${job.label || ''} ${job.url}`));
       const res = insert.run(
         `job-${crypto.randomUUID()}`,
         tenderId,
         job.url,
         job.label ?? null,
-        job.priority ?? documentJobPriority(job.label || job.url),
+        priority,
         job.maxAttempts ?? 3
       );
       created += res.changes;
@@ -85,13 +107,27 @@ export function enqueueDocumentJobs(tenderId: string, jobs: EnqueueJobInput[]): 
 /**
  * Atomically claims up to `limit` due jobs: marks them 'processing', sets a lease, and counts the
  * attempt at claim time (so a crash mid-job still uses up an attempt and a poison document
- * cannot loop forever). Highest priority (lowest number) first, then oldest.
+ * cannot loop forever). Prioritizes tracked/bookmarked ready tenders first, then open Inbox
+ * ('ready') tenders by soonest closing deadline, then hidden 'awaiting_scope' listings.
  */
 export function claimDueJobs(limit: number = 5, leaseMinutes: number = 10): IngestJob[] {
   const select = db.prepare(`
-    SELECT id FROM document_ingest_jobs
-    WHERE status = 'pending' AND julianday(next_retry_at) <= julianday('now')
-    ORDER BY priority ASC, created_at ASC
+    SELECT j.id FROM document_ingest_jobs j
+    LEFT JOIN tenders t ON t.id = j.tender_id
+    WHERE j.status = 'pending' AND julianday(j.next_retry_at) <= julianday('now')
+    ORDER BY
+      CASE
+        WHEN t.ingestion_status = 'ready' AND (t.is_bookmarked = 1 OR t.pipeline_status NOT IN ('New Opportunity', 'Passed')) THEN 0
+        WHEN t.ingestion_status = 'ready' THEN 1
+        ELSE 2
+      END ASC,
+      CASE
+        WHEN t.ingestion_status = 'ready' AND t.closing_date IS NOT NULL AND julianday(t.closing_date) >= julianday('now')
+          THEN julianday(t.closing_date)
+        ELSE 99999999
+      END ASC,
+      j.priority ASC,
+      j.created_at ASC
     LIMIT ?
   `);
   const claim = db.prepare(`
@@ -228,28 +264,201 @@ function collectRowDocumentUrls(directUrl?: string | null, attachmentUrlsRaw?: s
 
 /**
  * One-time / idempotent backfill (docs/14 P1-1): queues document jobs for existing New Opportunity
- * tenders that have a direct document URL or stored attachment_urls, no cached dossiers yet, and
- * doc_fetch_status = 'none'. Returns how many tenders had jobs queued.
+ * tenders that have a direct document URL, stored attachment_urls, or a supported dedicated detail
+ * page URL, no cached dossiers yet, and doc_fetch_status = 'none'. Returns how many tenders had jobs queued.
  */
 export function backfillExistingTenderDocumentJobs(): number {
   const rows = db.prepare(`
-    SELECT id, direct_url, attachment_urls FROM tenders
+    SELECT id, portal_id, direct_url, attachment_urls FROM tenders
     WHERE pipeline_status = 'New Opportunity'
       AND COALESCE(doc_fetch_status, 'none') = 'none'
       AND (cached_dossiers IS NULL OR cached_dossiers = '[]')
-  `).all() as { id: string; direct_url: string | null; attachment_urls?: string | null }[];
+  `).all() as { id: string; portal_id: string; direct_url: string | null; attachment_urls?: string | null }[];
 
   let tendersQueued = 0;
   for (const row of rows) {
     const urls = collectRowDocumentUrls(row.direct_url, row.attachment_urls);
-    if (urls.length === 0) continue;
-    const added = enqueueDocumentJobs(row.id, urls.map(url => ({ url })));
+    const jobsToQueue: EnqueueJobInput[] = urls.length > 0
+      ? urls.map(url => ({ url }))
+      : isDetailPageDiscoveryUrl(row.direct_url, row.portal_id)
+        ? [{ url: row.direct_url!, label: DETAIL_DISCOVER_LABEL, priority: JOB_PRIORITY.primary }]
+        : [];
+    if (jobsToQueue.length === 0) continue;
+    const added = enqueueDocumentJobs(row.id, jobsToQueue);
     if (added > 0) {
       refreshTenderDocFetchStatus(row.id);
       tendersQueued++;
     }
   }
   return tendersQueued;
+}
+
+/**
+ * Marks queued/in-flight document jobs matching `urls` (and optionally the dedicated detail-page
+ * discovery job) as 'done' for a tender. Used when an on-demand fetch already downloaded them.
+ */
+export function markDocumentJobsDoneForUrls(
+  tenderId: string,
+  urls: string[],
+  options?: { includeDetailDiscover?: boolean }
+): number {
+  const cleanUrls = Array.from(new Set(urls.filter(Boolean)));
+  let updated = 0;
+  const markUrl = db.prepare(`
+    UPDATE document_ingest_jobs
+    SET status = 'done', lease_until = NULL, last_error = NULL
+    WHERE tender_id = ? AND url = ? AND status != 'done'
+  `);
+  const markDiscover = db.prepare(`
+    UPDATE document_ingest_jobs
+    SET status = 'done', lease_until = NULL, last_error = NULL
+    WHERE tender_id = ? AND label = ? AND status != 'done'
+  `);
+  const tx = db.transaction(() => {
+    for (const url of cleanUrls) {
+      updated += markUrl.run(tenderId, url).changes;
+    }
+    if (options?.includeDetailDiscover) {
+      updated += markDiscover.run(tenderId, DETAIL_DISCOVER_LABEL).changes;
+    }
+  });
+  tx();
+  return updated;
+}
+
+/**
+ * Marks stale pending jobs as 'done' when their URL is already saved in `cached_dossiers`
+ * (or detail-page discovery when cached_dossiers is already populated), and refreshes
+ * `doc_fetch_status` for every affected tender. Returns how many jobs were pruned.
+ */
+export function pruneAlreadyCachedPendingJobs(): number {
+  const rows = db.prepare(`
+    SELECT j.id AS job_id, j.tender_id, j.url, j.label, t.cached_dossiers
+    FROM document_ingest_jobs j
+    JOIN tenders t ON t.id = j.tender_id
+    WHERE j.status = 'pending'
+      AND COALESCE(j.last_error, '') NOT LIKE '%Vision%'
+      AND t.cached_dossiers IS NOT NULL
+      AND t.cached_dossiers != '[]'
+  `).all() as { job_id: string; tender_id: string; url: string; label: string | null; cached_dossiers: string }[];
+
+  const markDone = db.prepare(`
+    UPDATE document_ingest_jobs
+    SET status = 'done', lease_until = NULL, last_error = NULL
+    WHERE id = ? AND status = 'pending'
+  `);
+
+  const affectedTenders = new Set<string>();
+  let pruned = 0;
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const dossiers = safeJsonParse<{ originalUrl?: string }[]>(row.cached_dossiers, []);
+      if (dossiers.length === 0) continue;
+      const alreadyCached =
+        row.label === DETAIL_DISCOVER_LABEL ||
+        dossiers.some(d => Boolean(d.originalUrl) && d.originalUrl === row.url);
+      if (!alreadyCached) continue;
+      const changed = markDone.run(row.job_id).changes;
+      if (changed > 0) {
+        pruned += changed;
+        affectedTenders.add(row.tender_id);
+      }
+    }
+  });
+  tx();
+
+  for (const tenderId of affectedTenders) {
+    const nextStatus = refreshTenderDocFetchStatus(tenderId);
+    if (nextStatus === 'none') {
+      db.prepare(`UPDATE tenders SET doc_fetch_status = 'complete' WHERE id = ?`).run(tenderId);
+    }
+  }
+  return pruned;
+}
+
+export interface DocumentQueueCounts {
+  readyPending: number;
+  readyTenders: number;
+  awaitingScopePending: number;
+  awaitingScopeTenders: number;
+  totalPending: number;
+  processing: number;
+  processingTenders: number;
+  activeTenderIds: string[];
+}
+
+export function getDocumentQueueCounts(): DocumentQueueCounts {
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN j.status = 'pending' AND t.ingestion_status = 'ready' THEN 1 ELSE 0 END) AS readyPending,
+      COUNT(DISTINCT CASE WHEN j.status = 'pending' AND t.ingestion_status = 'ready' THEN j.tender_id END) AS readyTenders,
+      SUM(CASE WHEN j.status = 'pending' AND t.ingestion_status = 'awaiting_scope' THEN 1 ELSE 0 END) AS awaitingScopePending,
+      COUNT(DISTINCT CASE WHEN j.status = 'pending' AND t.ingestion_status = 'awaiting_scope' THEN j.tender_id END) AS awaitingScopeTenders,
+      SUM(CASE WHEN j.status = 'pending' THEN 1 ELSE 0 END) AS totalPending,
+      SUM(CASE WHEN j.status = 'processing' THEN 1 ELSE 0 END) AS processing,
+      COUNT(DISTINCT CASE WHEN j.status = 'processing' THEN j.tender_id END) AS processingTenders
+    FROM document_ingest_jobs j
+    LEFT JOIN tenders t ON t.id = j.tender_id
+    WHERE j.status IN ('pending', 'processing')
+  `).get() as {
+    readyPending: number | null;
+    readyTenders: number | null;
+    awaitingScopePending: number | null;
+    awaitingScopeTenders: number | null;
+    totalPending: number | null;
+    processing: number | null;
+    processingTenders: number | null;
+  } | undefined;
+
+  const activeRows = db.prepare(`
+    SELECT DISTINCT tender_id FROM document_ingest_jobs WHERE status = 'processing'
+  `).all() as { tender_id: string }[];
+
+  return {
+    readyPending: row?.readyPending || 0,
+    readyTenders: row?.readyTenders || 0,
+    awaitingScopePending: row?.awaitingScopePending || 0,
+    awaitingScopeTenders: row?.awaitingScopeTenders || 0,
+    totalPending: row?.totalPending || 0,
+    processing: row?.processing || 0,
+    processingTenders: row?.processingTenders || 0,
+    activeTenderIds: activeRows.map(r => r.tender_id)
+  };
+}
+
+/**
+ * Repairs tenders whose stored `doc_fetch_status` ('pending' or 'none') has drifted from
+ * `document_ingest_jobs` and `cached_dossiers` (e.g. a tender left at 'pending' with 0 jobs, or
+ * at 'none' despite already having cached dossiers). Returns how many rows were reconciled.
+ */
+export function reconcileStaleTenderDocFetchStatuses(): number {
+  const candidates = db.prepare(`
+    SELECT id, COALESCE(doc_fetch_status, 'none') AS doc_fetch_status, cached_dossiers
+    FROM tenders
+    WHERE COALESCE(doc_fetch_status, 'none') IN ('pending', 'none')
+  `).all() as { id: string; doc_fetch_status: string; cached_dossiers: string }[];
+
+  const setStatus = db.prepare(`UPDATE tenders SET doc_fetch_status = ? WHERE id = ?`);
+  let reconciled = 0;
+
+  const tx = db.transaction(() => {
+    for (const row of candidates) {
+      const summary = getJobSummaryForTender(row.id);
+      const dossiers = safeJsonParse<unknown[]>(row.cached_dossiers, []);
+      let expected: DocFetchStatus;
+      if (summary.total === 0) {
+        expected = dossiers.length > 0 ? 'complete' : 'none';
+      } else {
+        const derived = deriveDocFetchStatus(summary);
+        expected = derived === 'none' && dossiers.length > 0 ? 'complete' : derived;
+      }
+      if (expected !== row.doc_fetch_status) {
+        reconciled += setStatus.run(expected, row.id).changes;
+      }
+    }
+  });
+  tx();
+  return reconciled;
 }
 
 export interface JobSummary {

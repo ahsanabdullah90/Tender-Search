@@ -634,4 +634,125 @@ describe('AppShell component', () => {
     expect(screen.getByTestId('network-status-indicator').className).toContain('forced-colors:border');
     expect(screen.getByRole('button', { name: /Scan now/i })).toHaveAccessibleDescription(/Scans & downloads paused/);
   });
+
+  it('displays live sidebar document queue status across fetching Inbox, checking unmatched, and idle queued states', () => {
+    const { rerender } = render(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...idleScan,
+          docQueue: { isFetching: true, readyPending: 5, awaitingScopePending: 12, totalPending: 17, completedInRun: 3 }
+        }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    const indicator = screen.getByTestId('doc-queue-indicator');
+    expect(indicator).toHaveTextContent('Downloading Inbox docs (5 left)');
+    expect(indicator.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
+    expect(indicator.querySelector('svg')?.getAttribute('class')).toContain('motion-safe:animate-spin');
+    expect(indicator.querySelector('progress')).toHaveAttribute('aria-label', 'Downloading Inbox documents');
+
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...idleScan,
+          docQueue: { isFetching: true, readyPending: 0, awaitingScopePending: 12, totalPending: 12, completedInRun: 8 }
+        }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(screen.getByTestId('doc-queue-indicator')).toHaveTextContent('Checking unmatched listings (12 left)');
+
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...idleScan,
+          docQueue: { isFetching: false, readyPending: 3, awaitingScopePending: 0, totalPending: 3, completedInRun: 0 }
+        }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(screen.getByTestId('doc-queue-indicator')).toHaveTextContent('Inbox docs queued (3)');
+
+    // Rich tender + file + active processing + scope-queue visibility even when readyPending === 0
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...idleScan,
+          heldForScope: 72,
+          docQueue: {
+            isFetching: true,
+            readyPending: 5,
+            readyTenders: 3,
+            awaitingScopePending: 12,
+            awaitingScopeTenders: 4,
+            totalPending: 17,
+            processing: 2,
+            processingTenders: 2,
+            activeTenderIds: ['t-1', 't-2'],
+            completedInRun: 4
+          }
+        }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+
+    const activeCard = screen.getByTestId('doc-queue-indicator');
+    expect(activeCard).toHaveTextContent('Active now: 2 tenders · 2 files');
+    expect(activeCard).toHaveTextContent('Inbox queue: 5 files · 3 tenders');
+    expect(activeCard).toHaveTextContent('Scope queue: 12 files · 4 listings');
+    expect(screen.queryByTestId('scan-deferred')).not.toBeInTheDocument();
+
+    rerender(
+      <AppShell
+        section="inbox"
+        onNavigate={vi.fn()}
+        scanStatus={{
+          ...idleScan,
+          docQueue: {
+            isFetching: false,
+            readyPending: 0,
+            readyTenders: 0,
+            awaitingScopePending: 387,
+            awaitingScopeTenders: 200,
+            totalPending: 387,
+            processing: 0,
+            processingTenders: 0,
+            completedInRun: 0
+          }
+        }}
+        onRunScan={vi.fn()}
+        themePref="system"
+        onThemePref={vi.fn()}
+      >
+        <div>Content</div>
+      </AppShell>
+    );
+    expect(screen.getByTestId('doc-queue-indicator')).toHaveTextContent('Scope check queued (387 files)');
+    expect(screen.getByTestId('doc-queue-indicator')).toHaveTextContent('Scope queue: 387 files · 200 listings');
+  });
 });

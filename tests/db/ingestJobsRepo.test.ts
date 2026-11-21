@@ -22,7 +22,15 @@ import {
   deriveDocFetchStatus,
   refreshTenderDocFetchStatus,
   documentJobPriority,
-  JOB_PRIORITY
+  JOB_PRIORITY,
+  DETAIL_DISCOVER_LABEL,
+  isDetailPageDiscoveryUrl,
+  markDocumentJobsDoneForUrls,
+  pruneAlreadyCachedPendingJobs,
+  getDocumentQueueCounts,
+  backfillExistingTenderDocumentJobs,
+  reconcileStaleTenderDocFetchStatuses,
+  updateTenderFields
 } from '../../src/server/db/index.js';
 import { findCanonicalMatch } from '../../src/server/services/deduplicator.js';
 
@@ -181,6 +189,98 @@ describe('Phase 1: ingestion schema, document job queue and staging visibility',
       deleteTenders([t.id], 'user');
       expect((db.prepare('SELECT COUNT(*) c FROM document_ingest_jobs').get() as any).c).toBe(0);
     });
+
+    it('inspects both label and URL for priority and claims ready tracked/urgent tenders before awaiting_scope', () => {
+      const awaiting = createManualTender({
+        title: 'Generic Awaiting Scope',
+        organization: 'Punjab',
+        closing_date: new Date(Date.now() + 1 * 86400000).toISOString()
+      });
+      setTenderIngestionStatus(awaiting.id, 'awaiting_scope');
+
+      const readyLater = createManualTender({
+        title: 'Ready Later Closing',
+        organization: 'Punjab',
+        closing_date: new Date(Date.now() + 15 * 86400000).toISOString()
+      });
+      const readySoon = createManualTender({
+        title: 'Ready Urgent Closing',
+        organization: 'Punjab',
+        closing_date: new Date(Date.now() + 1 * 86400000).toISOString()
+      });
+      const trackedLater = createManualTender({
+        title: 'Tracked Bookmarked',
+        organization: 'Punjab',
+        closing_date: new Date(Date.now() + 25 * 86400000).toISOString()
+      });
+      db.prepare(`UPDATE tenders SET is_bookmarked = 1 WHERE id = ?`).run(trackedLater.id);
+
+      enqueueDocumentJobs(awaiting.id, [{ url: 'https://x/Corrigendum.pdf', label: 'Corrigendum' }]);
+      enqueueDocumentJobs(readyLater.id, [{ url: 'https://x/BiddingDocuments/258.pdf', label: 'Generic Title_Doc' }]);
+      enqueueDocumentJobs(readySoon.id, [{ url: 'https://x/BiddingDocuments/259.pdf', label: 'PEIMA_Doc' }]);
+      enqueueDocumentJobs(trackedLater.id, [{ url: 'https://x/annex.pdf', label: 'Annex' }]);
+
+      // URL /BiddingDocuments/ is inspected even when label is generic
+      expect(getJobsForTender(readySoon.id)[0].priority).toBe(JOB_PRIORITY.primary);
+      expect(getDocumentQueueCounts()).toEqual({
+        readyPending: 3,
+        readyTenders: 3,
+        awaitingScopePending: 1,
+        awaitingScopeTenders: 1,
+        totalPending: 4,
+        processing: 0,
+        processingTenders: 0,
+        activeTenderIds: []
+      });
+
+      const claimed = claimDueJobs(4, 10);
+      expect(claimed.map(j => j.tender_id)).toEqual([
+        trackedLater.id,
+        readySoon.id,
+        readyLater.id,
+        awaiting.id
+      ]);
+    });
+
+    it('prunes already-cached pending jobs, marks jobs done by URL, and backfills epms_ppra/fde detail pages', () => {
+      const tCached = newTender('Already Cached Tender');
+      const cachedUrl = 'https://eproc.punjab.gov.pk/BiddingDocuments/cached.pdf';
+      db.prepare(`UPDATE tenders SET cached_dossiers = ? WHERE id = ?`).run(
+        JSON.stringify([{ label: 'Doc', localPath: '/api/dossiers/x/doc.pdf', originalUrl: cachedUrl, mimeType: 'application/pdf', sha256: 'abc' }]),
+        tCached.id
+      );
+      enqueueDocumentJobs(tCached.id, [{ url: cachedUrl }, { url: 'https://eproc.punjab.gov.pk/Tenders/second.pdf' }]);
+      refreshTenderDocFetchStatus(tCached.id);
+
+      expect(pruneAlreadyCachedPendingJobs()).toBe(1);
+      const jobsAfterPrune = getJobsForTender(tCached.id);
+      expect(jobsAfterPrune.find(j => j.url === cachedUrl)?.status).toBe('done');
+      expect(jobsAfterPrune.find(j => j.url.endsWith('second.pdf'))?.status).toBe('pending');
+
+      // markDocumentJobsDoneForUrls reconciles remaining URL & detail discovery
+      enqueueDocumentJobs(tCached.id, [{ url: 'https://epms.ppra.gov.pk/public/tenders/tender-details/TS1', label: DETAIL_DISCOVER_LABEL }]);
+      expect(markDocumentJobsDoneForUrls(tCached.id, ['https://eproc.punjab.gov.pk/Tenders/second.pdf'], { includeDetailDiscover: true })).toBe(2);
+      expect(refreshTenderDocFetchStatus(tCached.id)).toBe('complete');
+
+      // Backfill detects dedicated epms_ppra & fde detail URLs while ignoring generic links
+      expect(isDetailPageDiscoveryUrl('https://epms.ppra.gov.pk/public/tenders/tender-details/TS001', 'epms_ppra')).toBe(true);
+      expect(isDetailPageDiscoveryUrl('https://fde.gov.pk/download/printing-textbooks/', 'fde')).toBe(true);
+      expect(isDetailPageDiscoveryUrl('https://fde.gov.pk/download-category/tender/', 'fde')).toBe(false);
+      expect(isDetailPageDiscoveryUrl('https://x.pk/tenders/2', 'pseb')).toBe(false);
+
+      const epmsRow = createManualTender({
+        title: 'EPMS Solar Supply',
+        organization: 'PPRA',
+        direct_url: 'https://epms.ppra.gov.pk/public/tenders/tender-details/TS999',
+        closing_date: new Date(Date.now() + 5 * 86400000).toISOString()
+      });
+      db.prepare(`UPDATE tenders SET portal_id = 'epms_ppra' WHERE id = ?`).run(epmsRow.id);
+      expect(backfillExistingTenderDocumentJobs()).toBe(1);
+      const epmsJobs = getJobsForTender(epmsRow.id);
+      expect(epmsJobs).toHaveLength(1);
+      expect(epmsJobs[0].label).toBe(DETAIL_DISCOVER_LABEL);
+      expect(getTenderById(epmsRow.id)?.doc_fetch_status).toBe('pending');
+    });
   });
 
   describe('1.3 staging rows are hidden from every read path but visible to dedup', () => {
@@ -227,6 +327,60 @@ describe('Phase 1: ingestion schema, document job queue and staging visibility',
       expect(releaseStaleStagingTenders(60)).toBe(1);
       expect(getTenderById(stuck.id)!.ingestion_status).toBe('ready');
       expect(getTenderById(fresh.id)!.ingestion_status).toBe('staging');
+    });
+
+    it('returns distinct tender/listing/processing counts, hydrates tender job counts, and reconciles stale doc_fetch_status', () => {
+      const tReady1 = newTender('Ready Tender One');
+      const tReady2 = newTender('Ready Tender Two');
+      const tScope = newTender('Awaiting Scope Tender');
+      setTenderIngestionStatus(tScope.id, 'awaiting_scope');
+
+      enqueueDocumentJobs(tReady1.id, [
+        { url: 'https://x.gov.pk/r1-a.pdf' },
+        { url: 'https://x.gov.pk/r1-b.pdf' }
+      ]);
+      enqueueDocumentJobs(tReady2.id, [{ url: 'https://x.gov.pk/r2-a.pdf' }]);
+      enqueueDocumentJobs(tScope.id, [
+        { url: 'https://x.gov.pk/s1-a.pdf' },
+        { url: 'https://x.gov.pk/s1-b.pdf' }
+      ]);
+
+      // Claim 1 ready job so it enters 'processing'
+      const claimed = claimDueJobs(1, 10);
+      expect(claimed).toHaveLength(1);
+
+      const counts = getDocumentQueueCounts();
+      expect(counts.processing).toBe(1);
+      expect(counts.processingTenders).toBe(1);
+      expect(counts.activeTenderIds).toEqual([claimed[0].tender_id]);
+      expect(counts.readyPending).toBe(2);
+      expect(counts.readyTenders).toBe(2);
+      expect(counts.awaitingScopePending).toBe(2);
+      expect(counts.awaitingScopeTenders).toBe(1);
+      expect(counts.totalPending).toBe(4);
+
+      const single = getTenderById(claimed[0].tender_id)!;
+      expect(single.doc_jobs_processing).toBe(1);
+      expect(single.doc_jobs_pending).toBe(1);
+
+      const allReady = getAllTenders();
+      const listedTwo = allReady.find(t => t.id === tReady2.id)!;
+      expect(listedTwo.doc_jobs_pending).toBe(1);
+      expect(listedTwo.doc_jobs_processing).toBe(0);
+
+      // Reconcile drifted doc_fetch_status: orphan 'pending' with 0 jobs -> 'none', and 'none' with cached dossier -> 'complete'
+      const orphanPending = newTender('Orphan Pending');
+      db.prepare(`UPDATE tenders SET doc_fetch_status = 'pending' WHERE id = ?`).run(orphanPending.id);
+
+      const cachedNone = newTender('Cached None');
+      updateTenderFields(cachedNone.id, {
+        cached_dossiers: [{ label: 'NIT', localPath: `/api/dossiers/${cachedNone.id}/doc.pdf`, originalUrl: 'https://x/doc.pdf', mimeType: 'application/pdf', sha256: 'abc' }]
+      });
+      db.prepare(`UPDATE tenders SET doc_fetch_status = 'none' WHERE id = ?`).run(cachedNone.id);
+
+      expect(reconcileStaleTenderDocFetchStatuses()).toBeGreaterThanOrEqual(2);
+      expect(getTenderById(orphanPending.id)?.doc_fetch_status).toBe('none');
+      expect(getTenderById(cachedNone.id)?.doc_fetch_status).toBe('complete');
     });
   });
 });

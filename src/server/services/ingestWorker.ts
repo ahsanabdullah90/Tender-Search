@@ -8,19 +8,31 @@ import {
   getJobSummaryForTender,
   enqueueDocumentJobs,
   getJobsForTender,
+  getDocumentQueueCounts,
+  reconcileStaleTenderDocFetchStatuses,
+  DETAIL_DISCOVER_LABEL,
   IngestJob
 } from '../db/repositories/ingestJobsRepo.js';
 import {
   getTenderById,
   updateTenderFields,
   deleteTenders,
-  setTenderTracksAndRelease
+  setTenderTracksAndRelease,
+  setTenderProvenance,
+  hasTenderExtractedText
 } from '../db/repositories/tendersRepo.js';
 import { getAllDomainTracks } from '../db/repositories/tracksRepo.js';
 import { deriveDossierLabel } from './dossierManager.js';
+import { shouldUpgradeDocType, renameDossierToCanonical } from './dossierStore.js';
 import { extractFromDocument, DocumentExtractionResult } from './documentExtractor.js';
 import { maxFileBytes, tryConsumeDailyVision } from './ingestBudget.js';
-import { crawlerDeps, currentScanStatus, readCachedDossier } from '../scrapers/crawlerEngine.js';
+import {
+  crawlerDeps,
+  currentScanStatus,
+  readCachedDossier,
+  fetchDocumentsForTender,
+  updateDocQueueStatus
+} from '../scrapers/crawlerEngine.js';
 import { isDownloadableCandidateUrl, UPFRONT_MAX_DOCS } from '../scrapers/ingestPipeline.js';
 import { applyDocumentScopeToTracks, matchTracks } from '../scrapers/trackMatcher.js';
 import { applyDocumentResultToTender } from './documentApply.js';
@@ -28,12 +40,15 @@ import { Tender } from '../../shared/types.js';
 import { checkNetworkHealth, canRunHeavyNetworkTask, isTransientNetworkError } from './networkMonitor.js';
 
 /**
- * Background document worker (docs/13-ingestion-pipeline-plan.md, §3.3). Runs every 2 minutes
- * from the scheduler: downloads queued tender documents, reads them, and applies what it finds,
- * following the same rules as ingest (later deadline wins; corrigenda that move a deadline
- * earlier are flagged, not deleted; only trustworthy document dates auto-expire; bookmarked and
- * triaged tenders are never auto-deleted).
+ * Background document worker (docs/13-ingestion-pipeline-plan.md, §3.3).
+ * Downloads queued tender documents (and inspects dedicated detail pages), reads them, and
+ * applies what it finds following the same rules as ingest. Prioritizes visible Inbox/Pipeline
+ * ('ready') tenders ahead of hidden 'awaiting_scope' listings and drains Inbox documents
+ * rapidly after every scan.
  */
+
+export const DEFAULT_DOC_WORKER_CONCURRENCY = 3;
+export const DEFAULT_DOC_BATCH_SIZE = 12;
 
 export interface WorkerReport {
   skipped?: 'scan_running' | 'already_running' | 'network_unhealthy';
@@ -45,8 +60,13 @@ export interface WorkerReport {
 }
 
 let running = false;
+let draining = false;
+let lastBatchVisibleChange = false;
 
-export async function processDocumentQueue(limit: number = 5): Promise<WorkerReport> {
+export async function processDocumentQueue(
+  limit: number = 5,
+  concurrency: number = DEFAULT_DOC_WORKER_CONCURRENCY
+): Promise<WorkerReport> {
   const report: WorkerReport = { claimed: 0, completed: 0, failed: 0, deferred: 0, expired: 0 };
   if (running) return { ...report, skipped: 'already_running' };
   // Never fetch portals in parallel with a scan.
@@ -58,13 +78,65 @@ export async function processDocumentQueue(limit: number = 5): Promise<WorkerRep
   }
 
   running = true;
+  lastBatchVisibleChange = false;
+  let batchVisibleChange = false;
   try {
     releaseExpiredLeases();
     const jobs = claimDueJobs(limit, 10);
     report.claimed = jobs.length;
+
+    if (jobs.length > 0) {
+      try {
+        const liveCounts = getDocumentQueueCounts();
+        updateDocQueueStatus({
+          isFetching: true,
+          ...liveCounts,
+          completedInRun: currentScanStatus.docQueue?.completedInRun ?? 0,
+          lastUpdatedAt: currentScanStatus.docQueue?.lastUpdatedAt ?? null
+        });
+      } catch {}
+    }
+
+    // Group jobs by tender_id (preserving claim order across tenders and strict priority order within a tender)
+    const bucketsMap = new Map<string, IngestJob[]>();
     for (const job of jobs) {
-      const outcome = await processJob(job);
-      report[outcome]++;
+      const bucket = bucketsMap.get(job.tender_id);
+      if (bucket) bucket.push(job);
+      else bucketsMap.set(job.tender_id, [job]);
+    }
+    const tenderBuckets = Array.from(bucketsMap.values());
+    const poolSize = Math.max(1, Math.min(concurrency, tenderBuckets.length));
+    let nextIdx = 0;
+
+    await Promise.all(
+      Array.from({ length: poolSize }, async () => {
+        while (true) {
+          const idx = nextIdx++;
+          if (idx >= tenderBuckets.length) break;
+          for (const job of tenderBuckets[idx]) {
+            const { outcome, visibleChange } = await processJob(job);
+            report[outcome]++;
+            if (visibleChange) batchVisibleChange = true;
+          }
+        }
+      })
+    );
+    lastBatchVisibleChange = batchVisibleChange;
+
+    if (!draining && jobs.length > 0) {
+      try {
+        const afterCounts = getDocumentQueueCounts();
+        const prevCompleted = currentScanStatus.docQueue?.completedInRun ?? 0;
+        updateDocQueueStatus(
+          {
+            isFetching: afterCounts.processing > 0,
+            ...afterCounts,
+            completedInRun: prevCompleted + report.completed,
+            lastUpdatedAt: batchVisibleChange ? new Date().toISOString() : (currentScanStatus.docQueue?.lastUpdatedAt ?? null)
+          },
+          batchVisibleChange ? { documentsUpdated: true } : undefined
+        );
+      } catch {}
     }
   } finally {
     running = false;
@@ -72,51 +144,177 @@ export async function processDocumentQueue(limit: number = 5): Promise<WorkerRep
   return report;
 }
 
-type JobOutcome = 'completed' | 'failed' | 'deferred' | 'expired';
+/**
+ * Drains due Inbox ('ready') document jobs continuously in fast bounded-concurrency batches
+ * while leaving unmatched 'awaiting_scope' jobs to trickle gently one batch per tick.
+ */
+export async function drainDocumentQueue(options?: {
+  maxBatches?: number;
+  batchSize?: number;
+  concurrency?: number;
+}): Promise<WorkerReport> {
+  const totalReport: WorkerReport = { claimed: 0, completed: 0, failed: 0, deferred: 0, expired: 0 };
+  if (draining) return { ...totalReport, skipped: 'already_running' };
+  if (currentScanStatus.isScanning) return { ...totalReport, skipped: 'scan_running' };
+  const initialNet = await checkNetworkHealth();
+  if (!canRunHeavyNetworkTask(initialNet)) {
+    return { ...totalReport, skipped: 'network_unhealthy' };
+  }
 
-async function processJob(job: IngestJob): Promise<JobOutcome> {
+  const maxBatches = options?.maxBatches ?? 25;
+  const batchSize = options?.batchSize ?? DEFAULT_DOC_BATCH_SIZE;
+  const concurrency = options?.concurrency ?? DEFAULT_DOC_WORKER_CONCURRENCY;
+
+  draining = true;
+  let lastUpdatedAt: string | null = currentScanStatus.docQueue?.lastUpdatedAt ?? null;
+  try {
+    for (let batchIdx = 0; batchIdx < maxBatches; batchIdx++) {
+      if (currentScanStatus.isScanning) break;
+      const net = await checkNetworkHealth();
+      if (!canRunHeavyNetworkTask(net)) break;
+
+      const countsBefore = getDocumentQueueCounts();
+      if (countsBefore.totalPending === 0) break;
+
+      updateDocQueueStatus({
+        isFetching: true,
+        ...countsBefore,
+        completedInRun: totalReport.completed,
+        lastUpdatedAt
+      });
+
+      const batch = await processDocumentQueue(batchSize, concurrency);
+      totalReport.claimed += batch.claimed;
+      totalReport.completed += batch.completed;
+      totalReport.failed += batch.failed;
+      totalReport.deferred += batch.deferred;
+      totalReport.expired += batch.expired;
+
+      if (batch.skipped || batch.claimed === 0) break;
+
+      const countsAfter = getDocumentQueueCounts();
+      const hadVisibleUpdate = lastBatchVisibleChange;
+      if (hadVisibleUpdate) {
+        lastUpdatedAt = new Date().toISOString();
+      }
+      updateDocQueueStatus(
+        {
+          isFetching: countsAfter.readyPending > 0,
+          ...countsAfter,
+          completedInRun: totalReport.completed,
+          lastUpdatedAt
+        },
+        hadVisibleUpdate ? { documentsUpdated: true } : undefined
+      );
+
+      if (countsAfter.readyPending === 0) break;
+      if (!process.env.VITEST) {
+        await crawlerDeps.sleep(200);
+      }
+    }
+  } finally {
+    draining = false;
+    try {
+      reconcileStaleTenderDocFetchStatuses();
+      const finalCounts = getDocumentQueueCounts();
+      updateDocQueueStatus({
+        isFetching: false,
+        ...finalCounts,
+        completedInRun: totalReport.completed,
+        lastUpdatedAt
+      });
+    } catch {}
+  }
+
+  return totalReport;
+}
+
+type JobOutcome = 'completed' | 'failed' | 'deferred' | 'expired';
+interface ProcessJobResult {
+  outcome: JobOutcome;
+  visibleChange: boolean;
+}
+
+function isLegacyOrEmptyJobLabel(label?: string | null): boolean {
+  return !label || !label.trim() || /_Doc(\s+\d+)?$/i.test(label.trim());
+}
+
+async function processJob(job: IngestJob): Promise<ProcessJobResult> {
   const tender = getTenderById(job.tender_id);
   if (!tender) {
     completeJob(job.id); // tender gone; the cascade normally removes the job first
-    return 'completed';
+    return { outcome: 'completed', visibleChange: false };
   }
+  const wasReady = tender.ingestion_status === 'ready';
   if (tender.pipeline_status === 'Passed') {
     completeJob(job.id);
     refreshTenderDocFetchStatus(tender.id);
-    return 'completed';
+    return { outcome: 'completed', visibleChange: false };
   }
 
   try {
-    const label = job.label || deriveDossierLabel(job.url, 'Tender Document');
-    let downloadErr: Error | null = null;
-    let downloadTransient = false;
-    const doc = await crawlerDeps.downloadAndCacheDossier(tender.id, job.url, label, {
-      onError: (err, meta) => {
-        downloadErr = err;
-        downloadTransient = meta.isTransientNetwork;
+    if (job.label === DETAIL_DISCOVER_LABEL) {
+      const res = await fetchDocumentsForTender(tender.id, { forceRefresh: false, throwOnDetailError: true });
+      if (res.expired) return { outcome: 'expired', visibleChange: true };
+      completeJob(job.id);
+      const nextStatus = refreshTenderDocFetchStatus(tender.id);
+      if (nextStatus === 'none' && res.dossiers.length > 0) {
+        setTenderProvenance(tender.id, { doc_fetch_status: 'complete' });
       }
-    });
-    if (!doc) {
-      if (downloadTransient || !canRunHeavyNetworkTask()) {
-        deferJob(job.id, 10, (downloadErr as Error | null)?.message || 'Deferred due to slow/offline network');
-        refreshTenderDocFetchStatus(tender.id);
-        return 'deferred';
-      }
-      const status = failJob(job.id, (downloadErr as Error | null)?.message || 'Download failed');
+      return { outcome: 'completed', visibleChange: wasReady };
+    }
+
+    const label = isLegacyOrEmptyJobLabel(job.label) ? deriveDossierLabel(job.url) : job.label!;
+    const existingDossiers = Array.isArray(tender.cached_dossiers) ? tender.cached_dossiers : [];
+    const alreadyCached = existingDossiers.find(d => d.originalUrl === job.url);
+    const cachedBuf = alreadyCached ? readCachedDossier(tender.id, alreadyCached) : null;
+    const isVisionDeferred = Boolean(job.last_error && /vision/i.test(job.last_error));
+
+    if (
+      alreadyCached &&
+      cachedBuf &&
+      tender.ingestion_status === 'ready' &&
+      Boolean(tender.closing_date) &&
+      hasTenderExtractedText(tender.id) &&
+      !isVisionDeferred
+    ) {
+      completeJob(job.id);
       refreshTenderDocFetchStatus(tender.id);
-      if (status === 'failed') {
-        finalizeAwaitingScopeAfterJobFailure(tender.id);
+      return { outcome: 'completed', visibleChange: true };
+    }
+
+    let doc = alreadyCached && cachedBuf ? alreadyCached : null;
+    if (!doc) {
+      let downloadErr: Error | null = null;
+      let downloadTransient = false;
+      doc = await crawlerDeps.downloadAndCacheDossier(tender.id, job.url, label, {
+        onError: (err, meta) => {
+          downloadErr = err;
+          downloadTransient = meta.isTransientNetwork;
+        }
+      });
+      if (!doc) {
+        if (downloadTransient || !canRunHeavyNetworkTask()) {
+          deferJob(job.id, 10, (downloadErr as Error | null)?.message || 'Deferred due to slow/offline network');
+          refreshTenderDocFetchStatus(tender.id);
+          return { outcome: 'deferred', visibleChange: false };
+        }
+        const status = failJob(job.id, (downloadErr as Error | null)?.message || 'Download failed');
+        refreshTenderDocFetchStatus(tender.id);
+        if (status === 'failed') {
+          finalizeAwaitingScopeAfterJobFailure(tender.id);
+        }
+        return { outcome: 'failed', visibleChange: wasReady && status === 'failed' };
       }
-      return 'failed';
     }
 
     // The tender may have been deleted or passed while the download was in flight.
     const current = getTenderById(tender.id);
-    if (!current) return 'completed';
+    if (!current) return { outcome: 'completed', visibleChange: wasReady };
     if (current.pipeline_status === 'Passed') {
       completeJob(job.id);
       refreshTenderDocFetchStatus(current.id);
-      return 'completed';
+      return { outcome: 'completed', visibleChange: false };
     }
 
     const dossiers = Array.isArray(current.cached_dossiers) ? [...current.cached_dossiers] : [];
@@ -125,17 +323,18 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
       updateTenderFields(current.id, { cached_dossiers: dossiers });
     }
 
-    const buf = (doc.sizeBytes || 0) <= maxFileBytes() ? readCachedDossier(current.id, doc) : null;
+    const buf = (doc.sizeBytes || 0) <= maxFileBytes() ? (cachedBuf ?? readCachedDossier(current.id, doc)) : null;
     if (!buf) {
       completeJob(job.id);
       refreshTenderDocFetchStatus(current.id);
-      return 'completed';
+      return { outcome: 'completed', visibleChange: current.ingestion_status === 'ready' };
     }
 
     let visionDenied = false;
     const result = await extractFromDocument(buf, doc.mimeType, doc.label || label, {
       title: current.title,
       organization: current.organization,
+      allowAiCrossCheck: false,
       allowVisionCall: () => {
         const ok = tryConsumeDailyVision();
         if (!ok) visionDenied = true;
@@ -147,33 +346,56 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
       // Daily Vision budget spent: try again in an hour without using up an attempt.
       deferJob(job.id, 60, 'Waiting for daily Gemini Vision budget');
       refreshTenderDocFetchStatus(current.id);
-      return 'deferred';
+      return { outcome: 'deferred', visibleChange: false };
     }
 
     // A tender held because its listing matched no track (docs/15 F2): decide from the document.
+    let becameVisible = current.ingestion_status === 'ready';
     if (current.ingestion_status === 'awaiting_scope') {
       const decision = decideAwaitingScope(current, result, job.id);
-      if (decision === 'removed') return 'completed';
+      if (decision === 'removed') return { outcome: 'completed', visibleChange: false };
+      if (decision === 'released') becameVisible = true;
       if (decision === 'waiting') {
+        if (shouldUpgradeDocType(doc.docType, result.docType)) {
+          const latest = getTenderById(current.id) || current;
+          const latestDossiers = Array.isArray(latest.cached_dossiers) ? [...latest.cached_dossiers] : [...dossiers];
+          const targetIdx = latestDossiers.findIndex(d => d.localPath === doc!.localPath || (Boolean(doc!.sha256) && d.sha256 === doc!.sha256));
+          if (targetIdx >= 0) {
+            const renamed = renameDossierToCanonical(latest, latestDossiers[targetIdx], result.docType, latestDossiers);
+            latestDossiers[targetIdx] = renamed.dossier;
+            updateTenderFields(latest.id, { cached_dossiers: latestDossiers });
+          }
+        }
         completeJob(job.id);
         refreshTenderDocFetchStatus(current.id);
-        return 'completed';
+        return { outcome: 'completed', visibleChange: false };
+      }
+    }
+
+    if (shouldUpgradeDocType(doc.docType, result.docType)) {
+      const latest = getTenderById(current.id) || current;
+      const latestDossiers = Array.isArray(latest.cached_dossiers) ? [...latest.cached_dossiers] : [...dossiers];
+      const targetIdx = latestDossiers.findIndex(d => d.localPath === doc!.localPath || (Boolean(doc!.sha256) && d.sha256 === doc!.sha256));
+      if (targetIdx >= 0) {
+        const renamed = renameDossierToCanonical(latest, latestDossiers[targetIdx], result.docType, latestDossiers);
+        latestDossiers[targetIdx] = renamed.dossier;
+        updateTenderFields(latest.id, { cached_dossiers: latestDossiers });
       }
     }
 
     const applied = applyDocumentResultToTender(getTenderById(current.id) || current, result);
-    if (applied === 'expired') return 'expired'; // tender (and its jobs) deleted
+    if (applied === 'expired') return { outcome: 'expired', visibleChange: true }; // tender (and its jobs) deleted
 
     completeJob(job.id);
     refreshTenderDocFetchStatus(current.id);
-    return 'completed';
+    return { outcome: 'completed', visibleChange: becameVisible };
   } catch (err: any) {
     if (isTransientNetworkError(err) || !canRunHeavyNetworkTask()) {
       deferJob(job.id, 10, err?.message || 'Deferred due to transient network error');
       if (getTenderById(job.tender_id)) {
         refreshTenderDocFetchStatus(job.tender_id);
       }
-      return 'deferred';
+      return { outcome: 'deferred', visibleChange: false };
     }
     const status = failJob(job.id, err?.message || String(err));
     if (getTenderById(job.tender_id)) {
@@ -182,7 +404,7 @@ async function processJob(job: IngestJob): Promise<JobOutcome> {
         finalizeAwaitingScopeAfterJobFailure(job.tender_id);
       }
     }
-    return 'failed';
+    return { outcome: 'failed', visibleChange: wasReady && status === 'failed' };
   }
 }
 
@@ -208,7 +430,7 @@ function finalizeAwaitingScopeAfterJobFailure(tenderId: string): void {
       tenderId,
       remainingUrls.slice(0, UPFRONT_MAX_DOCS).map(url => ({
         url,
-        label: deriveDossierLabel(url, `${current.title.slice(0, 30)}_Doc`)
+        label: deriveDossierLabel(url)
       }))
     );
     if (added > 0) {

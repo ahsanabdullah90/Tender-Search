@@ -16,7 +16,7 @@ import {
   requeueFailedJobs,
   refreshTenderDocFetchStatus
 } from '../db/index.js';
-import { processDocumentQueue } from '../services/ingestWorker.js';
+import { drainDocumentQueue } from '../services/ingestWorker.js';
 import { TENDER_STATUSES } from '../../shared/types.js';
 import { analyzeTenderById, fetchDocumentsForTender, matchTracks, parseDateString, formatClosingDate } from '../scrapers/crawlerEngine.js';
 import { saveManualDossier } from '../services/dossierManager.js';
@@ -153,7 +153,8 @@ tendersRouter.post('/:id/fetch-documents', async (req, res) => {
   try {
     const existing = getTenderById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Tender not found' });
-    const result = await fetchDocumentsForTender(req.params.id, { forceRefresh: true });
+    const forceRefresh = req.body?.forceRefresh !== false;
+    const result = await fetchDocumentsForTender(req.params.id, { forceRefresh });
     if (result.expired) {
       return res.json({ success: true, expired: true, id: req.params.id, newlyFetched: result.newlyFetched, message: EXPIRED_MESSAGE });
     }
@@ -164,7 +165,9 @@ tendersRouter.post('/:id/fetch-documents', async (req, res) => {
       newlyFetched: result.newlyFetched,
       message: result.newlyFetched > 0
         ? `Successfully fetched ${result.newlyFetched} document(s) from portal.`
-        : 'Checked portal; no new documents found.'
+        : result.dossiers.length > 0
+          ? 'Documents already downloaded and up to date.'
+          : 'Checked portal; no new documents found.'
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -188,7 +191,9 @@ tendersRouter.post('/:id/retry-documents', async (req, res) => {
   const requeued = requeueFailedJobs(existing.id);
   refreshTenderDocFetchStatus(existing.id);
   if (requeued > 0) {
-    void processDocumentQueue(5).catch(err => console.warn('[Tenders] Document retry worker error:', err));
+    void drainDocumentQueue({ maxBatches: 3, batchSize: 10 }).catch(err =>
+      console.warn('[Tenders] Document retry worker error:', err)
+    );
   }
   res.json({
     success: true,

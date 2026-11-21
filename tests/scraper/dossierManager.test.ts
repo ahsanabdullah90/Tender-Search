@@ -9,11 +9,12 @@ import {
   deriveDossierLabel,
   isHtmlContent,
   detectExtensionAndMime,
-  fetchFileBuffer
+  fetchFileBuffer,
+  saveManualDossier
 } from '../../src/server/services/dossierManager.js';
 import { fetchHtmlWithMetadata } from '../../src/server/scrapers/crawlerEngine.js';
 import { sslTolerantAgent, legacySslTolerantAgent } from '../../src/server/scrapers/baseScraper.js';
-import { DOSSIERS_DIR, setAppSetting } from '../../src/server/db/index.js';
+import { db, initDatabase, DOSSIERS_DIR, setAppSetting } from '../../src/server/db/index.js';
 import { maxFileBytes } from '../../src/server/services/ingestBudget.js';
 
 describe('dossierManager', () => {
@@ -26,7 +27,7 @@ describe('dossierManager', () => {
     // Start local in-memory HTTP server for file download testing
     await new Promise<void>((resolve) => {
       server = http.createServer((req, res) => {
-        if (req.url === '/download/rfp.pdf') {
+        if (req.url === '/download/rfp.pdf' || req.url?.startsWith('/BiddingDocuments/')) {
           res.writeHead(200, { 'Content-Type': 'application/pdf' });
           res.end(fileContent);
         } else if (req.url === '/redirect') {
@@ -86,7 +87,7 @@ describe('dossierManager', () => {
     expect(dossier?.sizeBytes).toBe(fileContent.length);
     expect(dossier?.sha256).toBeDefined();
 
-    const expectedPath = path.resolve(DOSSIERS_DIR, tenderId, 'Tender_RFP.pdf');
+    const expectedPath = path.resolve(DOSSIERS_DIR, tenderId, 'GEN_Tender-RFP_RFP-1.pdf');
     expect(fs.existsSync(expectedPath)).toBe(true);
     expect(fs.readFileSync(expectedPath)).toEqual(fileContent);
   });
@@ -105,11 +106,11 @@ describe('dossierManager', () => {
     const updatedDossier = await downloadAndCacheDossier(tenderId, remoteUrl, 'specs.pdf');
 
     expect(updatedDossier).not.toBeNull();
-    expect(updatedDossier?.localPath).toContain('_v2_');
+    expect(updatedDossier?.localPath).toContain('-v2.pdf');
 
     const files = fs.readdirSync(path.resolve(DOSSIERS_DIR, tenderId));
     expect(files.length).toBe(2);
-    expect(files.some(f => f.includes('_v2_'))).toBe(true);
+    expect(files.some(f => f.includes('-v2.pdf'))).toBe(true);
   });
 
   it('follows HTTP redirects to final destination', async () => {
@@ -421,6 +422,30 @@ describe('dossierManager', () => {
       } finally {
         httpsSpy.mockRestore();
       }
+    });
+
+    it('uses DB tender metadata and URL clues in downloadAndCacheDossier and saveManualDossier', async () => {
+      initDatabase();
+      const tenderId = 'tender-punjab_eproc-naming-1';
+      db.prepare('DELETE FROM tenders WHERE id = ?').run(tenderId);
+      const tDir = path.resolve(DOSSIERS_DIR, tenderId);
+      if (fs.existsSync(tDir)) fs.rmSync(tDir, { recursive: true, force: true });
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url)
+        VALUES (?, ?, 'punjab_eproc', 'Punjab PPRA', 'REF-MAN-1', 'PEIMA School Rehabilitation', 'SED', 'https://eproc.punjab.gov.pk/d/1')
+      `).run(tenderId, tenderId);
+
+      const downloaded = await downloadAndCacheDossier(
+        tenderId,
+        `${serverBaseUrl}/BiddingDocuments/5048/11112026122547.pdf`,
+        'PEIMA School Rehabilitation_Doc'
+      );
+      expect(downloaded?.docType).toBe('bidding-document');
+      expect(downloaded?.localPath).toContain('/PPPRA_REF-MAN-1_Bidding-Document-1.pdf');
+
+      const manual = saveManualDossier(tenderId, 'Corrigendum Notice.pdf', Buffer.from('%PDF-1.4 manual'), 'Corrigendum Notice');
+      expect(manual.docType).toBe('corrigendum');
+      expect(manual.localPath).toContain('/PPPRA_REF-MAN-1_Corrigendum-1.pdf');
     });
   });
 });

@@ -34,8 +34,8 @@ Before a tender reaches the active pipeline, its intake is governed by `ingestio
 stateDiagram-v2
     [*] --> Discovery: Scraped from Portal Listing
 
-    Discovery --> Staging: Matches active track + has candidate documents
-    Discovery --> Ready: Matches active track + no documents to verify
+    Discovery --> Staging: Matches active track + undated + has candidate documents
+    Discovery --> Ready: Matches active track + dated (docs queued) or no docs
     Discovery --> AwaitingScope: Generic title + no track match + has candidate documents
     Discovery --> [*]: No track match + no documents (discarded)
 
@@ -133,20 +133,30 @@ Whenever a crawler visits a portal:
      - Extended deadline (later PKT day) → updates `closing_date`, sets `has_corrigendum = 1`, and logs a `deadline_extension` corrigendum.
      - Earlier deadline (earlier PKT day) → preserves current deadline, sets `needs_review = 1` with reason `deadline_moved_earlier`.
      - Same calendar day → no deadline change.
-   - Newly discovered document links are appended to `attachment_urls` and queued for download.
+   - Newly discovered document links (excluding URLs already cached in `cached_dossiers`) are appended to `attachment_urls` and queued for download; dedicated detail pages (`epms_ppra` and `fde`) with no cached documents queue a `DETAIL_DISCOVER_LABEL` discovery job.
 
-### 2. "Hold for Scope" (`awaiting_scope` in `src/server/scrapers/ingestPipeline.ts`)
+### 2. Automatic Document Fetching & Queue Priority Tiers (`src/server/db/repositories/ingestJobsRepo.ts` & `src/server/services/ingestWorker.ts`)
+- **Non-Blocking Scan Intake**: Only undated matched notices (`!closingDate`) block during the crawl (`staging`) to verify Rule `B6`. Dated tenders insert immediately as `ready` with their documents queued so scans never stall on large PDF batches.
+- **Strict Priority Order (`claimDueJobs`)**:
+  1. **Tier 0**: Bookmarked or actively tracked `ready` tenders (`Pipeline` stages or `is_bookmarked = 1`).
+  2. **Tier 1**: Open `ready` Inbox tenders ordered by **soonest open closing deadline** (`closing_date ASC`), then per-document priority (`corrigendum` $\rightarrow$ `primary`/URLs containing `BiddingDocuments` $\rightarrow$ `other`).
+  3. **Tier 2**: Hidden `awaiting_scope` listings awaiting track classification.
+- **Fast Post-Scan Drain & Smart Throttle (`drainDocumentQueue`)**: Runs automatically as soon as any crawl finishes (plus 4s after startup following `releaseExpiredLeases()`, and every 2 minutes), processing up to 3 distinct tenders concurrently (sequential within each tender) across 12-job batches with local-only digital extraction (`allowAiCrossCheck: false`) until all visible `ready` Inbox/Pipeline documents are cached, broadcasting live `doc_queue_progress` and `documents_updated` SSE frames, then letting remaining `awaiting_scope` jobs trickle gently in the background.
+- **On-View Auto-Fetch**: Opening a tender in the Inbox/Pipeline detail pane with `0` saved documents and a fetchable attachment or detail page automatically calls `POST /api/tenders/:id/fetch-documents` (`forceRefresh: false`) so urgent tenders appear immediately even before the background queue reaches them.
+- **Unified Canonical Naming & Heading Reclassification (`dossierStore.ts` & `documentExtractor.ts`)**: Every portal download, background fetch, and manual upload uses the hash-free naming rule `{PORTAL}_{Ref_or_Title}_{DocType}-{N}{-vK}.{ext}` (`saveTenderDocument`, `generateCanonicalFilename`), infers initial document type from URL segments (`/BiddingDocuments/`, `/BOQManual/`, `/Tenders/`), upgrades `docType` and renames the file on disk via `renameDossierToCanonical` when PDF heading text identifies a `corrigendum`, `boq`, `rfp`, `tor`, or `bidding-document`, and supports startup migration (`migrateDossierFilenames`, `reclassifyExistingDossiersFromText`) plus `recheckEarlierDeadlineReviewTenders`.
+
+### 3. "Hold for Scope" (`awaiting_scope` in `src/server/scrapers/ingestPipeline.ts`)
 - Listings whose listing title/text matches no active domain track, but which contain document candidates (e.g. generic titles like *"Tender Notice"* or *"Corrigendum"* with attached PDFs), are inserted as `ingestion_status = 'awaiting_scope'` (hidden from Inbox, Pipeline, and KPIs).
 - The background worker reads up to 2 documents using `applyDocumentScopeToTracks`.
 - If the document text matches a track, the status is promoted to `'ready'` (appearing in the Inbox).
 - If no track matches, the tender is deleted with `reason = 'no-track-match'` and suppressed. Unresolved `awaiting_scope` rows older than 3 days are cleaned up by retention.
 
-### 3. Deduplication & Provenance Rules (`src/server/services/deduplicator.ts`)
+### 4. Deduplication & Provenance Rules (`src/server/services/deduplicator.ts`)
 - **Tier 1 (Strict Reference)**: Match on `reference_norm`. Requires corroborating signals (organization similarity $\ge 0.5$, title similarity $\ge 0.5$, or closing dates within 1.5 days) unless the reference is long and structured ($\ge 12$ chars with $\ge 2$ segments).
 - **Tier 2 (Title Dice Similarity)**: Evaluated only against different portals (own portal is strictly excluded from duplicate candidate search). The `titlesAreDistinguishable` check prevents merging distinct procurement packages that differ by 1–2 key nouns (e.g., "Laptops" vs "Printers").
 - **Secondary Sources**: The tender's own originating portal is never recorded under `secondary_sources`. Secondary source entries are unique by `direct_url`.
 
-### 4. Slimming, Suppression & Ageing Invariants (`src/server/services/retention.ts`)
+### 5. Slimming, Suppression & Ageing Invariants (`src/server/services/retention.ts`)
 - **Slimming Passed Tenders**: Dossiers are purged from disk 2 minutes after a tender enters `Passed`. Tenders passed directly from Inbox have descriptions cleared while retaining `status_notes`. Tenders that have ever been in the Pipeline (`pipeline_audit_logs`) preserve their description, full history, and corrigenda permanently.
 - **Suppression Expiry**: Undated suppressions expire after 120 days. Auto-expired suppressions are automatically lifted if a subsequent scan finds a new future closing date. User suppressions (`reason = 'user'`) are permanent.
 - **Undated Ageing Limit**: Standardized to **90 days** (`UNDATED_MAX_AGE_DAYS = 90`) across ingest, retention, and Inbox UI. Publication dates inferred from upload folder paths (`publish_date_source = 'upload_folder'`) are never used for ageing; discovery timestamp `created_at` is used instead.

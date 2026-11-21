@@ -292,8 +292,12 @@ export default function App() {
 
         setScanStatus(statusData);
 
-        // If scan completed, reload live datasets
-        if (!statusData.isScanning && statusData.completedPortals > 0) {
+        // Reload live datasets when scan finishes or background document fetch updates tenders
+        if (payload.type === 'documents_updated') {
+          fetchTenders();
+          fetchKpis();
+          fetchCorrigenda();
+        } else if (payload.type !== 'doc_queue_progress' && !statusData.isScanning && statusData.completedPortals > 0) {
           fetchTenders();
           fetchPortals();
           fetchCorrigenda();
@@ -607,6 +611,7 @@ export default function App() {
           onToggleBookmark={handleToggleBookmark}
           onMarkViewed={handleMarkViewed}
           focusId={focusTenderId}
+          docQueue={scanStatus.docQueue}
           onTenderUpdated={updated => setTenders(prev => prev.map(t => (t.id === updated.id ? updated : t)))}
           onTenderCreated={created => {
             setTenders(prev => [created, ...prev]);
@@ -617,11 +622,13 @@ export default function App() {
         <PipelineScreen
           tenders={tenders}
           corrigenda={corrigenda}
+          docQueue={scanStatus.docQueue}
           onStatusChange={handleUpdateStatus}
           onAcknowledgeCorrigendum={handleAcknowledgeCorrigendum}
           onSaveNotes={handleSaveNotes}
           onToggleBookmark={handleToggleBookmark}
           onSetResultDate={handleSetResultDate}
+          onTenderUpdated={updated => setTenders(prev => prev.map(t => (t.id === updated.id ? updated : t)))}
           focusId={focusTenderId}
         />
       ) : (

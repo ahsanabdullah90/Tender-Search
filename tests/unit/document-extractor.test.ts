@@ -1,13 +1,16 @@
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as ocrSvc from '../../src/server/services/ocrService.js';
-import { initDatabase, setAppSetting } from '../../src/server/db/index.js';
+import { TESSDATA_DIR, initDatabase, setAppSetting } from '../../src/server/db/index.js';
 import {
   extractDocumentText,
   extractFromDocument,
   findSubmissionDeadlines,
   findReferenceNumber,
   findEstimatedValue,
-  findScopeText
+  findScopeText,
+  inferDocTypeFromText
 } from '../../src/server/services/documentExtractor.js';
 import { localOcrDeps, hasValidImageMagicBytes, extractTextWithLocalOcr } from '../../src/server/services/localOcrService.js';
 import { makePdf, makeMultiPagePdf, makeDocx, FILLER } from '../fixtures/documents/buildFixtures.js';
@@ -273,6 +276,80 @@ describe('documentExtractor (Phase 2)', () => {
         setAppSetting('local_ocr_enabled', 'true');
         localOcrDeps.recognizeImage = origRecognize;
         localOcrDeps.rasterizePdf = origRasterize;
+      }
+    });
+  });
+
+  describe('PEIMA amendment date extraction and heading-based docType classification', () => {
+    it('extracts leading-time + superscript-ordinal amendment deadline without stealing adjacent opening time', async () => {
+      const peimaLines = [
+        'AMENDMENT NO-02',
+        'STRATEGIC MANAGEMENT UNIT, SCHOOL EDUCATION DEPARTMENT, GOVERNMENT OF THE PUNJAB',
+        'REHABILITATION OF DANGEROUS PSSP SCHOOL BUILDINGS UNDER PEIMA-NORTH ZONE',
+        'Invitation for e-Bids - Technical & Financial Bid Submission Date and Time (12-11-26, 11:00 AM)',
+        '- Technical Bid Opening Date and Time (12-11-26, 11:30 AM)',
+        '- The bid submission date is extended - Technical & Financial Bid Submission Date and Time 03:00 PM, on Nov 20 th, 2026 (Date).',
+        '- Technical Bid Opening Date and Time 03:30 PM, on Nov 20 th, 2026 (Date).',
+        ...FILLER
+      ];
+
+      const deadlines = findSubmissionDeadlines(peimaLines.join('\n'));
+      expect(deadlines).toEqual([
+        pkt('2026-11-12T11:00:00+05:00'),
+        pkt('2026-11-20T15:00:00+05:00')
+      ]);
+
+      const extracted = await extractFromDocument(makePdf(peimaLines), 'application/pdf', 'Tender Notice');
+      expect(extracted.docType).toBe('corrigendum');
+      expect(extracted.closingDateISO).toBe(pkt('2026-11-20T15:00:00+05:00'));
+
+      // Never steal adjacent opening time on same line when submission date has no explicit time
+      const noTimeSubmission = 'Last date for submission of bids: Nov 20 th, 2026 (Opening Date and Time: 03:30 PM)';
+      expect(findSubmissionDeadlines(noTimeSubmission)).toEqual([pkt('2026-11-20T14:00:00+05:00')]);
+    });
+
+    it('infers document type from heading text while keeping DL-10 SBD ToC safety', () => {
+      expect(inferDocTypeFromText('BILL OF QUANTITIES\nCivil Works Packages', 'notice')).toBe('boq');
+      expect(inferDocTypeFromText('REQUEST FOR PROPOSAL (RFP)\nConsulting Services', 'other')).toBe('rfp');
+      expect(inferDocTypeFromText('STANDARD BIDDING DOCUMENT\nTable of Contents\n8. Amendment of Bidding Documents .... 12', 'notice')).toBe('bidding-document');
+      expect(inferDocTypeFromText('PRE-BID MINUTES\nClarification Responses', 'notice')).toBe('clarification');
+      expect(inferDocTypeFromText('NOTICE INVITING TENDER\nSupply of Equipment', 'other')).toBe('notice');
+    });
+
+    it('rasterizes PDF pages with vector paths (Path2D) and image XObjects without CanvasFillRule errors', async () => {
+      fs.mkdirSync(TESSDATA_DIR, { recursive: true });
+      const trainedDataStub = path.join(TESSDATA_DIR, 'eng.traineddata');
+      const hadExisting = fs.existsSync(trainedDataStub);
+      if (!hadExisting) fs.writeFileSync(trainedDataStub, '');
+
+      try {
+        // Build a synthetic PDF with an embedded 2x2 grayscale Image XObject + filled vector rectangle (exercises Path2D & drawImage)
+        const streamBody = 'q 0.5 0.5 0.5 rg 20 20 120 40 re f Q\nq 80 0 0 80 100 100 cm /Im1 Do Q\n';
+        const objects = [
+          '<< /Type /Catalog /Pages 2 0 R >>',
+          '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>',
+          `<< /Length ${Buffer.byteLength(streamBody, 'latin1')} >>\nstream\n${streamBody}\nendstream`,
+          '<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\nstream\n\x00\xff\xff\x00\nendstream'
+        ];
+        let pdf = '%PDF-1.4\n';
+        const offsets: number[] = [];
+        objects.forEach((body, idx) => {
+          offsets.push(Buffer.byteLength(pdf, 'latin1'));
+          pdf += `${idx + 1} 0 obj\n${body}\nendobj\n`;
+        });
+        const xrefAt = Buffer.byteLength(pdf, 'latin1');
+        pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+        for (const off of offsets) pdf += `${String(off).padStart(10, '0')} 00000 n \n`;
+        pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`;
+
+        const pages = await localOcrDeps.rasterizePdf(Buffer.from(pdf, 'latin1'), 1);
+        expect(pages).toHaveLength(1);
+        expect(hasValidImageMagicBytes(pages[0])).toBe(true);
+      } finally {
+        if (!hadExisting && fs.existsSync(trainedDataStub)) {
+          fs.rmSync(trainedDataStub, { force: true });
+        }
       }
     });
   });

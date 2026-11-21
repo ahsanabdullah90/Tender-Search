@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { InboxScreen, asList } from '../../src/client/components/InboxScreen.js';
 import type { Tender, DomainTrack } from '../../src/shared/types.js';
@@ -1019,6 +1019,142 @@ describe('InboxScreen component', () => {
       expect(screen.getByText('2% CDR')).toBeInTheDocument();
       expect(screen.getByText('PEC C5')).toBeInTheDocument();
       expect(screen.getByText(/10kW rooftop PV/)).toBeInTheDocument();
+    });
+
+    it('auto-fetches documents once when opening a tender with attachment_urls and preserves unsaved notes on SSE refresh', async () => {
+      const user = userEvent.setup();
+      const onTenderUpdated = vi.fn();
+      const tenderWithAttachments: Tender = {
+        ...sampleTenders[0],
+        id: 't-autofetch-1',
+        title: 'PEIMA School Rehabilitation',
+        attachment_urls: ['https://eproc.punjab.gov.pk/BiddingDocuments/258280.pdf'],
+        cached_dossiers: [],
+        doc_fetch_status: 'pending'
+      };
+      const updatedTender: Tender = {
+        ...tenderWithAttachments,
+        doc_fetch_status: 'complete',
+        cached_dossiers: [{
+          label: 'Bidding Document',
+          localPath: '/api/dossiers/t-autofetch-1/doc.pdf',
+          originalUrl: 'https://eproc.punjab.gov.pk/BiddingDocuments/258280.pdf',
+          mimeType: 'application/pdf',
+          sha256: 'sha123'
+        }]
+      };
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ success: true, tender: updatedTender, dossiers: updatedTender.cached_dossiers, newlyFetched: 1 })
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      try {
+        const { rerender } = render(<InboxScreen {...baseProps} tenders={[tenderWithAttachments]} onTenderUpdated={onTenderUpdated} />);
+
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalledWith(
+            '/api/tenders/t-autofetch-1/fetch-documents',
+            expect.objectContaining({
+              method: 'POST',
+              body: JSON.stringify({ forceRefresh: false })
+            })
+          );
+        });
+        await waitFor(() => {
+          expect(onTenderUpdated).toHaveBeenCalledWith(updatedTender);
+        });
+
+        // Type unsaved notes and simulate parent SSE refresh for the same tender
+        const notesArea = screen.getByPlaceholderText(/Bank guarantee/i);
+        await user.type(notesArea, 'Draft bid margin note');
+
+        rerender(<InboxScreen {...baseProps} tenders={[updatedTender]} onTenderUpdated={onTenderUpdated} />);
+        expect(screen.getByText('Saved documents (1)')).toBeInTheDocument();
+        expect(screen.getByPlaceholderText(/Bank guarantee/i)).toHaveValue('Draft bid margin note');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('displays live per-tender document processing status on rows, detail banner, and empty summary', async () => {
+      const user = userEvent.setup();
+      const processingTender: Tender = {
+        ...sampleTenders[0],
+        id: 't-proc-1',
+        title: 'Processing School Solar',
+        description: '',
+        cached_dossiers: [],
+        doc_fetch_status: 'pending',
+        doc_jobs_processing: 1,
+        doc_jobs_pending: 2
+      };
+      const queuedTender: Tender = {
+        ...sampleTenders[0],
+        id: 't-queue-1',
+        title: 'Queued Lab Equipment',
+        description: '',
+        cached_dossiers: [],
+        doc_fetch_status: 'pending',
+        doc_jobs_pending: 3
+      };
+      const listingOnlyTender: Tender = {
+        ...sampleTenders[0],
+        id: 't-list-1',
+        title: 'Listing Only Tender',
+        cached_dossiers: [],
+        doc_fetch_status: 'none'
+      };
+
+      const { rerender } = render(
+        <InboxScreen
+          {...baseProps}
+          tenders={[processingTender, queuedTender, listingOnlyTender]}
+          docQueue={{
+            isFetching: true,
+            readyPending: 5,
+            readyTenders: 2,
+            awaitingScopePending: 0,
+            totalPending: 5,
+            processing: 1,
+            processingTenders: 1,
+            activeTenderIds: ['t-proc-1'],
+            completedInRun: 0
+          }}
+        />
+      );
+
+      expect(screen.getByText('Processing…')).toBeInTheDocument();
+      expect(screen.getByText('Queued (3)')).toBeInTheDocument();
+
+      // Default selected (processingTender) shows active status banner and smart Summary text
+      expect(screen.getByTestId('tender-doc-status')).toHaveTextContent('Actively processing 1 file(s)…');
+      expect(screen.getByTestId('tender-doc-status')).toHaveTextContent('2 additional file(s) queued next.');
+      expect(screen.getByText(/currently being processed/i)).toBeInTheDocument();
+
+      // Clicking queued tender shows queued status banner & smart waiting summary
+      await user.click(screen.getAllByText('Queued Lab Equipment')[0]);
+      expect(screen.getByTestId('tender-doc-status')).toHaveTextContent('Queued for processing (3 file(s))');
+      expect(screen.getByText(/queued for background extraction/i)).toBeInTheDocument();
+
+      // Clicking listing-only tender distinguishes zero-attachment notice cleanly
+      await user.click(screen.getAllByText('Listing Only Tender')[0]);
+      expect(screen.getByTestId('tender-doc-status')).toHaveTextContent('Portal listing only · No downloadable files provided');
+
+      // Transition processingTender to complete with saved document
+      const completedTender: Tender = {
+        ...processingTender,
+        doc_fetch_status: 'complete',
+        doc_jobs_processing: 0,
+        doc_jobs_pending: 0,
+        doc_jobs_done: 1,
+        cached_dossiers: [{ label: 'Tender Notice', localPath: '/api/dossiers/t-proc-1/doc.pdf', originalUrl: 'https://x/doc.pdf', mimeType: 'application/pdf', sha256: 'sha-proc-1' }]
+      };
+      rerender(<InboxScreen {...baseProps} tenders={[completedTender, queuedTender, listingOnlyTender]} />);
+      await user.click(screen.getAllByText('Processing School Solar')[0]);
+      expect(screen.getByTestId('tender-doc-status')).toHaveTextContent('Processed · 1 document saved');
     });
   });
 });

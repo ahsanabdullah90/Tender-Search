@@ -189,12 +189,20 @@ export function parseTimeOfDay(text: string): { hour: number; minute: number } |
   return { hour, minute };
 }
 
-function combineDateAndTime(dateStr: string, after: string): string | null {
+function truncateBeforeNonSubmissionContext(after: string): string {
+  const sameLine = after.split(/\r?\n/)[0] || '';
+  const nonSubMatch = NON_SUBMISSION_CONTEXT.exec(sameLine);
+  return nonSubMatch ? sameLine.slice(0, nonSubMatch.index) : sameLine;
+}
+
+function combineDateAndTime(dateStr: string, after: string, before: string = ''): string | null {
   const iso = parseDateString(dateStr);
   if (!iso) return null;
   // If the date already carried a time, keep it.
   if (/\d{1,2}:\d{2}/.test(dateStr)) return iso;
-  const time = parseTimeOfDay(after.slice(0, 40));
+  const cleanAfter = truncateBeforeNonSubmissionContext(after);
+  const cleanBefore = (before.split(/\r?\n/).pop() || '').slice(-40);
+  const time = parseTimeOfDay(cleanAfter.slice(0, 40)) ?? parseTimeOfDay(cleanBefore);
   if (!time) return iso; // date-only: parseDateString defaults to 14:00 PKT
   const { hour, minute } = time;
   const day = new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10); // PKT calendar day
@@ -228,7 +236,7 @@ export function findSubmissionDeadlines(rawText: string): string[] {
       const before = text.slice(Math.max(lineStart, m.index - 80), m.index);
       if (NON_SUBMISSION_CONTEXT.test(before) && !/submi|receipt|bids?\b|tenders?\b|proposals?|quotations?|offers?/i.test(before.replace(/bidding\s+documents?/gi, ''))) continue;
     }
-    const iso = combineDateAndTime(dm[0], window.slice(dm.index + dm[0].length));
+    const iso = combineDateAndTime(dm[0], window.slice(dm.index + dm[0].length), between);
     if (iso) found.add(iso);
   }
 
@@ -311,6 +319,32 @@ export function detectCorrigendum(text: string): boolean {
 }
 
 /**
+ * Classifies a document type from its opening heading text (avoiding Table of Contents false
+ * positives per DL-10), upgrading generic/notice classifications when heading evidence is clear.
+ */
+export function inferDocTypeFromText(text: string, fallbackType: DocType = 'other'): DocType {
+  const heading200 = documentHeading(text, 200);
+  if (detectCorrigendum(text) || /\bcancel+(?:ation|ed)\b/i.test(heading200)) {
+    return 'corrigendum';
+  }
+  if (fallbackType !== 'other' && fallbackType !== 'notice') {
+    return fallbackType;
+  }
+  const heading = documentHeading(text, 300);
+  if (/\b(boq|bill\s+of\s+quantit(?:y|ies)|pricing\s+schedule|schedule\s+of\s+requirements?)\b/i.test(heading)) return 'boq';
+  if (/\b(rfp|request\s+for\s+proposals?)\b/i.test(heading)) return 'rfp';
+  if (/\b(tor|terms\s+of\s+reference)\b/i.test(heading)) return 'tor';
+  if (/\b(clarification|minutes\s+of\s+pre[-\s]?bid|pre[-\s]?bid\s+minutes)\b/i.test(heading)) return 'clarification';
+  if (/\b(standard\s+bidding\s+documents?|bidding\s+documents?|tender\s+documents?|rfq|request\s+for\s+quotations?|solicitation\s+documents?)\b/i.test(heading)) {
+    return 'bidding-document';
+  }
+  if (/\b(tender\s+notice|notice\s+inviting\s+tenders?|invitation\s+for\s+(?:e[-\s]?)?bids?|nit\b)\b/i.test(heading)) {
+    return 'notice';
+  }
+  return fallbackType;
+}
+
+/**
  * A cancellation must name the tender itself ("the above tender is hereby cancelled") or be
  * announced in the heading. Clauses such as "if the bid is withdrawn" are not cancellations.
  */
@@ -358,8 +392,7 @@ async function extractFromPlainText(
   control: { baseMethod: ExtractionMethod; allowAiCrossCheck: boolean; allowAutoExpire: boolean }
 ): Promise<DocumentExtractionResult> {
   const anchored = findSubmissionDeadlines(text);
-  const headingCancels = /\bcancel+(?:ation|ed)\b/i.test(documentHeading(text, 200));
-  const docType: DocType = detectCorrigendum(text) || headingCancels ? 'corrigendum' : labelType;
+  const docType: DocType = inferDocTypeFromText(text, labelType);
   const scopeText = findScopeText(text);
 
   let closing: string | null = anchored.length ? anchored[anchored.length - 1] : null; // latest wins

@@ -3,7 +3,9 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import { createApp } from '../../server.js';
-import { crawlerDeps } from '../../src/server/scrapers/crawlerEngine.js';
+import { crawlerDeps, currentScanStatus } from '../../src/server/scrapers/crawlerEngine.js';
+import { scanRouteDeps } from '../../src/server/routes/scan.routes.js';
+import { schedulerDeps, stopStartupScheduler } from '../../src/server/services/scheduler.js';
 import {
   db,
   initDatabase,
@@ -18,6 +20,7 @@ describe('Server API Routes', () => {
 
   beforeEach(() => {
     initDatabase();
+    db.prepare('DELETE FROM document_ingest_jobs').run();
     db.prepare('DELETE FROM corrigendum_logs').run();
     db.prepare('DELETE FROM pipeline_audit_logs').run();
     db.prepare('DELETE FROM tenders').run();
@@ -452,9 +455,16 @@ describe('Server API Routes', () => {
     });
 
     it('triggers crawler scan via start endpoint', async () => {
-      const res = await request(app).post('/api/scan/start');
-      expect(res.status).toBe(200);
-      expect(typeof res.body.isScanning).toBe('boolean');
+      const origStart = scanRouteDeps.startCrawlerScan;
+      scanRouteDeps.startCrawlerScan = vi.fn().mockResolvedValue({ ...currentScanStatus, isScanning: true });
+      try {
+        const res = await request(app).post('/api/scan/start');
+        expect(res.status).toBe(200);
+        expect(typeof res.body.isScanning).toBe('boolean');
+        expect(scanRouteDeps.startCrawlerScan).toHaveBeenCalledTimes(1);
+      } finally {
+        scanRouteDeps.startCrawlerScan = origStart;
+      }
     });
   });
 
@@ -796,15 +806,29 @@ describe('Server API Routes', () => {
 
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
+      const origScan = schedulerDeps.startCrawlerScan;
+      const origDrain = schedulerDeps.drainDocumentQueue;
+      const origReclass = schedulerDeps.reclassifyExistingDossiersFromText;
+      schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({} as any);
+      schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
+      schedulerDeps.drainDocumentQueue = vi.fn().mockResolvedValue({
+        processed: 0,
+        succeeded: 0,
+        deferred: 0,
+        failed: 0,
+        batches: 0,
+        readyRemaining: 0
+      });
       process.env.NODE_ENV = 'production';
       process.env.PORT = '0';
 
-      const srv = await startServer();
-      await new Promise<void>((resolve) => srv.on('listening', resolve));
-      expect(srv.listening).toBe(true);
-
-      const port = (srv.address() as any).port;
+      let srv: any;
       try {
+        srv = await startServer();
+        await new Promise<void>((resolve) => srv.on('listening', resolve));
+        expect(srv.listening).toBe(true);
+
+        const port = (srv.address() as any).port;
         await new Promise<void>((resolve, reject) => {
           const req = http.get(`http://127.0.0.1:${port}/client-spa-route`, (res: any) => {
             try {
@@ -818,7 +842,13 @@ describe('Server API Routes', () => {
           req.on('error', reject);
         });
       } finally {
-        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        stopStartupScheduler();
+        schedulerDeps.startCrawlerScan = origScan;
+        schedulerDeps.drainDocumentQueue = origDrain;
+        schedulerDeps.reclassifyExistingDossiersFromText = origReclass;
+        if (srv) {
+          await new Promise<void>((resolve) => srv.close(() => resolve()));
+        }
         process.env.NODE_ENV = prevEnv;
         process.env.PORT = prevPort;
         if (createdDistFixture) {
@@ -831,16 +861,38 @@ describe('Server API Routes', () => {
       const { startServer } = await import('../../server.js');
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
+      const origScan = schedulerDeps.startCrawlerScan;
+      const origDrain = schedulerDeps.drainDocumentQueue;
+      const origReclass = schedulerDeps.reclassifyExistingDossiersFromText;
+      schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({} as any);
+      schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
+      schedulerDeps.drainDocumentQueue = vi.fn().mockResolvedValue({
+        processed: 0,
+        succeeded: 0,
+        deferred: 0,
+        failed: 0,
+        batches: 0,
+        readyRemaining: 0
+      });
       process.env.NODE_ENV = 'development';
       process.env.PORT = '0';
 
-      const srv = await startServer();
-      await new Promise<void>((resolve) => srv.on('listening', resolve));
-      expect(srv.listening).toBe(true);
-
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
-      process.env.NODE_ENV = prevEnv;
-      process.env.PORT = prevPort;
+      let srv: any;
+      try {
+        srv = await startServer();
+        await new Promise<void>((resolve) => srv.on('listening', resolve));
+        expect(srv.listening).toBe(true);
+      } finally {
+        stopStartupScheduler();
+        schedulerDeps.startCrawlerScan = origScan;
+        schedulerDeps.drainDocumentQueue = origDrain;
+        schedulerDeps.reclassifyExistingDossiersFromText = origReclass;
+        if (srv) {
+          await new Promise<void>((resolve) => srv.close(() => resolve()));
+        }
+        process.env.NODE_ENV = prevEnv;
+        process.env.PORT = prevPort;
+      }
     });
 
     it('executes graceful shutdown on SIGINT', async () => {
@@ -848,37 +900,57 @@ describe('Server API Routes', () => {
       const dbModule = await import('../../src/server/db/index.js');
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
+      const origScan = schedulerDeps.startCrawlerScan;
+      const origDrain = schedulerDeps.drainDocumentQueue;
+      const origReclass = schedulerDeps.reclassifyExistingDossiersFromText;
+      schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({} as any);
+      schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
+      schedulerDeps.drainDocumentQueue = vi.fn().mockResolvedValue({
+        processed: 0,
+        succeeded: 0,
+        deferred: 0,
+        failed: 0,
+        batches: 0,
+        readyRemaining: 0
+      });
       process.env.NODE_ENV = 'production';
       process.env.PORT = '0';
 
-      const srv = await startServer();
-      await new Promise<void>((resolve) => srv.on('listening', resolve));
-
       const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as any);
       const closeSpy = vi.spyOn(dbModule.db, 'close').mockImplementation(() => dbModule.db);
+      let handler: any;
+      try {
+        const srv = await startServer();
+        await new Promise<void>((resolve) => srv.on('listening', resolve));
 
-      const sigintListeners = process.listeners('SIGINT');
-      const handler = sigintListeners[sigintListeners.length - 1];
-      expect(handler).toBeDefined();
+        const sigintListeners = process.listeners('SIGINT');
+        handler = sigintListeners[sigintListeners.length - 1];
+        expect(handler).toBeDefined();
 
-      await new Promise<void>((resolve) => {
-        const origSrvClose = srv.close.bind(srv);
-        srv.close = ((cb: any) => {
-          origSrvClose(() => {
-            if (cb) cb();
-            resolve();
-          });
-          return srv;
-        }) as any;
-        handler('SIGINT');
-      });
+        await new Promise<void>((resolve) => {
+          const origSrvClose = srv.close.bind(srv);
+          srv.close = ((cb: any) => {
+            origSrvClose(() => {
+              if (cb) cb();
+              resolve();
+            });
+            return srv;
+          }) as any;
+          handler('SIGINT');
+        });
 
-      expect(exitSpy).toHaveBeenCalledWith(0);
-      process.removeListener('SIGINT', handler);
-      closeSpy.mockRestore();
-      exitSpy.mockRestore();
-      process.env.NODE_ENV = prevEnv;
-      process.env.PORT = prevPort;
+        expect(exitSpy).toHaveBeenCalledWith(0);
+      } finally {
+        stopStartupScheduler();
+        schedulerDeps.startCrawlerScan = origScan;
+        schedulerDeps.drainDocumentQueue = origDrain;
+        schedulerDeps.reclassifyExistingDossiersFromText = origReclass;
+        if (handler) process.removeListener('SIGINT', handler);
+        closeSpy.mockRestore();
+        exitSpy.mockRestore();
+        process.env.NODE_ENV = prevEnv;
+        process.env.PORT = prevPort;
+      }
     });
   });
 

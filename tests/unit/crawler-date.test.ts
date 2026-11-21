@@ -366,4 +366,13 @@ describe('A6 & A7 extractDatesFromText logic', () => {
     const res3 = extractDatesFromText(text3, { nowMs: simulatedNowMs });
     expect(res3.closingDate).toContain('2026-12-28');
   });
+
+  it('parses superscript-spaced ordinal dates (e.g. "Nov 20 th, 2026", "20 th November 2026", "3 rd Dec 2026")', () => {
+    expect(parseDateString('Nov 20 th, 2026')).toBe('2026-11-20T09:00:00.000Z');
+    expect(parseDateString('20 th November 2026 03:00 PM')).toBe('2026-11-20T10:00:00.000Z');
+    expect(parseDateString('3 rd Dec, 2026')).toBe('2026-12-03T09:00:00.000Z');
+
+    const extracted = extractDatesFromText('Last submission date: Nov 20 th, 2026', { nowMs: simulatedNowMs });
+    expect(extracted.closingDate).toBe('2026-11-20T09:00:00.000Z');
+  });
 });

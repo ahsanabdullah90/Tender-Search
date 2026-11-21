@@ -7,11 +7,13 @@ import {
   getAppSetting,
   setAppSetting,
   seedSampleTendersIfEmpty,
-  getKnownTenderMapForPortal
+  getKnownTenderMapForPortal,
+  getDocumentQueueCounts
 } from '../db/index.js';
+import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { getHumanJitterDelay, HUMAN_CHROME_HEADERS } from './baseScraper.js';
-import { ScanStatus, ScraperErrorCode, ScanDepth, DomainTrack } from '../../shared/types.js';
+import { ScanStatus, ScraperErrorCode, ScanDepth, DomainTrack, DocumentQueueStatus } from '../../shared/types.js';
 import { extractTenderListFromHtmlWithAI } from '../services/ocrService.js';
 import {
   beginScanBudget,
@@ -107,7 +109,8 @@ export {
   readCachedDossier,
   isReadableDocumentMime,
   fetchDocumentsForTender,
-  analyzeTenderById
+  analyzeTenderById,
+  getInFlightDocFetchTenderIds
 } from './tenderAnalysis.js';
 
 export {
@@ -155,7 +158,8 @@ export let currentScanStatus: ScanStatus = {
   lastScanTimestamp: null
 };
 
-type ProgressListener = (status: ScanStatus) => void;
+export type ScanProgressEventType = 'scan_progress' | 'documents_updated' | 'doc_queue_progress';
+type ProgressListener = (status: ScanStatus, eventType?: ScanProgressEventType) => void;
 const progressListeners: Set<ProgressListener> = new Set();
 
 export function addProgressListener(listener: ProgressListener) {
@@ -166,17 +170,68 @@ export function removeProgressListener(listener: ProgressListener) {
   progressListeners.delete(listener);
 }
 
-function broadcastProgress() {
+function broadcastProgress(eventType: ScanProgressEventType = 'scan_progress') {
   const fullScanAt = getAppSetting('last_full_scan_at') || null;
   currentScanStatus.lastFullScanTimestamp = fullScanAt;
+  const snapshot: ScanStatus = { ...currentScanStatus, lastFullScanTimestamp: fullScanAt };
   for (const listener of progressListeners) {
     try {
-      listener({ ...currentScanStatus, lastFullScanTimestamp: fullScanAt });
+      listener(snapshot, eventType);
     } catch (e) {
       // Ignore stale subscriber errors
     }
   }
 }
+
+export function mergeLiveDocQueueStatus(docQueue: DocumentQueueStatus): DocumentQueueStatus {
+  const inFlightManual = getInFlightDocFetchTenderIds();
+  const activeTenderIds = Array.from(new Set([...(docQueue.activeTenderIds || []), ...inFlightManual]));
+  const processing = Math.max(docQueue.processing ?? 0, inFlightManual.length);
+  const processingTenders = Math.max(docQueue.processingTenders ?? 0, activeTenderIds.length);
+  return {
+    ...docQueue,
+    isFetching: Boolean(docQueue.isFetching || activeTenderIds.length > 0),
+    processing,
+    processingTenders,
+    activeTenderIds
+  };
+}
+
+export function updateDocQueueStatus(
+  docQueue: DocumentQueueStatus,
+  options?: { documentsUpdated?: boolean }
+): void {
+  currentScanStatus.docQueue = mergeLiveDocQueueStatus(docQueue);
+  broadcastProgress(options?.documentsUpdated ? 'documents_updated' : 'doc_queue_progress');
+}
+
+export function refreshLiveDocQueueStatus(options?: { documentsUpdated?: boolean }): void {
+  try {
+    const counts = getDocumentQueueCounts();
+    updateDocQueueStatus(
+      {
+        isFetching: Boolean(currentScanStatus.docQueue?.isFetching || counts.processing > 0),
+        readyPending: counts.readyPending,
+        readyTenders: counts.readyTenders,
+        awaitingScopePending: counts.awaitingScopePending,
+        awaitingScopeTenders: counts.awaitingScopeTenders,
+        totalPending: counts.totalPending,
+        processing: counts.processing,
+        processingTenders: counts.processingTenders,
+        activeTenderIds: counts.activeTenderIds,
+        completedInRun: currentScanStatus.docQueue?.completedInRun ?? 0,
+        lastUpdatedAt: currentScanStatus.docQueue?.lastUpdatedAt ?? null
+      },
+      options
+    );
+  } catch {
+    // DB may not be initialized in unit tests
+  }
+}
+
+crawlerDeps.onDocFetchChange = () => {
+  refreshLiveDocQueueStatus();
+};
 
 /**
  * Builds merged portal list combining SQLite overrides with base defaults
@@ -483,6 +538,11 @@ export async function startCrawlerScan(
         }
       }
       broadcastProgress();
+      if (crawlerDeps.onScanFinished) {
+        try {
+          crawlerDeps.onScanFinished();
+        } catch {}
+      }
     }
     return currentScanStatus;
   };

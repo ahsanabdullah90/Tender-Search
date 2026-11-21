@@ -181,4 +181,24 @@ describe('Portal contract tests', () => {
       fetchBufSpy.mockRestore();
     }
   });
+
+  it('strips encoded HTML <img> tags from PSDF titles and falls back to clean PDF slug or drops empty icons', () => {
+    const psdfPortal = PORTAL_DEFINITIONS.find(p => p.id === 'psdf')!;
+    const html = `
+      <div id="tendersdownload-button">
+        <div class="dropdown-content">
+          <a href="https://psdf.org.pk/wp-content/uploads/2026/11/Tender-Document-Vocational-Training-2026.pdf">
+            <li>&lt;img src="https://psdf.org.pk/wp-content/uploads/2021/05/download-icon-img.png"&gt;</li>
+          </a>
+        </div>
+      </div>
+      <div class="inner-advertisement-listing-box">
+        <h4 class="listingadver-title1">&lt;img src="https://psdf.org.pk/wp-content/uploads/2021/05/download-icon-img.png"&gt;</h4>
+      </div>
+    `;
+    const parsed = parsePortalHtml(html, psdfPortal);
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0].title).toBe('Vocational Training 2026');
+    expect(parsed.items[0].title).not.toContain('<img');
+  });
 });

@@ -199,6 +199,7 @@ $script:ShutdownToken = $null
 $script:Stopping = $false
 $script:Restarting = $false
 $script:ServerCrashWarned = $false
+$script:AutoRestartTimestamps = @()
 $script:WasScanning = $false
 $script:TrayStartedScan = $false
 $script:LastDigestAlertKey = ''
@@ -595,11 +596,37 @@ $statusTimer.Add_Tick({
   if ($script:Stopping -or $script:Restarting) { return }
 
   if ($script:OwnsServer -and $null -ne $script:ServerProcess -and $script:ServerProcess.HasExited) {
+    $cutoff = (Get-Date).AddMinutes(-10)
+    $script:AutoRestartTimestamps = @($script:AutoRestartTimestamps | Where-Object { $_ -gt $cutoff })
+
+    if ($script:AutoRestartTimestamps.Count -lt 3) {
+      $script:AutoRestartTimestamps += (Get-Date)
+      $script:Restarting = $true
+      try {
+        $script:StatusItem.Text = 'Status: Recovering server...'
+        $script:NotifyIcon.Text = Format-TrayTooltip 'Tender Tracker - Recovering...'
+        Stop-TenderServer
+        Start-TenderServer
+        $script:StatusItem.Text = 'Status: Online'
+        $script:NotifyIcon.Text = Format-TrayTooltip 'Tender Tracker - Online'
+        Show-TrayBalloon -Title 'Tender Tracker' -Message 'Background server restarted automatically after an unexpected exit.'
+        return
+      } catch {
+        # Fall through to manual-restart warning if recovery fails
+      } finally {
+        $script:Restarting = $false
+      }
+    }
+
+    $script:OwnsServer = $false
+    if ($null -ne $script:RestartItem) {
+      $script:RestartItem.Enabled = $false
+    }
     $script:StatusItem.Text = 'Status: Server stopped'
     $script:NotifyIcon.Text = Format-TrayTooltip 'Tender Tracker - Server stopped'
     if (-not $script:ServerCrashWarned) {
       $script:ServerCrashWarned = $true
-      Show-TrayBalloon -Title 'Tender Tracker' -Message 'Background server stopped unexpectedly. Click Restart Server in the tray menu.' -Icon ([System.Windows.Forms.ToolTipIcon]::Error)
+      Show-TrayBalloon -Title 'Tender Tracker' -Message 'Background server stopped repeatedly. Click Restart Server or relaunch Tender Tracker.' -Icon ([System.Windows.Forms.ToolTipIcon]::Error)
     }
     return
   }

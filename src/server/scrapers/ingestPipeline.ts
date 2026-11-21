@@ -28,11 +28,14 @@ import {
 import {
   enqueueDocumentJobs,
   refreshTenderDocFetchStatus,
-  documentJobPriority
+  documentJobPriority,
+  DETAIL_DISCOVER_LABEL,
+  isDetailPageDiscoveryUrl,
+  JOB_PRIORITY
 } from '../db/repositories/ingestJobsRepo.js';
 import { matchTracks, applyDocumentScopeToTracks } from './trackMatcher.js';
 import { embedTextToBlobAsync, buildTenderEmbeddingText } from '../services/embeddingService.js';
-import { purgeTenderFiles } from '../services/dossierStore.js';
+import { purgeTenderFiles, shouldUpgradeDocType, renameDossierToCanonical } from '../services/dossierStore.js';
 import { canRunHeavyNetworkTask } from '../services/networkMonitor.js';
 import { deriveDossierLabel } from '../services/dossierManager.js';
 import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
@@ -143,7 +146,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string, onTimeou
 export async function fetchAndReadDocumentsUpfront(
   tenderId: string,
   item: RawScrapedItem,
-  urls: string[]
+  urls: string[],
+  portalId?: string
 ): Promise<{ dossiers: CachedDossier[]; extractions: UpfrontExtraction[]; failedUrls: string[]; visionPendingUrls: string[] }> {
   const budgetEnd = Date.now() + INGEST_DEFAULTS.perTenderBudgetMs;
   const maxBytes = getActiveScanBudget()?.maxFileBytes ?? maxFileBytes();
@@ -154,11 +158,15 @@ export async function fetchAndReadDocumentsUpfront(
 
   await Promise.all(urls.map(async url => {
     const isImage = /\.(jpe?g|png|webp)(\?|$)/i.test(url);
-    const label = isImage ? 'Tender Notice Image' : deriveDossierLabel(url, `${item.title.slice(0, 30)}_Doc`);
+    const label = isImage ? 'Tender Notice Image' : deriveDossierLabel(url);
     const controller = new AbortController();
     try {
       const doc = await withTimeout(
-        crawlerDeps.downloadAndCacheDossier(tenderId, url, label, { signal: controller.signal, maxBytes }),
+        crawlerDeps.downloadAndCacheDossier(tenderId, url, label, {
+          signal: controller.signal,
+          maxBytes,
+          tenderMeta: { portalId: portalId || null, referenceNo: item.referenceNo || null, title: item.title }
+        }),
         budgetEnd - Date.now(),
         'download',
         () => controller.abort()
@@ -180,8 +188,20 @@ export async function fetchAndReadDocumentsUpfront(
         budgetEnd - Date.now(),
         'extract'
       );
+      let finalDoc = doc;
+      if (shouldUpgradeDocType(doc.docType, result.docType)) {
+        const renamed = renameDossierToCanonical(
+          { id: tenderId, portal_id: portalId, reference_no: item.referenceNo || null, title: item.title },
+          doc,
+          result.docType,
+          dossiers
+        );
+        finalDoc = renamed.dossier;
+        const idx = dossiers.indexOf(doc);
+        if (idx >= 0) dossiers[idx] = finalDoc;
+      }
       if (result.needsVision) visionPendingUrls.push(url);
-      extractions.push({ dossier: doc, result });
+      extractions.push({ dossier: finalDoc, result });
     } catch (err: any) {
       controller.abort();
       console.warn(`[CrawlIngest] Upfront document fetch for ${tenderId} deferred (${url}):`, err.message);
@@ -262,16 +282,35 @@ export function applyRescanToExistingTender(
     });
   }
 
-  if (existing.pipeline_status !== 'Passed' && candidates.length > 0) {
-    mergeTenderAttachmentUrls(existing.id, candidates);
-    try {
-      const added = enqueueDocumentJobs(
-        existing.id,
-        candidates.map(url => ({ url, label: deriveDossierLabel(url, `${existing.title.slice(0, 30)}_Doc`) }))
-      );
-      if (added > 0) refreshTenderDocFetchStatus(existing.id);
-    } catch (err: any) {
-      console.warn(`[CrawlIngest] Could not queue re-scan documents for ${existing.id}:`, err.message);
+  if (existing.pipeline_status !== 'Passed') {
+    const cachedUrls = new Set(
+      (Array.isArray(existing.cached_dossiers) ? existing.cached_dossiers : [])
+        .map(d => d.originalUrl)
+        .filter(Boolean)
+    );
+    if (candidates.length > 0) {
+      mergeTenderAttachmentUrls(existing.id, candidates);
+      const uncachedCandidates = candidates.filter(url => !cachedUrls.has(url));
+      if (uncachedCandidates.length > 0) {
+        try {
+          const added = enqueueDocumentJobs(
+            existing.id,
+            uncachedCandidates.map(url => ({ url, label: deriveDossierLabel(url) }))
+          );
+          if (added > 0) refreshTenderDocFetchStatus(existing.id);
+        } catch (err: any) {
+          console.warn(`[CrawlIngest] Could not queue re-scan documents for ${existing.id}:`, err.message);
+        }
+      }
+    } else if (cachedUrls.size === 0 && isDetailPageDiscoveryUrl(item.directUrl, portal.id)) {
+      try {
+        const added = enqueueDocumentJobs(existing.id, [
+          { url: item.directUrl, label: DETAIL_DISCOVER_LABEL, priority: JOB_PRIORITY.primary }
+        ]);
+        if (added > 0) refreshTenderDocFetchStatus(existing.id);
+      } catch (err: any) {
+        console.warn(`[CrawlIngest] Could not queue detail discovery for ${existing.id}:`, err.message);
+      }
     }
   }
 
@@ -333,7 +372,7 @@ export function holdForDocumentScope(tenderId: string, item: RawScrapedItem, por
     review_reason: null
   });
   try {
-    enqueueDocumentJobs(tenderId, candidates.slice(0, UPFRONT_MAX_DOCS).map(url => ({ url, label: deriveDossierLabel(url, `${item.title.slice(0, 30)}_Doc`) })));
+    enqueueDocumentJobs(tenderId, candidates.slice(0, UPFRONT_MAX_DOCS).map(url => ({ url, label: deriveDossierLabel(url) })));
     refreshTenderDocFetchStatus(tenderId);
   } catch (err: any) {
     console.warn(`[CrawlIngest] Could not queue scope documents for ${tenderId}:`, err.message);
@@ -411,14 +450,13 @@ export async function processAndSaveTender(
   }
 
   // ---- Document ingest (docs/13-ingestion-pipeline-plan.md, Phase 3) ----
-  const isDirectDoc = isDirectDocumentUrl(item.directUrl);
   const inferredPublishDate = item.publishDate ? null : inferPublishDateFromUrl(item.directUrl) || candidates.map(inferPublishDateFromUrl).find(Boolean) || null;
   const publishDateSource = item.publishDate ? 'listing' : inferredPublishDate ? 'upload_folder' : null;
 
   // Upfront (blocking) fetch only when the documents are needed to decide Rule B6: the tender
-  // has no deadline yet, or its link IS the document. Dated tenders insert straight away and
-  // their documents are fetched by the background worker.
-  const needsUpfront = (!item.closingDate || isDirectDoc) && candidates.length > 0;
+  // has no deadline yet. Dated tenders insert straight away so scans stay fast and their
+  // documents are fetched immediately afterward by the prioritized background worker.
+  const needsUpfront = !item.closingDate && candidates.length > 0;
   const runUpfront = needsUpfront && hasUpfrontTime() && canRunHeavyNetworkTask();
   if (runUpfront) {
     // Stage the new tender so Inbox/Pipeline/analytics queries ignore it via NOT_STAGING_SQL
@@ -457,7 +495,7 @@ export async function processAndSaveTender(
   }
 
   const upfront = runUpfront
-    ? await fetchAndReadDocumentsUpfront(tenderId, item, candidates.slice(0, UPFRONT_MAX_DOCS))
+    ? await fetchAndReadDocumentsUpfront(tenderId, item, candidates.slice(0, UPFRONT_MAX_DOCS), portal.id)
     : { dossiers: [] as CachedDossier[], extractions: [] as UpfrontExtraction[], failedUrls: [] as string[], visionPendingUrls: [] as string[] };
   const fetchedUrls = new Set(upfront.dossiers.map(d => d.originalUrl));
   const toQueue = candidates.filter(u => !fetchedUrls.has(u) || upfront.visionPendingUrls.includes(u));
@@ -566,7 +604,15 @@ export async function processAndSaveTender(
     : tenderEmbeddingBuf;
   const deadlineSource = item.closingDate ? (resolved.source || 'html_row') : null;
   const deadlineConfidence = item.closingDate ? (resolved.confidence || (deadlineSource === 'html_row' ? null : 'medium')) : null;
-  const docFetchStatus = toQueue.length > 0 ? 'pending' : upfront.dossiers.length > 0 ? 'complete' : upfront.failedUrls.length > 0 ? 'failed' : 'none';
+  const shouldQueueDetailDiscover = candidates.length === 0 && isDetailPageDiscoveryUrl(item.directUrl, portal.id);
+  const docFetchStatus =
+    toQueue.length > 0 || shouldQueueDetailDiscover
+      ? 'pending'
+      : upfront.dossiers.length > 0
+        ? 'complete'
+        : upfront.failedUrls.length > 0
+          ? 'failed'
+          : 'none';
 
   upsertScrapedTender({
     id: tenderId,
@@ -604,13 +650,20 @@ export async function processAndSaveTender(
   });
 
   // Everything not read upfront (dated tenders, remaining attachments, timeouts, scanned files
-  // waiting for Vision budget) goes to the durable retry queue for the background worker.
+  // waiting for Vision budget) or dedicated detail pages goes to the durable queue for the worker.
   if (toQueue.length > 0) {
     try {
-      enqueueDocumentJobs(tenderId, toQueue.map(url => ({ url, label: deriveDossierLabel(url, `${item.title.slice(0, 30)}_Doc`) })));
+      enqueueDocumentJobs(tenderId, toQueue.map(url => ({ url, label: deriveDossierLabel(url) })));
       refreshTenderDocFetchStatus(tenderId);
     } catch (err: any) {
       console.warn(`[CrawlIngest] Could not queue documents for ${tenderId}:`, err.message);
+    }
+  } else if (shouldQueueDetailDiscover) {
+    try {
+      enqueueDocumentJobs(tenderId, [{ url: item.directUrl, label: DETAIL_DISCOVER_LABEL, priority: JOB_PRIORITY.primary }]);
+      refreshTenderDocFetchStatus(tenderId);
+    } catch (err: any) {
+      console.warn(`[CrawlIngest] Could not queue detail discovery for ${tenderId}:`, err.message);
     }
   }
 

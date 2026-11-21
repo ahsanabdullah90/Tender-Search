@@ -169,8 +169,21 @@ export function isNavigationRow(item: RawScrapedItem, portal: PortalDefinition):
   return false;
 }
 
+export function stripLiteralHtmlTags(text: string): string {
+  return (text || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export function sanitizeScrapedItems(items: RawScrapedItem[], portal: PortalDefinition): RawScrapedItem[] {
-  return items.filter(it => !isNavigationRow(it, portal));
+  const cleaned: RawScrapedItem[] = [];
+  for (const item of items) {
+    const cleanTitle = stripLiteralHtmlTags(item.title || '');
+    if (cleanTitle.length <= 5) continue;
+    const nextItem = cleanTitle === item.title ? item : { ...item, title: cleanTitle };
+    if (!isNavigationRow(nextItem, portal)) {
+      cleaned.push(nextItem);
+    }
+  }
+  return cleaned;
 }
 
 export function collectRowAttachments($: cheerio.CheerioAPI, el: any, portal: PortalDefinition): string[] {
@@ -343,14 +356,16 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const fullUrl = resolvePortalUrl(href, portal);
       if (seenUrls.has(fullUrl)) return;
 
-      const liText = $(aEl).find('li').first().text().replace(/\s+/g, ' ').trim() || $(aEl).text().replace(/\s+/g, ' ').trim();
+      const liText = stripLiteralHtmlTags(
+        $(aEl).find('li').first().text().replace(/\s+/g, ' ').trim() || $(aEl).text().replace(/\s+/g, ' ').trim()
+      );
       const fileSlug = decodeURIComponent(fullUrl.split('/').pop() || '')
         .replace(/\.pdf$/i, '')
         .replace(/^(?:Tender[-_ ]Document[-_ ]|Bidding[-_ ]Document[-_ ])/i, '')
         .replace(/[-_]+/g, ' ')
         .trim();
 
-      const isGenericLabel = !liText || GENERIC_LINK_LABELS.test(liText) || /^(tender\s+document(?:\s+uploaded)?|bidding\s+document|corrigendum(?:\s+bd|\s+tender\s+doc)?|advertisement(?:\s+\d+)?|formats?|ks)$/i.test(liText);
+      const isGenericLabel = !liText || liText.length <= 5 || GENERIC_LINK_LABELS.test(liText) || /^(tender\s+document(?:\s+uploaded)?|bidding\s+document|corrigendum(?:\s+bd|\s+tender\s+doc)?|advertisement(?:\s+\d+)?|formats?|ks)$/i.test(liText);
       const title = isGenericLabel ? fileSlug : liText;
       if (!title || title.length <= 5) return;
       if (/^(tender\s+document(?:\s+uploaded)?|bidding\s+document|corrigendum(?:\s+bd|\s+tender\s+doc)?|advertisement(?:\s+\d+)?|formats?|ks)$/i.test(title)) return;
@@ -376,7 +391,9 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 
     // 3b. Parse advertisement listing boxes (.inner-advertisement-listing-box)
     $('.inner-advertisement-listing-box').each((_, el) => {
-      const title = ($(el).find('h4.listingadver-title1').first().text() || $(el).find('h4, h3, .listingadver-title1').first().text()).replace(/\s+/g, ' ').trim();
+      const title = stripLiteralHtmlTags(
+        ($(el).find('h4.listingadver-title1').first().text() || $(el).find('h4, h3, .listingadver-title1').first().text()).replace(/\s+/g, ' ').trim()
+      );
       if (title.length <= 5 || seenTitles.has(title.toLowerCase())) return;
       if (isNonBidEvaluationOrPlanTitle(title)) return;
       seenTitles.add(title.toLowerCase());
@@ -403,7 +420,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         attachmentUrls
       });
     });
-    if (items.length > 0) return { items, hitlRequired: false };
+    if (items.length > 0) return { items: sanitizeScrapedItems(items, portal), hitlRequired: false };
   }
 
   // 3b. Structured BPPRA ePPS Multi-Row Table (tr.tender-row-main + sibling tr.tender-row-dates)

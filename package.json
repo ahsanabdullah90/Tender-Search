@@ -17,7 +17,7 @@
     "seed:sample": "tsx scripts/seed-sample.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --maxWorkers=1",
     "test:e2e": "playwright test",
     "probe:portals": "tsx scripts/probe-portals.ts",
     "shortcut": "powershell -ExecutionPolicy Bypass -File scripts/create-desktop-shortcut.ps1"

@@ -5,18 +5,23 @@ import {
   DOSSIERS_DIR,
   getTenderById,
   updateTenderFields,
-  getGeminiApiKey
+  getGeminiApiKey,
+  mergeTenderAttachmentUrls,
+  setTenderProvenance,
+  markDocumentJobsDoneForUrls,
+  refreshTenderDocFetchStatus
 } from '../db/index.js';
 import { Tender, CachedDossier } from '../../shared/types.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
-import { downloadAndCacheDossier, deriveDossierLabel } from '../services/dossierManager.js';
-import { saveTenderDocument, getPortalFileCode } from '../services/dossierStore.js';
+import { downloadAndCacheDossier, deriveDossierLabel, isHtmlContent, detectExtensionAndMime } from '../services/dossierManager.js';
+import { saveTenderDocument, getPortalFileCode, shouldUpgradeDocType, renameDossierToCanonical } from '../services/dossierStore.js';
 import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import { applyDocumentResultToTender } from '../services/documentApply.js';
 import { summarizeTenderTextWithAI } from '../services/ocrService.js';
 import { tryConsumeDailyAiText } from '../services/ingestBudget.js';
 import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
 import { isGenericListingUrl, collectRowAttachments, parseEpmsDetailHtml, cleanRowSummary } from './portalParsers.js';
+import { orderDocumentCandidates } from './ingestPipeline.js';
 import { crawlerDeps } from './crawlerDeps.js';
 
 /** Reads a cached dossier's bytes from disk, or null if it is missing. */
@@ -64,13 +69,51 @@ function applyEpmsDetailMetadata(tender: Tender, html: string, forceRefresh: boo
   }
 }
 
+export interface FetchDocumentsResult {
+  tender: Tender | null;
+  dossiers: CachedDossier[];
+  newlyFetched: number;
+  expired: boolean;
+}
+
+const inFlightDocFetches = new Map<string, Promise<FetchDocumentsResult>>();
+const activeDocFetchIds = new Set<string>();
+
+/** Returns tender IDs currently undergoing an active on-demand/detail document fetch. */
+export function getInFlightDocFetchTenderIds(): string[] {
+  return Array.from(activeDocFetchIds);
+}
+
 /**
- * On-demand document scraper that inspects a tender's direct_url and downloads/caches attachments
+ * On-demand (and background detail-discovery) document scraper:
+ *  - short-circuits cleanly if dossiers are already cached and `forceRefresh` is false;
+ *  - downloads any queued/stored `attachment_urls` and direct document URL first;
+ *  - inspects dedicated detail pages (EPMS PPRA, FDE, Punjab detail) when needed;
+ *  - reconciles `document_ingest_jobs` and `doc_fetch_status`;
+ *  - extracts deadlines, BidBrief, and FTS5 full text from downloaded files.
  */
 export async function fetchDocumentsForTender(
   tenderId: string,
-  _options: { forceRefresh?: boolean } = {}
-): Promise<{ tender: Tender | null; dossiers: CachedDossier[]; newlyFetched: number; expired: boolean }> {
+  options: { forceRefresh?: boolean; throwOnDetailError?: boolean } = {}
+): Promise<FetchDocumentsResult> {
+  if (!options.forceRefresh && !options.throwOnDetailError) {
+    const existingFlight = inFlightDocFetches.get(tenderId);
+    if (existingFlight) return existingFlight;
+    const runPromise = runFetchDocumentsForTender(tenderId, options).finally(() => {
+      if (inFlightDocFetches.get(tenderId) === runPromise) {
+        inFlightDocFetches.delete(tenderId);
+      }
+    });
+    inFlightDocFetches.set(tenderId, runPromise);
+    return runPromise;
+  }
+  return runFetchDocumentsForTender(tenderId, options);
+}
+
+async function runFetchDocumentsForTender(
+  tenderId: string,
+  options: { forceRefresh?: boolean; throwOnDetailError?: boolean } = {}
+): Promise<FetchDocumentsResult> {
   const tender = getTenderById(tenderId);
   if (!tender) {
     throw new Error(`Tender not found: ${tenderId}`);
@@ -80,100 +123,161 @@ export async function fetchDocumentsForTender(
   }
 
   const dossiers: CachedDossier[] = Array.isArray(tender.cached_dossiers) ? [...tender.cached_dossiers] : [];
+  const cachedUrls = new Set(dossiers.map(d => d.originalUrl).filter(Boolean));
   const portalCode = getPortalFileCode(tender.portal_id);
   let newlyFetched = 0;
 
-  if (tender.direct_url && tender.direct_url.startsWith('http')) {
-    const isDirectFile = /\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url) || /[?&]wpdmdl=\d+/i.test(tender.direct_url);
+  if (!options.forceRefresh && dossiers.length > 0) {
+    markDocumentJobsDoneForUrls(tender.id, Array.from(cachedUrls), { includeDetailDiscover: true });
+    const derived = refreshTenderDocFetchStatus(tender.id);
+    if (derived === 'none') {
+      setTenderProvenance(tender.id, { doc_fetch_status: 'complete' });
+    }
+    return {
+      tender: getTenderById(tender.id),
+      dossiers,
+      newlyFetched: 0,
+      expired: false
+    };
+  }
 
-    if (isDirectFile) {
-      try {
-        const buf = await crawlerDeps.fetchFileBuffer(tender.direct_url);
-        const doc = saveTenderDocument(tender.id, buf, {
-          portalCode,
-          referenceNo: tender.reference_no,
-          title: tender.title,
-          label: deriveDossierLabel(tender.direct_url, 'Tender Document'),
-          originalUrl: tender.direct_url,
-          source: 'portal_scrape'
-        });
-        if (!dossiers.some(d => d.sha256 === doc.sha256 || d.localPath === doc.localPath)) {
-          dossiers.unshift(doc);
-          newlyFetched++;
-        }
-      } catch (err: any) {
-        console.warn(`[FetchDocs] Failed to download direct file for ${tender.id}:`, err.message);
+  activeDocFetchIds.add(tenderId);
+  try {
+    crawlerDeps.onDocFetchChange?.();
+  } catch {}
+  try {
+
+  const isDirectFile = Boolean(
+    tender.direct_url &&
+    (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url) || /[?&]wpdmdl=\d+/i.test(tender.direct_url))
+  );
+
+  const downloadAndAttachUrl = async (u: string, idx: number): Promise<boolean> => {
+    if (!u || cachedUrls.has(u) || dossiers.length >= 5) return false;
+    try {
+      const buf = await crawlerDeps.fetchFileBuffer(u);
+      const ct = (buf as any)?.contentType;
+      if (isHtmlContent(buf, ct)) {
+        console.warn(`[FetchDocs] Rejected HTML content from ${u} for ${tender.id}`);
+        return false;
       }
-    } else {
-      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) || {
-        id: tender.portal_id,
-        name: tender.portal_name,
-        baseUrl: new URL(tender.direct_url).origin,
-        tendersUrl: tender.direct_url
-      } as PortalDefinition;
+      const isDirect = isDirectFile && u === tender.direct_url;
+      const detected = detectExtensionAndMime(buf, ct, u);
+      const cdHeader = (buf as any)?.contentDisposition as string | undefined;
+      const doc = saveTenderDocument(tender.id, buf, {
+        portalCode,
+        referenceNo: tender.reference_no,
+        title: tender.title,
+        label: deriveDossierLabel(u, isDirect ? 'Tender Document' : 'Bidding Document', idx + 1),
+        originalUrl: u,
+        contentDisposition: cdHeader,
+        extension: detected.ext,
+        mimeType: detected.mimeType,
+        index: idx + 1,
+        existingDossiers: dossiers,
+        source: 'portal_scrape'
+      });
+      if (!dossiers.some(d => d.sha256 === doc.sha256 || d.originalUrl === doc.originalUrl || d.localPath === doc.localPath)) {
+        dossiers.push(doc);
+        newlyFetched++;
+      }
+      cachedUrls.add(u);
+      return true;
+    } catch (dlErr: any) {
+      console.warn(`[FetchDocs] Failed to download attachment ${u} for ${tender.id}:`, dlErr.message);
+      return false;
+    }
+  };
 
-      const isListing = isGenericListingUrl(tender.direct_url, portalDef);
+  // Step A: Download known candidate URLs (attachment_urls + direct document URL) first.
+  const knownUrls = orderDocumentCandidates({
+    directUrl: tender.direct_url,
+    attachmentUrls: tender.attachment_urls
+  });
+  for (let idx = 0; idx < knownUrls.length; idx++) {
+    if (dossiers.length >= 5) break;
+    await downloadAndAttachUrl(knownUrls[idx], idx);
+  }
 
-      try {
-        const html = await crawlerDeps.fetchHtml(tender.direct_url);
-        applyEpmsDetailMetadata(tender, html, Boolean(_options.forceRefresh));
-        const $ = cheerio.load(html);
-        $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
+  // Step B: Inspect detail page HTML when no dossiers were cached yet, forceRefresh is set, or EPMS needs metadata/attachments.
+  let detailPageChecked = false;
+  if (
+    tender.direct_url &&
+    tender.direct_url.startsWith('http') &&
+    !isDirectFile &&
+    (dossiers.length === 0 || Boolean(options.forceRefresh) || tender.direct_url.includes('epms.ppra.gov.pk'))
+  ) {
+    const portalDef = PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) || {
+      id: tender.portal_id,
+      name: tender.portal_name,
+      baseUrl: new URL(tender.direct_url).origin,
+      tendersUrl: tender.direct_url
+    } as PortalDefinition;
 
-        let targetEl: any = $('body').get(0);
+    const isListing = isGenericListingUrl(tender.direct_url, portalDef);
 
-        if (isListing) {
-          let matchingContainer: cheerio.Cheerio<any> | null = null;
-          $('tr, .job-post-item, .tender-card, .card, article').each((_, el) => {
-            const text = $(el).text();
-            if (
-              (tender.reference_no && text.includes(tender.reference_no)) ||
-              (tender.title && text.toLowerCase().includes(tender.title.toLowerCase().slice(0, 30)))
-            ) {
-              matchingContainer = $(el);
-              return false;
-            }
-          });
-          if (matchingContainer) {
-            targetEl = (matchingContainer as any).get(0);
+    try {
+      const html = await crawlerDeps.fetchHtml(tender.direct_url);
+      detailPageChecked = true;
+      applyEpmsDetailMetadata(tender, html, Boolean(options.forceRefresh));
+      const $ = cheerio.load(html);
+      $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
+
+      let targetEl: any = $('body').get(0);
+
+      if (isListing) {
+        let matchingContainer: cheerio.Cheerio<any> | null = null;
+        $('tr, .job-post-item, .tender-card, .card, article').each((_, el) => {
+          const text = $(el).text();
+          if (
+            (tender.reference_no && text.includes(tender.reference_no)) ||
+            (tender.title && text.toLowerCase().includes(tender.title.toLowerCase().slice(0, 30)))
+          ) {
+            matchingContainer = $(el);
+            return false;
           }
+        });
+        if (matchingContainer) {
+          targetEl = (matchingContainer as any).get(0);
         }
+      }
 
-        const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
-        for (let idx = 0; idx < discoveredUrls.slice(0, 5).length; idx++) {
-          const u = discoveredUrls[idx];
-          try {
-            const buf = await crawlerDeps.fetchFileBuffer(u);
-            const doc = saveTenderDocument(tender.id, buf, {
-              portalCode,
-              referenceNo: tender.reference_no,
-              title: tender.title,
-              label: deriveDossierLabel(u, 'Bidding Document', idx + 1),
-              originalUrl: u,
-              index: idx + 1,
-              source: 'portal_scrape'
-            });
-            if (!dossiers.some(d => d.sha256 === doc.sha256 || d.originalUrl === doc.originalUrl || d.localPath === doc.localPath)) {
-              dossiers.push(doc);
-              newlyFetched++;
-            }
-          } catch (dlErr: any) {
-            console.warn(`[FetchDocs] Failed to download discovered attachment ${u} for ${tender.id}:`, dlErr.message);
-          }
-        }
-      } catch (err: any) {
-        console.warn(`[FetchDocs] Could not fetch detail page for ${tender.id}:`, err.message);
+      const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
+      if (discoveredUrls.length > 0) {
+        mergeTenderAttachmentUrls(tender.id, discoveredUrls);
+      }
+      for (let idx = 0; idx < discoveredUrls.slice(0, 5).length; idx++) {
+        if (dossiers.length >= 5) break;
+        await downloadAndAttachUrl(discoveredUrls[idx], dossiers.length + idx);
+      }
+    } catch (err: any) {
+      console.warn(`[FetchDocs] Could not fetch detail page for ${tender.id}:`, err.message);
+      if (options.throwOnDetailError && dossiers.length === 0) {
+        throw err;
       }
     }
   }
 
-  // Save the document list first, then read documents through the same rules as the background
-  // worker (docs/16 B3): read when something new was downloaded or a field is still missing.
+  // Save the document list first, reconcile queue jobs, then read documents through the shared rules (B3).
   updateTenderFields(tender.id, { cached_dossiers: dossiers });
+  markDocumentJobsDoneForUrls(tender.id, Array.from(cachedUrls), {
+    includeDetailDiscover: dossiers.length > 0 || detailPageChecked
+  });
+  const derivedStatus = refreshTenderDocFetchStatus(tender.id);
+  if (derivedStatus === 'none' && dossiers.length > 0) {
+    setTenderProvenance(tender.id, { doc_fetch_status: 'complete' });
+  }
 
-  const needsReading = newlyFetched > 0 || !tender.closing_date || !tender.reference_no || !tender.description || tender.description === tender.title;
+  const needsReading =
+    newlyFetched > 0 ||
+    !tender.closing_date ||
+    !tender.reference_no ||
+    !tender.description ||
+    tender.description === tender.title;
   if (dossiers.length > 0 && needsReading) {
-    for (const doc of dossiers) {
+    let dossiersRenamed = false;
+    for (let i = 0; i < dossiers.length; i++) {
+      const doc = dossiers[i];
       if (!isReadableDocumentMime(doc.mimeType)) continue;
       const buf = readCachedDossier(tender.id, doc);
       if (!buf) continue;
@@ -183,18 +287,35 @@ export async function fetchDocumentsForTender(
           title: tender.title,
           organization: tender.organization
         });
-        if (docResult.closingDateISO || docResult.referenceNo || docResult.summaryScope || docResult.bidBrief || docResult.extractedText) {
+        if (shouldUpgradeDocType(doc.docType as any, docResult.docType)) {
+          const renamed = renameDossierToCanonical(tender, doc, docResult.docType, dossiers);
+          dossiers[i] = renamed.dossier;
+          dossiersRenamed = true;
+        }
+        if (
+          docResult.closingDateISO ||
+          docResult.referenceNo ||
+          docResult.summaryScope ||
+          docResult.bidBrief ||
+          docResult.extractedText
+        ) {
+          if (dossiersRenamed) {
+            updateTenderFields(tender.id, { cached_dossiers: dossiers });
+            dossiersRenamed = false;
+          }
           const applied = applyDocumentResultToTender(getTenderById(tender.id) || tender, docResult);
           if (applied === 'expired') {
             // Signal the removal explicitly instead of returning a fake 'Deleted' tender,
             // which the Inbox kept rendering as a ghost row.
             return { tender: null, dossiers, newlyFetched, expired: true };
           }
-          break;
         }
       } catch (e: any) {
         console.warn(`[FetchDocs] Extraction failed for document ${doc.label || doc.localPath}:`, e.message);
       }
+    }
+    if (dossiersRenamed) {
+      updateTenderFields(tender.id, { cached_dossiers: dossiers });
     }
   }
 
@@ -206,6 +327,12 @@ export async function fetchDocumentsForTender(
     newlyFetched,
     expired: false
   };
+  } finally {
+    activeDocFetchIds.delete(tenderId);
+    try {
+      crawlerDeps.onDocFetchChange?.();
+    } catch {}
+  }
 }
 
 /**
@@ -299,7 +426,8 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
 
   // 2. Read the first cached document that yields something, through the shared rules (B3).
   let docResult: DocumentExtractionResult | null = null;
-  for (const doc of dossiers) {
+  for (let i = 0; i < dossiers.length; i++) {
+    const doc = dossiers[i];
     if (!isReadableDocumentMime(doc.mimeType)) continue;
     const buf = readCachedDossier(tender.id, doc);
     if (!buf) continue;
@@ -308,6 +436,10 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
       title: tender.title,
       organization: tender.organization
     });
+    if (shouldUpgradeDocType(doc.docType as any, r.docType)) {
+      dossiers[i] = renameDossierToCanonical(tender, doc, r.docType, dossiers).dossier;
+      updateTenderFields(tender.id, { cached_dossiers: dossiers });
+    }
     if (r.closingDateISO || r.referenceNo || r.summaryScope || r.bidBrief || r.extractedText) {
       docResult = r;
       break;

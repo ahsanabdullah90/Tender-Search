@@ -198,6 +198,13 @@ export function appendTenderExtractedText(id: string, text: string): boolean {
   return db.prepare('UPDATE tenders SET extracted_text = ? WHERE id = ?').run(combined, id).changes > 0;
 }
 
+export function hasTenderExtractedText(id: string): boolean {
+  const row = db.prepare(`SELECT length(COALESCE(extracted_text, '')) AS len FROM tenders WHERE id = ?`).get(id) as
+    | { len: number }
+    | undefined;
+  return Boolean(row && row.len > 0);
+}
+
 export function getAllTenders(filters?: {
   track?: string;
   portalId?: string;
@@ -291,13 +298,59 @@ export function getAllTenders(filters?: {
     });
   }
 
-  return rows.map(mapTenderRow);
+  return attachDocJobCounts(rows.map(mapTenderRow));
 }
 
 export function getTenderById(id: string): Tender | null {
   const row = db.prepare('SELECT * FROM tenders WHERE id = ?').get(id) as any;
   if (!row) return null;
-  return mapTenderRow(row);
+  return attachDocJobCounts([mapTenderRow(row)])[0];
+}
+
+function attachDocJobCounts(tenders: Tender[]): Tender[] {
+  if (tenders.length === 0) return tenders;
+  const countsByTender = new Map<string, { pending: number; processing: number; done: number; failed: number }>();
+
+  try {
+    if (tenders.length === 1) {
+      const rows = db.prepare(`
+        SELECT status, COUNT(*) AS n FROM document_ingest_jobs WHERE tender_id = ? GROUP BY status
+      `).all(tenders[0].id) as { status: string; n: number }[];
+      if (rows.length > 0) {
+        const c = { pending: 0, processing: 0, done: 0, failed: 0 };
+        for (const r of rows) {
+          if (r.status in c) (c as any)[r.status] = r.n;
+        }
+        countsByTender.set(tenders[0].id, c);
+      }
+    } else {
+      const rows = db.prepare(`
+        SELECT tender_id, status, COUNT(*) AS n FROM document_ingest_jobs GROUP BY tender_id, status
+      `).all() as { tender_id: string; status: string; n: number }[];
+      for (const r of rows) {
+        let c = countsByTender.get(r.tender_id);
+        if (!c) {
+          c = { pending: 0, processing: 0, done: 0, failed: 0 };
+          countsByTender.set(r.tender_id, c);
+        }
+        if (r.status in c) (c as any)[r.status] = r.n;
+      }
+    }
+  } catch {
+    return tenders;
+  }
+
+  return tenders.map(t => {
+    const c = countsByTender.get(t.id);
+    if (!c) return t;
+    return {
+      ...t,
+      doc_jobs_pending: c.pending,
+      doc_jobs_processing: c.processing,
+      doc_jobs_done: c.done,
+      doc_jobs_failed: c.failed
+    };
+  });
 }
 
 export function updateTenderStatus(id: string, newStatus: string, notes?: string) {
@@ -891,6 +944,42 @@ export function findDedupCandidates(closingDate?: string | null, excludePortalId
 
 export function getAllTenderDossierRows(): { id: string; cached_dossiers: string }[] {
   return db.prepare('SELECT id, cached_dossiers FROM tenders').all() as { id: string; cached_dossiers: string }[];
+}
+
+export interface TenderDossierMigrationRow {
+  id: string;
+  portal_id: string;
+  reference_no: string | null;
+  title: string;
+  cached_dossiers: string;
+}
+
+export function getAllTendersWithDossiers(): TenderDossierMigrationRow[] {
+  return db.prepare(`
+    SELECT id, portal_id, reference_no, title, cached_dossiers
+    FROM tenders
+    WHERE cached_dossiers IS NOT NULL AND cached_dossiers != '[]'
+  `).all() as TenderDossierMigrationRow[];
+}
+
+export interface EarlierDeadlineReviewRow {
+  id: string;
+  closing_date: string | null;
+  deadline_source: string | null;
+  deadline_confidence: string | null;
+  review_reason: string | null;
+  extracted_text: string;
+}
+
+export function getEarlierDeadlineReviewTenders(): EarlierDeadlineReviewRow[] {
+  return db.prepare(`
+    SELECT id, closing_date, deadline_source, deadline_confidence, review_reason, extracted_text
+    FROM tenders
+    WHERE needs_review = 1
+      AND review_reason LIKE 'deadline_moved_earlier:%'
+      AND extracted_text IS NOT NULL
+      AND extracted_text != ''
+  `).all() as EarlierDeadlineReviewRow[];
 }
 
 export function setTenderCachedDossiersRaw(id: string, cachedDossiersJson: string): void {

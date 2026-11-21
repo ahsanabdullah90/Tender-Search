@@ -1,6 +1,7 @@
-import { Paperclip, TriangleAlert, Bookmark } from 'lucide-react';
-import { Tender } from '../../../shared/types';
+import { Paperclip, TriangleAlert, Bookmark, RotateCw } from 'lucide-react';
+import { Tender, DocumentQueueStatus } from '../../../shared/types';
 import { Chip, DeadlineChip } from '../../ui';
+import { getTenderDocProcessingState } from './Detail';
 
 function asList<T>(value: unknown): T[] {
   if (typeof value === 'string') {
@@ -15,6 +16,7 @@ function asList<T>(value: unknown): T[] {
 
 export interface TenderRowProps {
   tender: Tender;
+  docQueue?: DocumentQueueStatus;
   selected: boolean;
   unread: boolean;
   onSelect: () => void;
@@ -22,6 +24,7 @@ export interface TenderRowProps {
 
 export function TenderRow({
   tender,
+  docQueue,
   selected,
   unread,
   onSelect,
@@ -29,6 +32,7 @@ export function TenderRow({
   const tracks = asList<string>(tender.domain_tracks);
   const keywords = asList<string>(tender.matched_keywords);
   const files = asList<{ label?: string; localPath: string }>(tender.cached_dossiers);
+  const docState = getTenderDocProcessingState(tender, docQueue);
   const isSemanticMatch = keywords.some(k => k.startsWith('✨'));
 
   return (
@@ -63,6 +67,24 @@ export function TenderRow({
           )}
         </div>
         <span className="flex shrink-0 items-center gap-2">
+          {(docState.kind === 'processing' || docState.kind === 'queued' || docState.kind === 'failed') && (
+            <span
+              data-testid="row-doc-status"
+              title={docState.bannerTitle}
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ${
+                docState.kind === 'processing'
+                  ? 'bg-accent-soft text-accent'
+                  : docState.kind === 'failed'
+                    ? 'bg-warn-soft text-warn'
+                    : 'bg-surface-2 text-ink-muted'
+              }`}
+            >
+              {docState.kind === 'processing' && (
+                <RotateCw aria-hidden="true" className="h-3 w-3 motion-safe:animate-spin" />
+              )}
+              {docState.shortLabel}
+            </span>
+          )}
           {files.length > 0 && (
             <span
               className="inline-flex items-center gap-0.5 font-mono text-xs text-ink-muted"

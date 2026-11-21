@@ -24,7 +24,7 @@ Returns a list of all active opportunities.
   - `corrigendumOnly` *(optional, `true`\|`false`)*: Filter tenders with active unacknowledged amendments.
   - `unreadOnly` *(optional, `true`\|`false`)*: Filter unviewed opportunities.
   - `excludeExpired` *(optional, `true`\|`false`)*: Exclude tenders whose closing deadline is already in the past. *(Note: Inbox's `Closing <=48h` filter evaluates `closing_date` client-side alongside `GET /api/system/digest?hours=48`.)*
-- **Response**: `200 OK` array of tender objects (including parsed `bid_brief` when structured Go/No-Go brief fields are available).
+- **Response**: `200 OK` array of tender objects (including parsed `bid_brief` when structured Go/No-Go brief fields are available, plus live per-tender queue job counts `doc_jobs_pending`, `doc_jobs_processing`, `doc_jobs_done`, `doc_jobs_failed`).
 
 ### `GET /api/tenders/portal-summary`
 Returns grouped non-expired active tender counts per portal (`getPortalTenderSummary()`).
@@ -120,7 +120,9 @@ Triggers on-demand analysis of the tender's cached documents (read locally first
 - **Response**: `200 OK` (`{"success": true, "tender": {...}}`), the same `expired: true` response as `/refresh`, or `400 Bad Request` if the API key is not configured.
 
 ### `POST /api/tenders/:id/fetch-documents`
-Downloads the tender's documents from the portal now and reads them.
+Downloads the tender's documents from known `attachment_urls` and/or its portal detail page, reconciles matching `document_ingest_jobs` (`status = 'done'`) and `doc_fetch_status`, and reads the downloaded files.
+- **Request Body** *(optional)*:
+  - `forceRefresh` *(boolean, default `true`)*: When `false`, short-circuits immediately if `cached_dossiers` is already non-empty (reconciling pending queue jobs) and deduplicates concurrent in-flight requests for the same tender (`Detail.tsx` auto-fetch on view uses `forceRefresh: false`; clicking **Fetch Documents** forces a fresh portal check).
 - **Response**: `200 OK` (`{"success": true, "tender": {...}, "dossiers": [...], "newlyFetched": n}`) or `{"success": true, "expired": true, "id": "..."}` when the documents show the deadline has passed.
 
 ### `PATCH /api/tenders/:id/review`
@@ -309,14 +311,31 @@ Returns immediate snapshot of crawler status.
     "heldForScope": 3,
     "lastScanTimestamp": "2026-11-13T09:00:00+05:00",
     "lastFullScanTimestamp": "2026-11-13T08:00:00+05:00",
-    "pausedReason": null
+    "pausedReason": null,
+    "docQueue": {
+      "isFetching": true,
+      "readyPending": 14,
+      "readyTenders": 9,
+      "awaitingScopePending": 120,
+      "awaitingScopeTenders": 65,
+      "totalPending": 134,
+      "processing": 2,
+      "processingTenders": 2,
+      "activeTenderIds": ["tender-punjab_eproc-abc123", "tender-epms_ppra-def456"],
+      "completedInRun": 8,
+      "lastUpdatedAt": "2026-11-19T14:40:00.000Z"
+    }
   }
   ```
   - `pausedReason` *(optional `string | null`)*: Explains why a requested scan was paused or deferred (for example, offline or slow network connectivity).
+  - `docQueue` *(optional `DocumentQueueStatus`)*: Live background document queue telemetry (`isFetching`, `readyPending` / `readyTenders`, `awaitingScopePending` / `awaitingScopeTenders`, `totalPending`, active `processing` / `processingTenders`, `activeTenderIds`, `completedInRun`, and `lastUpdatedAt`).
 
 ### `GET /api/scan/progress` & `GET /api/scan/stream`
-Server-Sent Events (SSE) connection streaming real-time scan progress events to connected clients.
-- Event envelope: `data: {"type": "scan_progress", "status": {...}}`.
+Server-Sent Events (SSE) connection streaming real-time scan and background document queue telemetry to connected clients.
+- Event envelope: `data: {"type": "<eventType>", "status": {...}}` where `<eventType>` is:
+  - `"scan_progress"`: Crawler scan progress updates and scan start/completion transitions.
+  - `"doc_queue_progress"`: Live `docQueue` counter updates while `drainDocumentQueue()` is running.
+  - `"documents_updated"`: Emitted after a worker batch completes or expires tenders so connected clients reload tenders, KPIs, and corrigenda immediately.
 
 ---
 

@@ -11,11 +11,11 @@ export const NETWORK_PROBE_ENDPOINTS = [
 export const NETWORK_PROBE_CACHE_TTL_MS = 45_000;
 export const NETWORK_PROBE_TIMEOUT_MS = 4_500;
 export const NETWORK_DEGRADED_RTT_MS = 1_500;
-export const PASSIVE_WINDOW_MS = 3 * 60 * 1000;
+export const PASSIVE_WINDOW_MS = 2 * 60 * 1000;
 export const PASSIVE_DEGRADED_MIN_TIMEOUTS = 3;
 export const PASSIVE_DEGRADED_MIN_HOSTS = 2;
-export const PASSIVE_SLOW_HTML_MS = 12_000;
-export const PASSIVE_SLOW_DOC_MS = 25_000;
+export const PASSIVE_SLOW_HTML_MS = 22_000;
+export const PASSIVE_SLOW_DOC_MS = 30_000;
 
 export interface ProbeResult {
   ok: boolean;

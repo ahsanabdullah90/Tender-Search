@@ -856,4 +856,69 @@ describe('App root component', () => {
       expect(screen.getByRole('button', { name: /Run deep multi-page scan/i })).toBeDisabled();
     });
   });
+
+  it('reloads tenders/KPIs/corrigenda on SSE documents_updated without redundant portal reloads and ignores doc_queue_progress reloads', async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(lastEventSource).not.toBeNull();
+      expect(screen.getByText('Solar Power System')).toBeInTheDocument();
+    });
+
+    const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchSpy.mockClear();
+
+    // 1. doc_queue_progress updates sidebar indicator without triggering API reloads
+    act(() => {
+      lastEventSource.onmessage?.({
+        data: JSON.stringify({
+          type: 'doc_queue_progress',
+          status: {
+            isScanning: false,
+            currentPortal: null,
+            progressPercent: 100,
+            completedPortals: 10,
+            totalPortals: 10,
+            newTendersFound: 0,
+            corrigendaFound: 0,
+            lastScanTimestamp: '2026-11-19T10:00:00Z',
+            docQueue: { isFetching: true, readyPending: 4, awaitingScopePending: 9, totalPending: 13, completedInRun: 1 }
+          }
+        })
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('doc-queue-indicator')).toHaveTextContent('Downloading Inbox docs (4 left)');
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // 2. documents_updated triggers tenders, KPIs, and corrigenda refresh (without /api/portals)
+    act(() => {
+      lastEventSource.onmessage?.({
+        data: JSON.stringify({
+          type: 'documents_updated',
+          status: {
+            isScanning: false,
+            currentPortal: null,
+            progressPercent: 100,
+            completedPortals: 10,
+            totalPortals: 10,
+            newTendersFound: 0,
+            corrigendaFound: 0,
+            lastScanTimestamp: '2026-11-19T10:00:00Z',
+            docQueue: { isFetching: false, readyPending: 0, awaitingScopePending: 9, totalPending: 9, completedInRun: 5 }
+          }
+        })
+      });
+    });
+
+    await waitFor(() => {
+      const urls = fetchSpy.mock.calls.map(c => String(c[0]));
+      expect(urls.some(u => u.includes('/api/tenders'))).toBe(true);
+      expect(urls.some(u => u.includes('/api/kpis'))).toBe(true);
+      expect(urls.some(u => u.includes('/api/corrigenda'))).toBe(true);
+      expect(urls.some(u => u.includes('/api/portals'))).toBe(false);
+    });
+  });
 });

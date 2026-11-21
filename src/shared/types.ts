@@ -112,6 +112,10 @@ export interface Tender {
   deadline_source?: 'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual' | null;
   deadline_confidence?: 'high' | 'medium' | 'low' | null;
   doc_fetch_status?: 'none' | 'pending' | 'partial' | 'complete' | 'failed';
+  doc_jobs_pending?: number;
+  doc_jobs_processing?: number;
+  doc_jobs_done?: number;
+  doc_jobs_failed?: number;
   needs_review?: number;
   review_reason?: string | null;
   attachment_urls?: string[];
@@ -160,6 +164,20 @@ export interface PortalHealth {
   pages_scanned?: number;
 }
 
+export interface DocumentQueueStatus {
+  isFetching: boolean;
+  readyPending: number;
+  readyTenders?: number;
+  awaitingScopePending: number;
+  awaitingScopeTenders?: number;
+  totalPending: number;
+  processing?: number;
+  processingTenders?: number;
+  activeTenderIds?: string[];
+  completedInRun: number;
+  lastUpdatedAt?: string | null;
+}
+
 export interface ScanStatus {
   isScanning: boolean;
   currentPortal: string | null;
@@ -180,6 +198,8 @@ export interface ScanStatus {
   heldForScope?: number;
   /** Explains why a requested scan was paused/deferred (e.g. offline or slow network). */
   pausedReason?: string | null;
+  /** Live status of the background document download queue. */
+  docQueue?: DocumentQueueStatus;
 }
 
 

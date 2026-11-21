@@ -100,15 +100,44 @@ async function defaultRasterizePdf(buf: Buffer, maxPages: number = LOCAL_OCR_DEF
   const pdfjs: any = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const canvasModName = '@napi-rs/canvas';
   const canvasLib: any = await import(canvasModName);
-  const createCanvas = canvasLib.createCanvas || canvasLib.default?.createCanvas;
+  const resolvedCanvas =
+    canvasLib.default && typeof canvasLib.default === 'object' ? { ...canvasLib.default, ...canvasLib } : canvasLib;
+  const createCanvas = resolvedCanvas.createCanvas;
   if (typeof createCanvas !== 'function') {
     throw new Error('@napi-rs/canvas createCanvas export not found');
   }
 
+  // Register DOM canvas constructors globally so pdfjs-dist uses native Path2D/ImageData/DOMMatrix
+  // instead of plain JS polyfill objects (avoids CanvasFillRule errors on ctx.fill(Path2D)).
+  const globalObj = globalThis as Record<string, unknown>;
+  for (const key of ['Path2D', 'ImageData', 'DOMMatrix', 'DOMPoint', 'DOMRect', 'Image'] as const) {
+    if (resolvedCanvas[key] && !globalObj[key]) {
+      globalObj[key] = resolvedCanvas[key];
+    }
+  }
+  const ImageCtor = resolvedCanvas.Image;
+
+  // Guard 9-arg ctx.drawImage(CanvasElement, ...) calls in @napi-rs/canvas on Windows by
+  // converting auxiliary CanvasElement sources to PNG-backed Image instances first.
+  const wrapContextDrawImage = (rawCtx: any) => {
+    if (!rawCtx || typeof rawCtx.drawImage !== 'function') return rawCtx;
+    const origDrawImage = rawCtx.drawImage.bind(rawCtx);
+    rawCtx.drawImage = (src: any, ...rest: any[]) => {
+      if (src && typeof src.toBuffer === 'function' && typeof ImageCtor === 'function') {
+        if (!src.width || !src.height) return;
+        const img = new ImageCtor();
+        img.src = src.toBuffer('image/png');
+        return origDrawImage(img, ...rest);
+      }
+      return origDrawImage(src, ...rest);
+    };
+    return rawCtx;
+  };
+
   const canvasFactory = {
     create(width: number, height: number) {
       const canvas = createCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
-      const context = canvas.getContext('2d');
+      const context = wrapContextDrawImage(canvas.getContext('2d'));
       return { canvas, context };
     },
     reset(pair: { canvas: any; context: any }, width: number, height: number) {
@@ -124,6 +153,7 @@ async function defaultRasterizePdf(buf: Buffer, maxPages: number = LOCAL_OCR_DEF
   const doc = await pdfjs.getDocument({
     data: new Uint8Array(buf),
     isEvalSupported: false,
+    isOffscreenCanvasSupported: false,
     disableFontFace: true,
     useSystemFonts: false,
     verbosity: 0,
@@ -134,12 +164,18 @@ async function defaultRasterizePdf(buf: Buffer, maxPages: number = LOCAL_OCR_DEF
   try {
     const limit = Math.min(doc.numPages, Math.max(1, maxPages));
     for (let p = 1; p <= limit; p++) {
-      const page = await doc.getPage(p);
-      const viewport = page.getViewport({ scale: 2.0 });
-      const { canvas, context } = canvasFactory.create(viewport.width, viewport.height);
-      await page.render({ canvasContext: context, viewport }).promise;
-      pngPages.push(canvas.toBuffer('image/png'));
-      canvasFactory.destroy({ canvas, context });
+      let target: { canvas: any; context: any } | null = null;
+      try {
+        const page = await doc.getPage(p);
+        const viewport = page.getViewport({ scale: 2.0 });
+        target = canvasFactory.create(viewport.width, viewport.height);
+        await page.render({ canvasContext: target.context, viewport, canvasFactory }).promise;
+        pngPages.push(target.canvas.toBuffer('image/png'));
+      } catch (pageErr: any) {
+        console.warn(`[LocalOCR] Failed to rasterize PDF page ${p}:`, pageErr?.message || pageErr);
+      } finally {
+        if (target) canvasFactory.destroy(target);
+      }
     }
   } finally {
     await doc.destroy().catch(() => {});

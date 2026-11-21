@@ -1589,7 +1589,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     it('keeps the listing deadline when a direct document OCR shows an older, past deadline', async () => {
       mockDownloadWritingPdf();
       const listingDeadline = new Date(Date.now() + 15 * DAY).toISOString();
-      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
+      const ocrSpy = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
         ocrResult(new Date(Date.now() - 10 * DAY).toISOString())
       );
 
@@ -1601,7 +1601,16 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       }, psebPortal(), itTracks);
 
       expect(res.isNew).toBe(true);
-      expect(getAllTenders()[0].closing_date).toBe(listingDeadline);
+      const inserted = getAllTenders()[0];
+      // Dated direct-PDF tenders do not block the scan upfront; they queue for the background worker
+      expect(inserted.doc_fetch_status).toBe('pending');
+      expect(ocrSpy).not.toHaveBeenCalled();
+
+      const { processDocumentQueue } = await import('../../src/server/services/ingestWorker.js');
+      const report = await processDocumentQueue(5);
+      expect(report.claimed).toBe(1);
+      expect(ocrSpy).toHaveBeenCalled();
+      expect(getTenderById(inserted.id)?.closing_date).toBe(listingDeadline);
     });
 
     it('background attachment OCR with a past date does not delete a tender with a later known deadline', async () => {
@@ -1649,6 +1658,54 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(result.expired).toBe(false);
       expect(result.tender?.pipeline_status).toBe('New Opportunity');
       expect(getTenderById('tender-audit-fetch-1')?.closing_date).toBe(future);
+    });
+
+    it('fetch-documents downloads stored attachment_urls, reconciles pending queue jobs to complete, and short-circuits when already cached', async () => {
+      const { enqueueDocumentJobs, getJobsForTender } = await import('../../src/server/db/index.js');
+      const punjabPortal = PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!;
+      const future = new Date(Date.now() + 4 * DAY).toISOString();
+      const bidDocUrl = 'https://eproc.punjab.gov.pk/BiddingDocuments/50485054/4949/258280-bid.pdf';
+      const noticeDocUrl = 'https://eproc.punjab.gov.pk/Tenders/50485054/4949/258280-notice.pdf';
+
+      await processAndSaveTender({
+        title: 'Rehabilitation of PEIMA School Buildings',
+        organization: 'School Education Department',
+        directUrl: 'https://eproc.punjab.gov.pk/ActiveTendersDetail.aspx?id=258280',
+        closingDate: future,
+        attachmentUrls: [bidDocUrl, noticeDocUrl]
+      }, punjabPortal, [{ id: 't-edu', name: 'Education', positive_keywords: ['school'], negative_keywords: [], is_active: 1 }]);
+
+      const saved = getAllTenders()[0];
+      expect(saved.doc_fetch_status).toBe('pending');
+      expect(getJobsForTender(saved.id)).toHaveLength(2);
+
+      // Suppose an extra pending job was also queued
+      enqueueDocumentJobs(saved.id, [{ url: bidDocUrl }]);
+
+      const fetchBufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockImplementation(async (url: string) =>
+        Buffer.from(`%PDF-1.4 content for ${url}`)
+      );
+      const fetchHtmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml').mockResolvedValue('<html><body></body></html>');
+      try {
+        const firstRes = await fetchDocumentsForTender(saved.id, { forceRefresh: false });
+        expect(firstRes.newlyFetched).toBe(2);
+        expect(firstRes.dossiers).toHaveLength(2);
+        expect(fetchBufSpy).toHaveBeenCalledTimes(2);
+        // Should not even need detail HTML when attachment_urls already populated dossiers
+        expect(fetchHtmlSpy).not.toHaveBeenCalled();
+        expect(getTenderById(saved.id)?.doc_fetch_status).toBe('complete');
+        expect(getJobsForTender(saved.id).every(j => j.status === 'done')).toBe(true);
+
+        // Second call with forceRefresh: false short-circuits cleanly with 0 network calls
+        fetchBufSpy.mockClear();
+        const secondRes = await fetchDocumentsForTender(saved.id, { forceRefresh: false });
+        expect(secondRes.newlyFetched).toBe(0);
+        expect(secondRes.dossiers).toHaveLength(2);
+        expect(fetchBufSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchBufSpy.mockRestore();
+        fetchHtmlSpy.mockRestore();
+      }
     });
 
     it('analyze does not auto-expire a bookmarked tender', async () => {

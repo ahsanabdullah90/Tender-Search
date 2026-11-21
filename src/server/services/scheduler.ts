@@ -1,10 +1,25 @@
-import { backupDatabase, updatePortalHealth, getScanningPortalIds, getLastSuccessfulScanTimestamp } from '../db/index.js';
+import {
+  backupDatabase,
+  updatePortalHealth,
+  getScanningPortalIds,
+  getLastSuccessfulScanTimestamp,
+  releaseExpiredLeases,
+  reconcileStaleTenderDocFetchStatuses,
+  pruneAlreadyCachedPendingJobs,
+  backfillExistingTenderDocumentJobs,
+  getEarlierDeadlineReviewTenders,
+  setTenderDeadline,
+  clearTenderReviewFlag
+} from '../db/index.js';
 import { getAppSetting, setAppSetting, getAlertsDigest, getDigestSettings } from '../db/repositories/systemRepo.js';
 import { ScanDepth, DigestSummary } from '../../shared/types.js';
-import { startCrawlerScan, getActivePortalsList, currentScanStatus } from '../scrapers/crawlerEngine.js';
+import { startCrawlerScan, getActivePortalsList, currentScanStatus, crawlerDeps } from '../scrapers/crawlerEngine.js';
+import { formatClosingDate } from '../scrapers/dateParser.js';
+import { findSubmissionDeadlines } from './documentExtractor.js';
+import { migrateDossierFilenames, reclassifyExistingDossiersFromText } from './dossierStore.js';
 import { runRetentionCycle } from './retention.js';
 import { backfillModelEmbeddings } from './embeddingBackfill.js';
-import { processDocumentQueue } from './ingestWorker.js';
+import { processDocumentQueue, drainDocumentQueue } from './ingestWorker.js';
 import {
   checkNetworkHealth,
   getCachedNetworkStatus,
@@ -17,6 +32,7 @@ import {
 let schedulerInterval: NodeJS.Timeout | null = null;
 let retentionInterval: NodeJS.Timeout | null = null;
 let documentQueueInterval: NodeJS.Timeout | null = null;
+let startupDocDrainTimer: NodeJS.Timeout | null = null;
 let lastDailyHealthCheck: number = 0;
 
 export const schedulerDeps = {
@@ -26,6 +42,9 @@ export const schedulerDeps = {
   runRetentionCycle: (opts?: any) => runRetentionCycle(opts),
   backfillModelEmbeddings: (limit?: number) => backfillModelEmbeddings(limit),
   processDocumentQueue: (limit?: number) => processDocumentQueue(limit),
+  drainDocumentQueue: (opts?: { maxBatches?: number; batchSize?: number; concurrency?: number }) =>
+    drainDocumentQueue(opts),
+  reclassifyExistingDossiersFromText: () => reclassifyExistingDossiersFromText(),
   sendDigestWebhook: async (webhookUrl: string, payload: DigestSummary) => {
     const res = await fetch(webhookUrl, {
       method: 'POST',
@@ -41,6 +60,31 @@ export const schedulerDeps = {
 /** Returns current calendar date in Pakistan Standard Time (UTC+05:00) as YYYY-MM-DD. */
 export function getPktDateKey(nowMs: number = Date.now()): string {
   return new Date(nowMs + 5 * 3600000).toISOString().slice(0, 10);
+}
+
+/**
+ * Re-runs local deadline parsing on flagged `deadline_moved_earlier` tenders whose stored
+ * `extracted_text` already exists (for instance after a dateParser fix) and restores extended
+ * deadlines while clearing stale review flags.
+ */
+export function recheckEarlierDeadlineReviewTenders(): number {
+  let resolvedCount = 0;
+  const rows = getEarlierDeadlineReviewTenders();
+  for (const row of rows) {
+    const deadlines = findSubmissionDeadlines(row.extracted_text);
+    if (deadlines.length === 0) continue;
+    const latestIso = deadlines[deadlines.length - 1];
+    const latestMs = new Date(latestIso).getTime();
+    const storedMs = row.closing_date ? new Date(row.closing_date).getTime() : NaN;
+    if (Number.isFinite(latestMs) && (!Number.isFinite(storedMs) || latestMs > storedMs)) {
+      const formatted = formatClosingDate(latestIso);
+      const confidence = row.deadline_confidence || (deadlines.length === 1 ? 'high' : 'medium');
+      setTenderDeadline(row.id, latestIso, formatted, row.deadline_source || 'corrigendum_doc', confidence);
+      clearTenderReviewFlag(row.id);
+      resolvedCount++;
+    }
+  }
+  return resolvedCount;
 }
 
 function shouldRunDeepScanNow(nowMs: number = Date.now()): boolean {
@@ -63,6 +107,30 @@ export function initStartupScheduler() {
   } catch (err) {
     console.warn('[Tender Tracker Scheduler] Failed to reset stuck scanning portals:', err);
   }
+
+  // 0b. Recover expired leases, migrate filenames, recheck earlier deadlines, prune cached pending jobs & queue backfill
+  try {
+    const releasedLeases = releaseExpiredLeases();
+    const { filesRenamed } = migrateDossierFilenames();
+    const reviewedResolved = recheckEarlierDeadlineReviewTenders();
+    const pruned = pruneAlreadyCachedPendingJobs();
+    const reconciledStatuses = reconcileStaleTenderDocFetchStatuses();
+    const backfilled = backfillExistingTenderDocumentJobs();
+    if (releasedLeases > 0 || filesRenamed > 0 || reviewedResolved > 0 || pruned > 0 || reconciledStatuses > 0 || backfilled > 0) {
+      console.log(
+        `[Tender Tracker Scheduler] Document queue hygiene: released ${releasedLeases} expired lease(s), renamed ${filesRenamed} file(s), resolved ${reviewedResolved} corrigendum deadline(s), pruned ${pruned} already-cached job(s), reconciled ${reconciledStatuses} status(es), queued ${backfilled} backfill tender(s).`
+      );
+    }
+  } catch (err) {
+    console.warn('[Tender Tracker Scheduler] Document queue startup hygiene note:', err);
+  }
+
+  // 0c. Kick off prioritized document drain automatically whenever any crawl finishes
+  crawlerDeps.onScanFinished = () => {
+    void schedulerDeps.drainDocumentQueue().catch(err =>
+      console.warn('[Tender Tracker Scheduler] Post-scan document drain error:', err)
+    );
+  };
 
   // 1. Run database backup on startup if needed
   schedulerDeps.backupDatabase().catch(err => console.error('Startup backup error:', err));
@@ -100,11 +168,26 @@ export function initStartupScheduler() {
         schedulerDeps.startCrawlerScan(undefined, false, { depth: 'deep' });
         return;
       }
-      await schedulerDeps.processDocumentQueue(5);
+      await schedulerDeps.drainDocumentQueue();
     } catch (err) {
       console.warn('[Tender Tracker Scheduler] Document queue error:', err);
     }
   }, 2 * 60 * 1000);
+
+  // 2c. Short non-blocking startup drain so pending Inbox documents begin downloading within seconds
+  if (startupDocDrainTimer) clearTimeout(startupDocDrainTimer);
+  startupDocDrainTimer = setTimeout(async () => {
+    startupDocDrainTimer = null;
+    try {
+      await schedulerDeps.reclassifyExistingDossiersFromText();
+      if (currentScanStatus.isScanning) return;
+      const net = await checkNetworkHealth();
+      if (!canRunHeavyNetworkTask(net)) return;
+      await schedulerDeps.drainDocumentQueue();
+    } catch (err) {
+      console.warn('[Tender Tracker Scheduler] Startup document drain error:', err);
+    }
+  }, 4000);
 
   // 2. Check if a catch-up scan is required; run daily health check after it finishes (docs/16 B7)
   const catchUpTask = checkAndTriggerCatchUpScan();
@@ -141,6 +224,11 @@ export function initStartupScheduler() {
 }
 
 export function stopStartupScheduler() {
+  crawlerDeps.onScanFinished = null;
+  if (startupDocDrainTimer) {
+    clearTimeout(startupDocDrainTimer);
+    startupDocDrainTimer = null;
+  }
   if (schedulerInterval) {
     clearInterval(schedulerInterval);
     schedulerInterval = null;
