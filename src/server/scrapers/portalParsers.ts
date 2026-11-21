@@ -716,15 +716,17 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
   // 3f. Structured Federal PPRA EPMS Active Tenders Table (https://epms.ppra.gov.pk/public/tenders/active-tenders)
   const epmsRows = $('table tbody tr').filter((_, el) => $(el).find('a[href*="/public/tenders/tender-details/"]').length > 0);
   if (epmsRows.length > 0) {
+    const decodeAmp = (s: string) => s.replace(/&#0*38;|&amp;/gi, '&');
     epmsRows.each((_, el) => {
-      const statusText = $(el).find('td[data-label="Status"]').text().replace(/\s+/g, ' ').trim();
-      if (/^cancelled$/i.test(statusText)) return;
+      const statusCell = $(el).find('td[data-label="Status"]');
+      const statusText = statusCell.text().replace(/\s+/g, ' ').trim();
+      if (/\bcancelled\b/i.test(statusText) || statusCell.find('.badge-danger').length > 0) return;
 
       const detailLink = $(el).find('a[href*="/public/tenders/tender-details/"]').first();
       const directUrl = resolvePortalUrl(detailLink.attr('href'), portal);
 
       const detailsCell = $(el).find('td[data-label="Tender Details"]').first();
-      const title = (detailsCell.find('strong').first().text() || '').replace(/\s+/g, ' ').trim();
+      const title = decodeAmp((detailsCell.find('strong').first().text() || '').replace(/\s+/g, ' ').trim());
       if (!title || title.length <= 5) return;
       if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
 
@@ -732,7 +734,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const ppraRef = (tenderNoCell.find('strong').first().text() || '').replace(/\s+/g, ' ').trim();
       const noticeMethod = (tenderNoCell.find('.badge').first().text() || '').replace(/\s+/g, ' ').trim();
 
-      const snippet = (detailsCell.find('small.text-muted').first().text() || '').replace(/\s+/g, ' ').trim();
+      const snippet = decodeAmp((detailsCell.find('small.text-muted').first().text() || '').replace(/\s+/g, ' ').trim());
       const detailBadges = detailsCell.find('div small.badge').map((__, b) => $(b).text().replace(/\s+/g, ' ').trim()).get().filter(Boolean);
       const sectorBadge = detailBadges[0] || '';
       const inquiryRef = detailBadges[1] && detailBadges[1] !== ppraRef ? detailBadges[1] : '';
@@ -749,9 +751,9 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
           const valEl = $(col).find('.cb-rt-dv').first();
           if (!label || !valEl.length) return;
           if (label === 'organization') {
-            const orgName = valEl.find('strong').first().text().replace(/\s+/g, ' ').trim();
-            const subOffice = valEl.find('.text-dark').first().text().replace(/\s+/g, ' ').trim();
-            const locTxt = valEl.find('small').first().text().replace(/\s+/g, ' ').trim();
+            const orgName = decodeAmp(valEl.find('strong').first().text().replace(/\s+/g, ' ').trim());
+            const subOffice = decodeAmp(valEl.find('.text-dark').first().text().replace(/\s+/g, ' ').trim());
+            const locTxt = decodeAmp(valEl.find('small').first().text().replace(/\s+/g, ' ').trim());
             if (orgName.length > 2) {
               organization = subOffice && subOffice !== orgName ? `${orgName} (${subOffice})` : orgName;
             }
@@ -759,7 +761,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
               location = locTxt;
             }
           } else {
-            detailMeta[label] = valEl.text().replace(/\s+/g, ' ').trim();
+            detailMeta[label] = decodeAmp(valEl.text().replace(/\s+/g, ' ').trim());
           }
         });
       }
@@ -794,7 +796,11 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         closingDate,
         location,
         description,
-        isCorrigendum: /\b(?:corrigendum|amendment|addendum|extension)\b/i.test(`${title} ${snippet} ${detailMeta['tender type'] || ''}`),
+        isCorrigendum:
+          statusCell.find('.badge-corrigendum').length > 0 ||
+          /\b(?:corrigendum|amendment|addendum|extension)\b/i.test(
+            `${title} ${snippet} ${statusText} ${detailMeta['tender type'] || ''}`
+          ),
         attachmentUrls: collectRowAttachments($, el, portal)
       });
     });
@@ -1042,7 +1048,8 @@ export function parseEpmsDetailHtml(html: string): EpmsDetailMetadata | null {
   if (Object.keys(fields).length === 0) return null;
 
   const bidSecRaw = fields['bid security'];
-  const bidSecurityAmount = bidSecRaw
+  const bidSecNormalized = bidSecRaw ? bidSecRaw.replace(/(?:PKR|Rs\.?|[, \t])/gi, '') : '';
+  const bidSecurityAmount = bidSecRaw && !/^0+(?:\.0+)?$/i.test(bidSecNormalized)
     ? (/^(?:PKR|Rs)/i.test(bidSecRaw) ? bidSecRaw : `PKR ${bidSecRaw}`)
     : null;
   const bidMethod = fields['procurement procedure'] || null;

@@ -32,13 +32,13 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     category: 'Regulatory',
     tier: 'http',
     baseUrl: 'https://epms.ppra.gov.pk',
-    tendersUrl: 'https://epms.ppra.gov.pk/public/tenders/active-tenders',
+    tendersUrl: 'https://epms.ppra.gov.pk/public/tenders/active-tenders?status=1',
     fileCode: 'FPPRA',
     description: 'Federal Public Procurement Regulatory Authority open tender board (50/page + public PDFs & bid security)',
     defaultKeywords: ['construction', 'solar', 'stationery', 'education', 'tvet'],
     accessMode: 'public',
-    verifiedStatus: 'Verified open Federal EPMS SSR tender board (50/page + public PDFs)',
-    pagination: { kind: 'query', param: 'page', maxPages: 3, quickMaxPages: 2, deepMaxPages: 5 }
+    verifiedStatus: 'Verified open Federal EPMS SSR tender board (50/page, Published filter + public PDFs)',
+    pagination: { kind: 'query', param: 'page', maxPages: 6, quickMaxPages: 4, deepMaxPages: 20 }
   },
   {
     id: 'punjab_eproc',

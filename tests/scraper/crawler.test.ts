@@ -255,6 +255,56 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(deriveDossierLabel(links[0])).toBe('bidding document 1 415');
     });
 
+    it('handles EPMS cancelled-with-reason rows, Status-column Corrigendum badges, &#38; entities, and zero bid security', () => {
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epms_ppra')!;
+      const html = `
+        <table><tbody>
+          <tr class="cb-rt-main">
+            <td><button class="cb-rt-expand" data-id="10"></button></td>
+            <td data-label="Tender No"><strong>TS0000017212E</strong></td>
+            <td data-label="Tender Details"><strong>Outsourcing of Essential Services for School</strong></td>
+            <td data-label="Status">
+              <span class="badge badge-success">Published</span>
+              <span class="badge badge-corrigendum">Corrigendum</span>
+            </td>
+            <td data-label="Advertised">Nov 04, 2026</td>
+            <td data-label="Closing"><strong>Dec 10, 2026</strong><small>11:00 AM</small></td>
+            <td data-label="Actions"><a href="/public/tenders/tender-details/TS0000017212E">View</a></td>
+          </tr>
+          <tr class="cb-rt-detail" id="cb-rt-detail-10">
+            <td colspan="8"><div class="cb-rt-grid">
+              <div><span class="cb-rt-dl">Organization</span><span class="cb-rt-dv"><strong>NUST</strong><span class="text-dark">School of Civil &amp;#38; Environmental Engineering</span><small>Islamabad - Pakistan</small></span></div>
+            </div></td>
+          </tr>
+          <tr class="cb-rt-main">
+            <td><button class="cb-rt-expand" data-id="11"></button></td>
+            <td data-label="Tender No"><strong>TS0000017372E</strong></td>
+            <td data-label="Tender Details"><strong>Duplicate Repair Notice Should Skip</strong></td>
+            <td data-label="Status"><span class="badge badge-danger">Cancelled</span><small>duplicate</small></td>
+            <td data-label="Advertised">Nov 03, 2026</td>
+            <td data-label="Closing"><strong>Dec 24, 2026</strong><small>11:30 AM</small></td>
+            <td data-label="Actions"><a href="/public/tenders/tender-details/TS0000017372E">View</a></td>
+          </tr>
+        </tbody></table>
+      `;
+
+      const res = parsePortalHtml(html, portal);
+      expect(res.items).toHaveLength(1);
+      expect(res.items[0].referenceNo).toBe('TS0000017212E');
+      expect(res.items[0].isCorrigendum).toBe(true);
+      expect(res.items[0].organization).toBe('NUST (School of Civil & Environmental Engineering)');
+
+      const zeroSecDetail = `
+        <div class="list-group">
+          <div class="list-group-item"><span class="detail-label">Bid Security</span><span class="flex-grow-1">0.00</span></div>
+          <div class="list-group-item"><span class="detail-label">Procurement Procedure</span><span class="flex-grow-1">Single Stage-One Envelope</span></div>
+        </div>
+      `;
+      const meta = parseEpmsDetailHtml(zeroSecDetail);
+      expect(meta?.bidBrief?.bidSecurityAmount).toBeNull();
+      expect(meta?.bidBrief?.bidMethod).toBe('Single Stage-One Envelope');
+    });
+
     it('detects Cloudflare Turnstile challenge and flags hitlRequired (Bug B4)', () => {
       const html = fs.readFileSync(path.join(FIXTURES_DIR, 'cloudflare_challenge', 'page.html'), 'utf8');
       const portal = PORTAL_DEFINITIONS.find(p => p.id === 'epms_ppra')!;

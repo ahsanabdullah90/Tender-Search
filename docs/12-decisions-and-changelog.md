@@ -115,6 +115,9 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–21, 2026)
+- **Federal PPRA (EPMS) Ongoing Scrape Hardening & Domain Track Optimization (November 21, 2026)**:
+  - Filtered `epms_ppra` listing URL server-side (`?status=1` Published only) and bumped pagination (`quickMaxPages: 4` / `deepMaxPages: 20`) in `portalList.ts`.
+  - Hardened EPMS extraction in `portalParsers.ts`: skips `"Cancelled <reason>"` (`.badge-danger`) rows, detects Status-column `.badge-corrigendum`, decodes `&#38;` in agency/sub-office strings, treats zero bid security (`0.00`) as `null`, and adds folder-aware labels (`advertisement_docs/` $\rightarrow$ `Tender Notice`, `tender_attachments/` $\rightarrow$ `Bidding Document`) for numeric EPMS `?file=` PDFs in `dossierManager.ts`.
 - **Balochistan BPPRA Blazor Pagination, Multi-Tab & `:9446` NIT/BOQ API Upgrade (November 21, 2026)**:
   - Added `src/server/scrapers/bppraScraper.ts` driving Blazor Server `Active Tenders` filtering at `100` rows/page with DB early-stop plus `/RFP`, `/PreQualification`, and `/EOI` solicitation tabs (with graceful HTTP SSR fallback).
   - Enhanced `portalParsers.ts` BPPRA extraction with `District` $\rightarrow$ `location`, `Corrigendum` badges, `Closed`/`Cancelled`/`Awarded` skipping, `//Reports/` slash normalization, and `:9446/Reports/...?id=` `directUrl` selection.

@@ -224,6 +224,15 @@ describe('dossierManager', () => {
       expect(deriveDossierLabel(url, 'Bidding Document', 1)).toBe('Bidding Document');
       expect(deriveDossierLabel(url, 'Bidding Document', 2)).toBe('Bidding Document 2');
     });
+
+    it('derives folder-aware labels for EPMS PPRA numeric ?file=<base64> PDFs', () => {
+      const advertUrl = `https://epms.ppra.gov.pk/pdf?file=${Buffer.from('advertisement_docs/12674.pdf', 'utf8').toString('base64')}`;
+      const attachUrl = `https://epms.ppra.gov.pk/pdf?file=${Buffer.from('tender_attachments/12674.pdf', 'utf8').toString('base64')}`;
+      const corrUrl = `https://epms.ppra.gov.pk/pdf?file=${Buffer.from('corrigendum_docs/991.pdf', 'utf8').toString('base64')}`;
+      expect(deriveDossierLabel(advertUrl)).toBe('Tender Notice');
+      expect(deriveDossierLabel(attachUrl)).toBe('Bidding Document');
+      expect(deriveDossierLabel(corrUrl)).toBe('Corrigendum');
+    });
   });
 
   describe('B4 File Validation & Magic Bytes & C4 HTML UTF-8 Decoding', () => {

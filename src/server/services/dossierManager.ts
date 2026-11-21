@@ -65,9 +65,31 @@ export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, in
             .replace(/[-_]+/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-          if (decodedBase.length > 2) {
+          const isOpaqueOrNumericBase =
+            !decodedBase ||
+            decodedBase.length <= 2 ||
+            /^\d+$/.test(decodedBase) ||
+            /^[0-9a-f]{20,}$/i.test(decodedBase) ||
+            /^[0-9a-f]{8}\s[0-9a-f]{4}\s[0-9a-f]{4}\s[0-9a-f]{4}\s[0-9a-f]{12}$/i.test(decodedBase) ||
+            /^[a-zA-Z0-9]{25,}$/.test(decodedBase);
+          if (!isOpaqueOrNumericBase) {
             return decodedBase;
           }
+          const lowerDir = decodedPath.toLowerCase();
+          let folderLabel = 'Bidding Document';
+          if (/corrigend|addend|amendment/.test(lowerDir)) {
+            folderLabel = 'Corrigendum';
+          } else if (/advertisement|notice|\bnit\b/.test(lowerDir)) {
+            folderLabel = 'Tender Notice';
+          } else if (/boq/.test(lowerDir)) {
+            folderLabel = 'BOQ';
+          } else if (/tender_attachments|bidding/.test(lowerDir)) {
+            folderLabel = 'Bidding Document';
+          }
+          if (typeof index === 'number' && index > 1 && !folderLabel.endsWith(` ${index}`)) {
+            return `${folderLabel} ${index}`;
+          }
+          return folderLabel;
         }
       }
     } catch {}
