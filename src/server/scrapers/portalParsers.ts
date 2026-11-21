@@ -426,11 +426,18 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
   // 3b. Structured BPPRA ePPS Multi-Row Table (tr.tender-row-main + sibling tr.tender-row-dates)
   if ($('tr.tender-row-main').length > 0) {
     $('tr.tender-row-main').each((_, el) => {
+      const footerEl = $(el).find('.td-title-footer');
+      const hasClosedBadge =
+        footerEl.find('[title="Closed"], [title="Cancelled"], [title="Canceled"], [title="Awarded"]').length > 0 ||
+        footerEl.find('.badge').toArray().some(b => /\b(Closed|Cancelled|Canceled|Awarded)\b/i.test($(b).text()));
+      if (hasClosedBadge) return;
+
       const titleLink = $(el).find('.td-title-link').first();
       const rawTitleBlock = (titleLink.text() || $(el).find('.td-title-cell').first().text()).replace(/\s+/g, ' ').trim();
       if (!rawTitleBlock || rawTitleBlock.length <= 5) return;
 
-      const refFromBlock = extractRefFromText(rawTitleBlock);
+      const boldRef = titleLink.find('b').first().text().replace(/\s+/g, ' ').trim();
+      const refFromBlock = /^TSE-\d+$/i.test(boldRef) ? boldRef : extractRefFromText(rawTitleBlock);
       let cleanTitle = rawTitleBlock;
       if (refFromBlock) {
         cleanTitle = cleanTitle.replace(refFromBlock, '').trim();
@@ -438,13 +445,22 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       cleanTitle = cleanTitle.replace(/\s+/g, ' ').trim();
       if (cleanTitle.length <= 5) cleanTitle = rawTitleBlock;
 
-      // Extract agency/department, UNSPSC category, and budget from main row cells
+      // Extract agency/department, district location, UNSPSC category, and budget from main row cells
       const agencyText = $(el).find('td:nth-child(3)').text().replace(/\s+/g, ' ').trim();
+      const districtMatch = agencyText.match(/District:\s*([A-Za-z0-9\s,&/-]+?)(?=\s*$|\s+Department:)/i);
+      const rawDistrict = districtMatch?.[1]?.trim().replace(/[.,;:]+$/, '');
+      const location = rawDistrict
+        ? (/balochistan/i.test(rawDistrict) ? rawDistrict : `${rawDistrict}, Balochistan`)
+        : 'Balochistan, Pakistan';
       const unspscText = $(el).find('td:nth-child(4)').text().replace(/\s+/g, ' ').trim();
       const budgetText = (
         $(el).find('td:nth-child(5)').text() ||
-        $(el).find('.td-title-footer').text()
+        footerEl.text()
       ).replace(/Estimated\s*budget\s*:\s*/i, '').replace(/\bOpen\b/gi, '').replace(/\s+/g, ' ').trim();
+
+      const isCorrigendum =
+        footerEl.find('[title="Corrigendum"]').length > 0 ||
+        /\bCorrigendum\s*\(/i.test(footerEl.text());
 
       // Extract dates from sibling .tender-row-dates rows belonging to this rowspan group
       let siblingDatesText = '';
@@ -472,19 +488,24 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const tenderDetailUrl = (titleHref && !titleHref.startsWith('#') && !titleHref.startsWith('javascript:'))
         ? resolvePortalUrl(titleHref, portal)
         : null;
+      const reportUrl =
+        attachmentUrls.find(u => /\/Reports\/.+(?:BiddingDocument|PQNDocument|RFPDocument).*?[?&]id=\d+/i.test(u)) ||
+        attachmentUrls.find(u => /\/Reports\/.+[?&]id=\d+/i.test(u));
       const nonImageDoc = attachmentUrls.find(u => !/\.(jpe?g|png|webp)(\?|$)/i.test(u));
-      const directUrl = tenderDetailUrl || nonImageDoc || portal.tendersUrl;
+      const directUrl = tenderDetailUrl || reportUrl || nonImageDoc || portal.tendersUrl;
       const summaryParts = [agencyText, unspscText].filter(Boolean);
 
       items.push({
         referenceNo: refFromBlock,
         title: cleanTitle,
         organization: agencyText || portal.name,
+        location,
         directUrl,
         publishDate: publishDate || undefined,
         closingDate,
         estimatedValue: budgetText || undefined,
         description: summaryParts.join(' | ').slice(0, 350),
+        isCorrigendum: isCorrigendum || undefined,
         attachmentUrls
       });
     });

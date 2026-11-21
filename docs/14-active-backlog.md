@@ -9,12 +9,13 @@ This document tracks **active operational items and approved non-breaking featur
 ## 1. Portal Maintenance & Periodic Connector Monitoring
 
 ### Item 1: Connector & Session Monitoring
-- **Active Regulatory Coverage (`10/10` online in live DB):**
+- **Active Regulatory Coverage (`11/11` online in live DB):**
   - `epms_ppra`: Replaced Federal EPADS with open Federal PPRA EPMS (`https://epms.ppra.gov.pk/public/tenders/active-tenders`, `tier: 'http'`, `accessMode: 'public'`, 50 opportunities/page, `quickMaxPages: 2` / `deepMaxPages: 5`), paired with deterministic detail-page `BidBrief` and `/pdf?file=` document extraction (`parseEpmsDetailHtml` in `src/server/scrapers/portalParsers.ts` + `applyEpmsDetailMetadata` in `src/server/scrapers/tenderAnalysis.ts`). Legacy `epads` is retired in `deleted_portals` while preserving historical tenders.
   - `punjab_eproc`: Primary Punjab provincial source (`https://eproc.punjab.gov.pk/ActiveTenders.aspx`, ASP.NET postback pagination bumped to `quickMaxPages: 3` / `deepMaxPages: 10`), aggregating tenders across Punjab departments and authorities centrally.
+  - `bppra`: Upgraded Balochistan BPPRA (`https://bpptwo.vdc.services:5451/Tenders`, `tier: 'playwright'`) with `src/server/scrapers/bppraScraper.ts` for Blazor `Active Tenders` 100/page pagination + `/RFP`, `/PreQualification`, and `/EOI` tabs, `District` location & `Corrigendum` extraction (`portalParsers.ts`), and deterministic `:9446` NIT JSON API `BidBrief` / FTS5 text & automatic BOQ PDF discovery (`tenderAnalysis.ts`).
+  - `sppra`: Restored Sindh SPPRA (`https://portalsindh.eprocure.gov.pk/#/`) as the sole active Sindh portal via `src/server/scrapers/sppraApi.ts` (`tier: 'http'`, direct EPADS WSO2 public JSON API + DMS PDF downloads for NIT and PA Published Documents), with Angular `<section class="card">` DOM fallback in `portalParsers.ts` and full unit/contract tests (`tests/unit/sppra-api.test.ts`).
 - **Removed / Blocked Portals (`deleted_portals` in live DB; canonical entries retained in `PORTAL_DEFINITIONS` per `HEAL-7`):**
   - `kppra`: KP government portal migrated to EPADS (`kp.eprocure.gov.pk`), access-walled / timing out (`offline_broken`); archived out of active scans via `deletePortal`.
-  - `sppra`: Restored Sindh SPPRA (`https://portalsindh.eprocure.gov.pk/#/`) as the sole active Sindh portal via `src/server/scrapers/sppraApi.ts` (`tier: 'http'`, direct EPADS WSO2 public JSON API + DMS PDF downloads for NIT and PA Published Documents), with Angular `<section class="card">` DOM fallback in `portalParsers.ts` and full unit/contract tests (`tests/unit/sppra-api.test.ts`).
   - `psda`: Individual Punjab authority (`psda.punjab.gov.pk/tenders`) consistently displays `"No Opening"`; Punjab tenders are covered centrally via `punjab_eproc`, so `psda` was archived via `deletePortal`.
   - `gilgit`: `gilgitbaltistan.gov.pk` lacks a dedicated public tenders board (`offline_broken`); archived via `deletePortal`.
 

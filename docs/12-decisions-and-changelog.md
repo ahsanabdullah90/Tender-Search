@@ -115,6 +115,10 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–21, 2026)
+- **Balochistan BPPRA Blazor Pagination, Multi-Tab & `:9446` NIT/BOQ API Upgrade (November 21, 2026)**:
+  - Added `src/server/scrapers/bppraScraper.ts` driving Blazor Server `Active Tenders` filtering at `100` rows/page with DB early-stop plus `/RFP`, `/PreQualification`, and `/EOI` solicitation tabs (with graceful HTTP SSR fallback).
+  - Enhanced `portalParsers.ts` BPPRA extraction with `District` $\rightarrow$ `location`, `Corrigendum` badges, `Closed`/`Cancelled`/`Awarded` skipping, `//Reports/` slash normalization, and `:9446/Reports/...?id=` `directUrl` selection.
+  - Wired deterministic `https://bpptwo.vdc.services:9446/api/BiddingDocument/GetProc_NITItemsReportDataHTML` enrichment (`tenderAnalysis.ts` + `isDetailPageDiscoveryUrl` in `ingestJobsRepo.ts`) to extract `BidBrief`, `extracted_text`, corrigendum flags, and `Images/BOQManual/*.pdf` downloads with zero AI quota, backed by `tests/unit/bppra-scraper.test.ts`.
 - **Sindh SPPRA Restoration via Official EPADS Public JSON API & DMS PDF Fetcher (November 21, 2026)**:
   - Added `src/server/scrapers/sppraApi.ts` integrating the official Sindh SPPRA EPADS public WSO2 API (`getallpublictenders`, `getallpublisheddocumentdetailbypdid`, `downloadportalfilebyguid` on `apiprd.eprocure.gov.pk`) with `pageSize: 50` quick/deep pagination, SQLite early-stop, PKT timestamp normalization, PKR estimated cost metadata, and synthetic DMS download URLs seamlessly decoded by `dossierManager.ts` (`fetchFileBuffer` / `deriveDossierLabel`) and `tenderAnalysis.ts` (`fetchDocumentsForTender`).
   - Upgraded `sppra` in `portalList.ts` from `playwright` to `http` (`tier: 'http'`, `tendersUrl: 'https://portalsindh.eprocure.gov.pk/#/'`, `pagination.kind: 'api'`), added a deterministic Angular `<section class="card">` fallback parser in `portalParsers.ts`, updated `tests/fixtures/portals/sppra/page.html`, added `tests/unit/sppra-api.test.ts`, and restored `sppra` as the sole active Sindh portal in `./data/tender_tracker.db`.

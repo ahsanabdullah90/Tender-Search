@@ -52,6 +52,9 @@ export function isDetailPageDiscoveryUrl(url?: string | null, portalId?: string 
   if (/fde\.gov\.pk\/download\/[^/?#]+/i.test(url) && !/\/download-category\//i.test(url) && !/[?&]wpdmdl=\d+/i.test(url)) {
     return true;
   }
+  if (portalId === 'bppra' && /bpptwo\.vdc\.services:9446\/+Reports\/.+[?&]id=\d+/i.test(url)) {
+    return true;
+  }
   return false;
 }
 

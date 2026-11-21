@@ -8,6 +8,7 @@ import {
   getGeminiApiKey,
   mergeTenderAttachmentUrls,
   setTenderProvenance,
+  appendTenderExtractedText,
   markDocumentJobsDoneForUrls,
   refreshTenderDocFetchStatus
 } from '../db/index.js';
@@ -22,6 +23,7 @@ import { tryConsumeDailyAiText } from '../services/ingestBudget.js';
 import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
 import { isGenericListingUrl, collectRowAttachments, parseEpmsDetailHtml, cleanRowSummary } from './portalParsers.js';
 import { extractSppraPublishedDocId, fetchSppraPublishedDocuments } from './sppraApi.js';
+import { extractBppraBidId, fetchBppraDetailMetadata } from './bppraScraper.js';
 import { orderDocumentCandidates } from './ingestPipeline.js';
 import { crawlerDeps } from './crawlerDeps.js';
 
@@ -200,9 +202,16 @@ async function runFetchDocumentsForTender(
     await downloadAndAttachUrl(knownUrls[idx], idx);
   }
 
-  // Step B: Inspect detail source (SPPRA published-docs API or HTML detail page) when needed.
+  // Step B: Inspect detail source (SPPRA API, BPPRA :9446 API, or HTML detail page) when needed.
   let detailPageChecked = false;
   const spPublishedDocId = tender.portal_id === 'sppra' ? extractSppraPublishedDocId(tender.direct_url) : null;
+  const bppraBidId = tender.portal_id === 'bppra'
+    ? (
+        extractBppraBidId(tender.direct_url) ??
+        (tender.attachment_urls || []).map(u => extractBppraBidId(u)).find((id): id is number => id !== null) ??
+        null
+      )
+    : null;
   if (spPublishedDocId && (dossiers.length < 2 || Boolean(options.forceRefresh))) {
     try {
       const discoveredUrls = await fetchSppraPublishedDocuments(spPublishedDocId);
@@ -220,8 +229,38 @@ async function runFetchDocumentsForTender(
         throw err;
       }
     }
+  } else if (bppraBidId && (Boolean(options.forceRefresh) || !tender.bid_brief || dossiers.length === 0)) {
+    try {
+      const meta = await fetchBppraDetailMetadata(bppraBidId);
+      detailPageChecked = true;
+      if (meta) {
+        const metaUpdates: Parameters<typeof updateTenderFields>[1] = {};
+        if (options.forceRefresh || !tender.bid_brief) {
+          metaUpdates.bid_brief = meta.bidBrief;
+        }
+        if (meta.isCorrigendum && !tender.has_corrigendum) {
+          metaUpdates.has_corrigendum = 1;
+        }
+        if (Object.keys(metaUpdates).length > 0) {
+          updateTenderFields(tender.id, metaUpdates);
+        }
+        if (meta.extractedText) {
+          appendTenderExtractedText(tender.id, meta.extractedText);
+        }
+        if (meta.boqPdfUrl) {
+          mergeTenderAttachmentUrls(tender.id, [meta.boqPdfUrl]);
+          await downloadAndAttachUrl(meta.boqPdfUrl, dossiers.length);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[FetchDocs] Could not fetch BPPRA NIT metadata for ${tender.id} (bidId=${bppraBidId}):`, err.message);
+      if (options.throwOnDetailError && dossiers.length === 0) {
+        throw err;
+      }
+    }
   } else if (
     tender.portal_id !== 'sppra' &&
+    tender.portal_id !== 'bppra' &&
     tender.direct_url &&
     tender.direct_url.startsWith('http') &&
     !isDirectFile &&

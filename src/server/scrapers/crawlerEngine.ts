@@ -12,6 +12,8 @@ import {
 } from '../db/index.js';
 import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
 import { scrapeSppraPortal } from './sppraApi.js';
+import { scrapeBppraPortal } from './bppraScraper.js';
+import { fetchHtmlWithTolerantAgent } from './htmlFetcher.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { getHumanJitterDelay, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, ScraperErrorCode, ScanDepth, DomainTrack, DocumentQueueStatus } from '../../shared/types.js';
@@ -571,6 +573,8 @@ export async function scrapePortal(
   portal: PortalDefinition & { sessionCookies?: string },
   options?: { depth?: ScanDepth; degradedMode?: boolean }
 ): Promise<ScrapeResult> {
+  const usingRealTransport = crawlerDeps.fetchHtml === fetchHtmlWithTolerantAgent;
+
   // Sindh SPPRA (portalsindh.eprocure.gov.pk) serves its public tender board via the official EPADS WSO2 JSON API.
   if (portal.id === 'sppra') {
     const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
@@ -584,6 +588,19 @@ export async function scrapePortal(
     return spResult;
   }
 
+  // Balochistan BPPRA (bpptwo.vdc.services:5451) uses Blazor Server pagination (Active Tenders, 100/page) + /RFP, /PreQualification, /EOI tabs.
+  if (portal.id === 'bppra' && usingRealTransport && portal.tendersUrl.includes('bpptwo.vdc.services')) {
+    const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
+    const knownMap = depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null;
+    const bpResult = await scrapeBppraPortal(portal, {
+      depth,
+      knownMap,
+      timeoutMs: options?.degradedMode ? 45000 : 25000
+    });
+    bpResult.items = sanitizeScrapedItems(bpResult.items, portal);
+    return bpResult;
+  }
+
   const htmlTimeoutMs = options?.degradedMode
     ? (portal.tendersUrl.includes('epms.ppra.gov.pk') ? 55000 : 45000)
     : undefined;
@@ -593,7 +610,7 @@ export async function scrapePortal(
   let responseCookies: string | undefined = portal.sessionCookies;
   let playwrightError: Error | null = null;
 
-  if (portal.tier === 'playwright') {
+  if (portal.tier === 'playwright' && usingRealTransport) {
     try {
       const modName = 'playwright';
       const playwright: any = await (Function('m', 'return import(m)')(modName) as Promise<any>).catch(() => null);
