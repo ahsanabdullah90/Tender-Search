@@ -1,5 +1,7 @@
 import * as cheerio from 'cheerio';
 import { BidBrief } from '../../shared/types.js';
+import { safeDecodeURIComponent, isImageUrl, isCorrigendumLabel } from '../../shared/documentUtils.js';
+import { isAuctionOrDisposalTender } from './scraperUtils.js';
 import { PortalDefinition } from './portalList.js';
 import { isValidReferenceNo } from '../services/deduplicator.js';
 import { parseDateString, extractDatesFromText, normalizeExtractedDate, DATE_CANDIDATE_PATTERN } from './dateParser.js';
@@ -35,14 +37,6 @@ export function resolvePortalUrl(href: string | undefined, portal: PortalDefinit
     return resolved.toString();
   } catch {
     return portal.tendersUrl;
-  }
-}
-
-function safeDecodeURIComponent(raw: string): string {
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
   }
 }
 
@@ -203,7 +197,7 @@ export function collectRowAttachments($: cheerio.CheerioAPI, el: any, portal: Po
     if (/\.(pdf|docx?|xlsx?)(\?|$)/i.test(aHref) || /[?&]wpdmdl=\d+/i.test(aHref) || /\/pdf\?file=/i.test(aHref) || $(aEl).hasClass('wpdm-download-link')) {
       const absUrl = resolvePortalUrl(aHref, portal);
       if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
-    } else if (/\.(jpe?g|png|webp)(\?|$)/i.test(aHref)) {
+    } else if (isImageUrl(aHref)) {
       // Image linked via <a>: only if not site-chrome (/img/, /images/) and not a stamp/seal/logo/watermark (docs/16 B5)
       if (/\/(img|images)\//i.test(aHref)) return;
       if (/stamp|seal|badge|watermark|logo|icon|avatar|spinner|zoom-onhover|banner|flag|placeholder/i.test(aHref)) return;
@@ -215,7 +209,7 @@ export function collectRowAttachments($: cheerio.CheerioAPI, el: any, portal: Po
   $(el).find('img').each((__, imgEl) => {
     const src = $(imgEl).attr('data-lazy-src') || $(imgEl).attr('data-src') || $(imgEl).attr('src');
     if (!src || src.startsWith('data:')) return;
-    if (!/\.(jpe?g|png|webp)(\?|$)/i.test(src)) return;
+    if (!isImageUrl(src)) return;
 
     const cls = ($(imgEl).attr('class') || '').toLowerCase();
     const alt = ($(imgEl).attr('alt') || '').toLowerCase();
@@ -349,7 +343,7 @@ const AJK_LOCATION_PATTERNS: Array<[RegExp, string]> = [
   [/\bhaveli\b/i, 'Haveli']
 ];
 
-function extractLocationFromPatterns(
+export function extractLocationFromPatterns(
   patterns: Array<[RegExp, string]>,
   provinceLabel: string,
   fallbackLocation: string,
@@ -568,7 +562,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const boxDetailUrl = (boxLink && !boxLink.startsWith('#') && !boxLink.startsWith('javascript:'))
         ? resolvePortalUrl(boxLink, portal)
         : null;
-      const nonImageDoc = attachmentUrls.find(u => !/\.(jpe?g|png|webp)(\?|$)/i.test(u));
+      const nonImageDoc = attachmentUrls.find(u => !isImageUrl(u));
       const directUrl = boxDetailUrl || nonImageDoc || portal.tendersUrl;
 
       items.push({
@@ -653,7 +647,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const reportUrl =
         attachmentUrls.find(u => /\/Reports\/.+(?:BiddingDocument|PQNDocument|RFPDocument).*?[?&]id=\d+/i.test(u)) ||
         attachmentUrls.find(u => /\/Reports\/.+[?&]id=\d+/i.test(u));
-      const nonImageDoc = attachmentUrls.find(u => !/\.(jpe?g|png|webp)(\?|$)/i.test(u));
+      const nonImageDoc = attachmentUrls.find(u => !isImageUrl(u));
       const directUrl = tenderDetailUrl || reportUrl || nonImageDoc || portal.tendersUrl;
       const summaryParts = [agencyText, unspscText].filter(Boolean);
 
@@ -725,7 +719,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       if (detailLink) {
         detailUrl = resolvePortalUrl(detailLink, portal);
       }
-      const nonImageDoc = attachmentUrls.find(u => !/\.(jpe?g|png|webp)(\?|$)/i.test(u));
+      const nonImageDoc = attachmentUrls.find(u => !isImageUrl(u));
       const directUrl = detailUrl || nonImageDoc || portal.tendersUrl;
 
       if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
@@ -876,11 +870,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const deptText = $(tds[5]).text().replace(/\s+/g, ' ').trim();
       const statusText = tds.length > 6 ? $(tds[6]).text().replace(/\s+/g, ' ').trim() : '';
 
-      const isAuctionOrDisposal =
-        /\b(?:sales?\s*\/\s*auction|auction|disposal|sale\s+of\s+scrap)\b/i.test(procType) ||
-        /\b(?:sales?|auction|disposal)\b/i.test(typeText) ||
-        /^(?:auction|disposal|sale)\b|\b(?:open\s+auction|public\s+auction|auction\s+(?:notice|of\b)|sale\s+of\s+(?:scrap|condemned|unserviceable|obsolete|vehicles|trees|fruit)|disposal\s+of\s+(?:scrap|condemned|unserviceable|obsolete|old|surplus|assets))\b/i.test(rawTitle);
-      if (isAuctionOrDisposal) return;
+      if (isAuctionOrDisposalTender(rawTitle, procType, typeText)) return;
 
       let title = rawTitle;
       if (deptText && /^(?:tender\s+notice|notice\s+inviting\s+tenders?|invitation\s+(?:for|to)\s+bids?|tender\s+advertisement|procurement\s+notice|short\s+tender\s+notice|nit)$/i.test(rawTitle)) {
@@ -892,14 +882,12 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 
       const attachmentUrls = collectRowAttachments($, el, portal);
       const detailUrl = detailHref ? resolvePortalUrl(detailHref, portal) : null;
-      const nonImageDoc = attachmentUrls.find(u => !/\.(jpe?g|png|webp)(\?|$)/i.test(u));
+      const nonImageDoc = attachmentUrls.find(u => !isImageUrl(u));
       const directUrl = detailUrl || nonImageDoc || portal.tendersUrl;
 
       if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
 
-      const isCorrigendum =
-        /\b(?:corrigendum|addendum)\b/i.test(procType) ||
-        /\b(?:corrigendum|addendum)\b/i.test(rawTitle);
+      const isCorrigendum = isCorrigendumLabel(procType) || isCorrigendumLabel(rawTitle);
 
       const summaryParts = [procType, typeText, statusText].filter(Boolean);
 
@@ -1030,7 +1018,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       if (tds.length < 7) return;
 
       const col0Text = $(tds[0]).text().replace(/\s+/g, ' ').trim();
-      if (!col0Text || /\b(?:sales?|auction|disposal)\b/i.test(col0Text)) return;
+      if (!col0Text || isAuctionOrDisposalTender('', col0Text)) return;
 
       const idMatch = col0Text.match(/\b(\d{3,8})\b/);
       const referenceNo = idMatch ? `AJKPPRA-${idMatch[1]}` : undefined;
@@ -1044,11 +1032,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       });
       const title = titleClone.text().replace(/\s+/g, ' ').trim();
       if (!title || title.length <= 5) return;
-      if (
-        /^(?:auction|disposal|sale)\b|\b(?:open\s+auction|public\s+auction|auction\s+(?:notice|of\b)|sale\s+of\s+(?:scrap|condemned|unserviceable|obsolete|vehicles|trees|wood)|disposal\s+of\s+(?:scrap|condemned|unserviceable|obsolete|old|surplus|assets))\b/i.test(
-          title
-        )
-      ) {
+      if (isAuctionOrDisposalTender(title)) {
         return;
       }
 
@@ -1074,12 +1058,12 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         const linkTitle = $(aEl).attr('title') || '';
         const linkStyle = ($(aEl).attr('style') || '').toLowerCase();
         const isCorr =
-          /\b(?:corrigendum|addendum)\b/i.test(linkText) ||
-          /\b(?:corrigendum|addendum|corr\.?)\b/i.test(`${href} ${linkTitle}`) ||
+          isCorrigendumLabel(linkText) ||
+          isCorrigendumLabel(`${href} ${linkTitle}`) ||
           /#ff0000|\bred\b/.test(linkStyle);
         if (isCorr) {
           hasCorrLink = true;
-        } else if (!mainDocUrl && !/\.(jpe?g|png|webp)(\?|$)/i.test(absUrl)) {
+        } else if (!mainDocUrl && !isImageUrl(absUrl)) {
           mainDocUrl = absUrl;
         }
       });
@@ -1089,8 +1073,8 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 
       const isCorrigendum =
         hasCorrLink ||
-        /\b(?:corrigendum|addendum)\b/i.test(col0Text) ||
-        /\b(?:corrigendum|addendum)\b/i.test(title);
+        isCorrigendumLabel(col0Text) ||
+        isCorrigendumLabel(title);
 
       items.push({
         referenceNo,

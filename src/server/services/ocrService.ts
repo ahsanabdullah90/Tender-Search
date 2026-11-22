@@ -141,34 +141,39 @@ function normalizeBidBrief(raw: any): BidBrief | undefined {
   };
 }
 
-export function parseAndRepairTenderJson(
-  raw: string | null | undefined,
-  defaults?: { title?: string; organization?: string }
-): OcrExtractedData | null {
+function parseAiJsonObject<T = Record<string, any>>(raw: string | null | undefined): T | null {
   if (!raw || typeof raw !== 'string') return null;
 
   let cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
     cleaned = cleaned.slice(firstBrace, lastBrace + 1);
   }
 
-  let parsed: any = null;
   try {
-    parsed = JSON.parse(cleaned);
+    return JSON.parse(cleaned) as T;
   } catch {
     try {
       const repaired = cleaned.replace(/,\s*([}\]])/g, '$1');
-      parsed = JSON.parse(repaired);
-    } catch (err) {
-      console.warn('[Gemini] JSON parsing failed after repair attempt:', err);
+      return JSON.parse(repaired) as T;
+    } catch {
       return null;
     }
   }
+}
 
-  if (!parsed || typeof parsed !== 'object') return null;
+export function parseAndRepairTenderJson(
+  raw: string | null | undefined,
+  defaults?: { title?: string; organization?: string }
+): OcrExtractedData | null {
+  const parsed = parseAiJsonObject<any>(raw);
+  if (!parsed || typeof parsed !== 'object') {
+    if (raw && typeof raw === 'string') {
+      console.warn('[Gemini] JSON parsing failed after repair attempt');
+    }
+    return null;
+  }
 
   const bidBrief = normalizeBidBrief(parsed.bidBrief);
 
@@ -445,25 +450,7 @@ ${cleanDigest}`;
     });
 
     if (!rawText) return [];
-
-    let cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-    }
-
-    let parsed: any = null;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      try {
-        parsed = JSON.parse(cleaned.replace(/,\s*([}\]])/g, '$1'));
-      } catch {
-        return [];
-      }
-    }
-
+    const parsed = parseAiJsonObject<{ items?: any[] }>(rawText);
     if (!parsed || !Array.isArray(parsed.items)) return [];
 
     const validItems: AiScrapedTenderItem[] = [];
@@ -580,18 +567,11 @@ ${linkListText}`;
     });
 
     if (!rawText) return [];
-    let cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-    }
-
-    const parsed = JSON.parse(cleaned.replace(/,\s*([}\]])/g, '$1'));
+    const parsed = parseAiJsonObject<{ candidateUrls?: unknown[] }>(rawText);
     if (!parsed || !Array.isArray(parsed.candidateUrls)) return [];
 
     return parsed.candidateUrls
-      .filter((u: unknown) => typeof u === 'string' && u.trim().length > 0)
+      .filter((u: unknown): u is string => typeof u === 'string' && u.trim().length > 0)
       .slice(0, 2);
   } catch {
     return [];

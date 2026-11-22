@@ -1,3 +1,4 @@
+import { getPktDateKey } from '../../shared/pktDate.js';
 import { getAppSetting, setAppSetting } from '../db/repositories/systemRepo.js';
 
 /**
@@ -83,16 +84,12 @@ export function tryConsumeScanVision(): boolean {
   return true;
 }
 
-function pktDayString(): string {
-  return new Date(Date.now() + 5 * 3600000).toISOString().slice(0, 10);
-}
-
 function todayKey(): string {
-  return `ingest_vision_calls_${pktDayString()}`; // PKT day
+  return `ingest_vision_calls_${getPktDateKey()}`; // PKT day
 }
 
 function todayAiTextKey(): string {
-  return `ingest_ai_text_calls_${pktDayString()}`;
+  return `ingest_ai_text_calls_${getPktDateKey()}`;
 }
 
 /**

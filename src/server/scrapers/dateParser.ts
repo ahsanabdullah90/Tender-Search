@@ -1,3 +1,7 @@
+import { getPktDateKey, endOfPktDayMs } from '../../shared/pktDate.js';
+
+export { endOfPktDayMs };
+
 /**
  * Strict date string parsing for Pakistani tenders:
  * Checks DD/MM/YYYY and DD-MM-YYYY first with explicit PKT (+05:00) timezone,
@@ -200,12 +204,6 @@ export function isPlausibleTenderYear(year: number, now: Date = new Date()): boo
   return year >= 2010 && year <= now.getUTCFullYear() + 5;
 }
 
-/** End of the PKT calendar day (23:59:59.999 PKT) of an ISO instant, as epoch milliseconds. */
-export function endOfPktDayMs(iso: string): number {
-  const day = new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10);
-  return new Date(`${day}T23:59:59.999+05:00`).getTime();
-}
-
 export type DeadlineSourceKind = 'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual';
 export type DeadlineConfidence = 'high' | 'medium' | 'low';
 
@@ -245,11 +243,6 @@ export interface CanonicalDeadline {
   cancelled: boolean;
   /** Past its stated time but still on the deadline's PKT calendar day: never auto-expired yet. */
   withinDeadlineDay: boolean;
-}
-
-/** PKT calendar day (YYYY-MM-DD) of an ISO instant. */
-function pktDay(iso: string): string {
-  return new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10);
 }
 
 /**
@@ -306,14 +299,14 @@ export function resolveCanonicalDeadline(
     // can change it.
   } else if (corrigenda.length) {
     winner = corrigenda[0];
-    if (knownValid && winner.ms < knownValid.ms && pktDay(winner.date) !== pktDay(knownValid.date)) {
+    if (knownValid && winner.ms < knownValid.ms && getPktDateKey(winner.date) !== getPktDateKey(knownValid.date)) {
       result.needsReview = true;
       result.reviewReason = `deadline_moved_earlier: ${formatClosingDate(knownValid.date)} → ${formatClosingDate(winner.date)}`;
     }
   } else {
     for (const cand of valid) {
       if (!winner) { winner = cand; continue; }
-      const sameDay = pktDay(cand.date) === pktDay(winner.date);
+      const sameDay = getPktDateKey(cand.date) === getPktDateKey(winner.date);
       if (sameDay && isDocumentSource(cand.source) !== isDocumentSource(winner.source)) {
         if (isDocumentSource(cand.source)) winner = cand; // document time beats listing time
         continue;
@@ -334,7 +327,7 @@ export function resolveCanonicalDeadline(
     result.source = winner.source;
     result.confidence = winner.confidence;
     result.isExpired = winner.ms < nowMs;
-    result.isExtension = Boolean(knownValid && winner !== knownValid && winner.ms > knownValid.ms && pktDay(winner.date) !== pktDay(knownValid.date));
+    result.isExtension = Boolean(knownValid && winner !== knownValid && winner.ms > knownValid.ms && getPktDateKey(winner.date) !== getPktDateKey(knownValid.date));
     const wellSourced = isDocumentSource(winner.source) ? winner.canAutoExpire : !hasDocSignal;
     // Never auto-expire during the deadline's own PKT day: deadline times read from text are the
     // least reliable part ("1100 hrs" was once read as midnight), so wait until the day is over

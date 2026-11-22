@@ -1,3 +1,4 @@
+import { getPktDateKey } from '../../shared/pktDate.js';
 import {
   backupDatabase,
   updatePortalHealth,
@@ -56,10 +57,7 @@ export const schedulerDeps = {
   }
 };
 
-/** Returns current calendar date in Pakistan Standard Time (UTC+05:00) as YYYY-MM-DD. */
-export function getPktDateKey(nowMs: number = Date.now()): string {
-  return new Date(nowMs + 5 * 3600000).toISOString().slice(0, 10);
-}
+export { getPktDateKey };
 
 /**
  * Re-runs local deadline parsing on flagged `deadline_moved_earlier` tenders whose stored

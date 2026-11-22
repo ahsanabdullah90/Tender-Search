@@ -1,3 +1,5 @@
+import { getPktDateKey } from '../../shared/pktDate.js';
+import { isPdfBuffer, isDocxBuffer } from './fileUtils.js';
 import { extractTenderFromImage, summarizeTenderTextWithAI, OcrExtractedData } from './ocrService.js';
 import { extractTextWithLocalOcr, isLocalOcrEnabled } from './localOcrService.js';
 import { getGeminiApiKey } from '../db/repositories/systemRepo.js';
@@ -60,17 +62,6 @@ export interface DocumentText {
 // Text extraction
 // ---------------------------------------------------------------------------
 
-function isPdf(buf: Buffer, mimeType: string): boolean {
-  return mimeType === 'application/pdf' || buf.subarray(0, 5).toString('latin1') === '%PDF-';
-}
-
-function isDocx(buf: Buffer, mimeType: string): boolean {
-  return (
-    mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-    (buf[0] === 0x50 && buf[1] === 0x4b && /word|docx/i.test(mimeType))
-  );
-}
-
 /**
  * Joins pdf.js text items by their position on the page. Naively joining items with spaces
  * splits words that the PDF stores as separate glyph runs ("SC HOOL", "202 6"), which breaks
@@ -104,7 +95,7 @@ function joinPdfTextItems(items: any[]): string {
 export async function extractDocumentText(buf: Buffer, mimeType: string = ''): Promise<DocumentText> {
   if (mimeType.startsWith('image/')) return { text: '', pages: 0, kind: 'image' };
 
-  if (isPdf(buf, mimeType)) {
+  if (isPdfBuffer(buf, mimeType)) {
     const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
     const doc = await getDocument({
       data: new Uint8Array(buf),
@@ -125,7 +116,7 @@ export async function extractDocumentText(buf: Buffer, mimeType: string = ''): P
     }
   }
 
-  if (isDocx(buf, mimeType)) {
+  if (isDocxBuffer(buf, mimeType)) {
     const mammoth = await import('mammoth');
     const res = await (mammoth as any).extractRawText({ buffer: buf });
     return { text: String(res?.value || ''), pages: 1, kind: 'docx' };
@@ -205,7 +196,7 @@ function combineDateAndTime(dateStr: string, after: string, before: string = '')
   const time = parseTimeOfDay(cleanAfter.slice(0, 40)) ?? parseTimeOfDay(cleanBefore);
   if (!time) return iso; // date-only: parseDateString defaults to 14:00 PKT
   const { hour, minute } = time;
-  const day = new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10); // PKT calendar day
+  const day = getPktDateKey(iso);
   const withTime = new Date(`${day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+05:00`);
   return isNaN(withTime.getTime()) ? iso : withTime.toISOString();
 }

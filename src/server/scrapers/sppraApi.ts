@@ -1,9 +1,15 @@
 import { RawScrapedItem, ScrapeResult } from './portalParsers.js';
 import { PortalDefinition } from './portalList.js';
-import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
+import { parseDateString, formatClosingDate } from './dateParser.js';
 import { maxFileBytes } from '../services/ingestBudget.js';
 import { reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from '../services/networkMonitor.js';
 import { createSslTolerantDispatcher } from './baseScraper.js';
+import {
+  CLOSED_STATUS_RE,
+  resolvePaginationMaxPages,
+  shouldEarlyStopKnownPage,
+  KnownTenderStopEntry
+} from './scraperUtils.js';
 
 export const SPPRA_API_BASE = 'https://apiprd.eprocure.gov.pk';
 export const SPPRA_LIST_URL = `${SPPRA_API_BASE}/websiteportal/publicportal/1.0.0/api/v1/publicportal/getallpublictenders`;
@@ -188,8 +194,6 @@ export interface SppraDownloadFileParams {
   label?: string;
 }
 
-const CLOSED_STATUS_RE = /\b(closed|cancelled|canceled|completed|awarded|archived|expired|dropped)\b/i;
-
 /**
  * Builds a synthetic HTTPS URL representing a Sindh SPPRA DMS file downloadable via
  * `downloadportalfilebyguid` POST API.
@@ -243,17 +247,8 @@ function parseSppraIsoDate(raw?: string | null): string | undefined {
   if (!raw) return undefined;
   const s = String(raw).trim();
   if (!s || s.startsWith('0001-01-01')) return undefined;
-  // SPPRA returns local Pakistan Standard Time (UTC+05:00) timestamps without timezone suffix, e.g. "2026-12-22T11:30:00"
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?/);
-  if (m) {
-    const [, y, mo, d, hh = '23', mm = '59', ss = '00'] = m;
-    const iso = `${y}-${mo}-${d}T${hh}:${mm}:${ss}+05:00`;
-    const dt = new Date(iso);
-    if (!Number.isNaN(dt.getTime())) {
-      return dt.toISOString();
-    }
-  }
-  return normalizeExtractedDate(s) ?? undefined;
+  // SPPRA returns local Pakistan Standard Time (UTC+05:00) timestamps without timezone suffix
+  return parseDateString(s) ?? undefined;
 }
 
 function formatEstimatedCostPkr(raw?: string | number | null): string | undefined {
@@ -392,18 +387,14 @@ export async function scrapeSppraPortal(
   portal: PortalDefinition,
   options?: {
     depth?: 'quick' | 'deep';
-    knownMap?: Map<string, { closing_date?: string | null; title?: string | null }> | null;
+    knownMap?: Map<string, KnownTenderStopEntry> | null;
     timeoutMs?: number;
     maxAttempts?: number;
     retryDelaysMs?: readonly number[];
   }
 ): Promise<ScrapeResult> {
   const depth = options?.depth === 'deep' ? 'deep' : 'quick';
-  const maxPages = portal.pagination
-    ? (depth === 'deep'
-        ? (portal.pagination.deepMaxPages ?? portal.pagination.maxPages)
-        : (portal.pagination.quickMaxPages ?? portal.pagination.maxPages))
-    : 2;
+  const maxPages = resolvePaginationMaxPages(portal, depth, 2);
 
   const allItems: RawScrapedItem[] = [];
   const seenKeys = new Set<string>();
@@ -427,8 +418,7 @@ export async function scrapeSppraPortal(
     pagesScanned++;
     if (records.length === 0) break;
 
-    let addedOnPage = 0;
-    let knownUnchanged = 0;
+    const pageItems: RawScrapedItem[] = [];
 
     for (const rec of records) {
       const mapped = mapSppraRecordToScrapedTender(rec);
@@ -437,19 +427,12 @@ export async function scrapeSppraPortal(
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
 
-      if (page >= 2 && options?.knownMap && mapped.directUrl) {
-        const existing = options.knownMap.get(mapped.directUrl.toLowerCase());
-        if (existing && (existing.closing_date || '') === (mapped.closingDate || '')) {
-          knownUnchanged++;
-        }
-      }
-
       allItems.push(mapped);
-      addedOnPage++;
+      pageItems.push(mapped);
     }
 
-    if (addedOnPage === 0) break;
-    if (page >= 2 && options?.knownMap && addedOnPage > 0 && knownUnchanged / addedOnPage >= 0.85) {
+    if (pageItems.length === 0) break;
+    if (page >= 2 && shouldEarlyStopKnownPage(pageItems, options?.knownMap)) {
       break;
     }
     if (records.length < SPPRA_DEFAULT_PAGE_SIZE) break;

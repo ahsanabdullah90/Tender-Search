@@ -1,4 +1,5 @@
 import { db } from './connection.js';
+import { sanitizeOriginUrl } from '../../shared/documentUtils.js';
 import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
 import { backfillExistingTenderDocumentJobs } from './repositories/ingestJobsRepo.js';
 import { backfillReferenceNorms, removeSelfSecondarySources } from './repositories/tendersRepo.js';
@@ -466,13 +467,8 @@ export function seedPortalHealth() {
       try {
         const dbRow = db.prepare('SELECT base_url, tenders_url, verified_status FROM portal_health WHERE portal_id = ?').get(p.id) as any;
         if (dbRow) {
-          let cleanBase = dbRow.base_url;
-          try {
-            cleanBase = new URL(dbRow.base_url).origin;
-          } catch {
-            cleanBase = p.baseUrl;
-          }
-          if (cleanBase !== dbRow.base_url) {
+          const cleanBase = sanitizeOriginUrl(dbRow.base_url, p.baseUrl);
+          if (cleanBase && cleanBase !== dbRow.base_url) {
             db.prepare('UPDATE portal_health SET base_url = ? WHERE portal_id = ?').run(cleanBase, p.id);
           }
 

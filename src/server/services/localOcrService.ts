@@ -2,6 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { TESSDATA_DIR } from '../db/connection.js';
 import { getAppSetting } from '../db/repositories/systemRepo.js';
+import { hasValidImageMagicBytes } from './fileUtils.js';
+
+export { hasValidImageMagicBytes };
 
 export const LOCAL_OCR_DEFAULT_MAX_PAGES = 3;
 
@@ -21,33 +24,6 @@ function withOcrMutex<T>(task: () => Promise<T>): Promise<T> {
     () => undefined
   );
   return next;
-}
-
-export function hasValidImageMagicBytes(buf: Buffer): boolean {
-  if (!buf || buf.length < 12) return false;
-  // PNG: 89 50 4E 47
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
-  // JPEG: FF D8 FF
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
-  // GIF: 47 49 46
-  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return true;
-  // BMP: 42 4D
-  if (buf[0] === 0x42 && buf[1] === 0x4d) return true;
-  // TIFF: II* / MM*
-  if (
-    (buf[0] === 0x49 && buf[1] === 0x49 && buf[2] === 0x2a && buf[3] === 0x00) ||
-    (buf[0] === 0x4d && buf[1] === 0x4d && buf[2] === 0x00 && buf[3] === 0x2a)
-  ) {
-    return true;
-  }
-  // WEBP: RIFF....WEBP
-  if (
-    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
-  ) {
-    return true;
-  }
-  return false;
 }
 
 function hasCachedTrainedData(): boolean {

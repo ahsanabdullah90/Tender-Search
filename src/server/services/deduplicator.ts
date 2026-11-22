@@ -1,5 +1,8 @@
 import { findTendersByReferenceNorm, findDedupCandidates } from '../db/index.js';
 import { computeTextSemanticSimilarity } from './embeddingService.js';
+import { normalizeText } from '../../shared/documentUtils.js';
+
+export { normalizeText };
 
 /**
  * Calculates Dice's coefficient (Bigram similarity) between two strings.
@@ -34,15 +37,6 @@ export function calculateStringSimilarity(str1: string, str2: string): number {
 
   const total = (s1.length - 1) + (s2.length - 1);
   return (2.0 * intersection) / total;
-}
-
-export function normalizeText(text: string): string {
-  if (!text) return '';
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 export interface DuplicateMatchResult {

@@ -3,6 +3,11 @@ import path from 'path';
 import https from 'https';
 import http from 'http';
 import { CachedDossier } from '../../shared/types.js';
+import {
+  safeDecodeURIComponent,
+  isCorrigendumLabel,
+  isGenericDossierLabel
+} from '../../shared/documentUtils.js';
 import { DOSSIERS_DIR, getTenderById } from '../db/index.js';
 import {
   formatDocTypeDisplayLabel,
@@ -10,10 +15,19 @@ import {
   inferDocType,
   saveTenderDocument
 } from './dossierStore.js';
+import { detectExtensionAndMime, getMimeTypeFromExt } from './fileUtils.js';
 import { maxFileBytes } from './ingestBudget.js';
-import { sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError } from '../scrapers/baseScraper.js';
+import {
+  sslTolerantAgent,
+  legacySslTolerantAgent,
+  isTlsFallbackError,
+  isStrictTlsHandshakeError
+} from '../scrapers/baseScraper.js';
+import { isLegacyTlsHost, markLegacyTlsHost } from '../scrapers/htmlFetcher.js';
 import { isSppraDownloadUrl, parseSppraDownloadUrl, downloadSppraFileBuffer } from '../scrapers/sppraApi.js';
 import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from './networkMonitor.js';
+
+export { detectExtensionAndMime };
 
 // Same folder the rest of the app uses (honours TENDER_DATA_DIR).
 const DOSSIERS_ROOT = DOSSIERS_DIR;
@@ -77,7 +91,7 @@ export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, in
           }
           const lowerDir = decodedPath.toLowerCase();
           let folderLabel = 'Bidding Document';
-          if (/corrigend|addend|amendment/.test(lowerDir)) {
+          if (isCorrigendumLabel(lowerDir)) {
             folderLabel = 'Corrigendum';
           } else if (/advertisement|notice|\bnit\b/.test(lowerDir)) {
             folderLabel = 'Tender Notice';
@@ -101,7 +115,7 @@ export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, in
                          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(baseNameWithoutExt) ||
                          /^[a-zA-Z0-9]{25,}$/.test(baseNameWithoutExt);
     if (!isOpaqueHash && baseNameWithoutExt.length > 3) {
-      const humanized = decodeURIComponent(baseNameWithoutExt)
+      const humanized = safeDecodeURIComponent(baseNameWithoutExt)
         .replace(/[-_]+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
@@ -113,16 +127,9 @@ export function deriveDossierLabel(remoteUrl: string, fallbackLabel?: string, in
 
   const urlInferred = inferDocType('', remoteUrl);
   const urlFallback = urlInferred !== 'other' ? formatDocTypeDisplayLabel(urlInferred) : 'Bidding Document';
-  const isNoisyOrGeneric =
-    !fallbackLabel ||
-    !fallbackLabel.trim() ||
-    /_Doc(\s+\d+)?$/i.test(fallbackLabel.trim()) ||
-    /^(bidding document|tender document|document|notice|tender notice|tender notice image)(\s+\d+)?$/i.test(
-      fallbackLabel.trim()
-    );
-  const base = isNoisyOrGeneric
+  const base = isGenericDossierLabel(fallbackLabel)
     ? (fallbackLabel && /^(tender notice image)$/i.test(fallbackLabel.trim()) ? fallbackLabel.trim() : urlFallback)
-    : fallbackLabel.trim();
+    : fallbackLabel!.trim();
   if (typeof index === 'number' && index > 1 && !base.endsWith(` ${index}`)) {
     return `${base} ${index}`;
   }
@@ -151,64 +158,6 @@ export function isHtmlContent(buffer: Buffer, contentTypeHeader?: string): boole
   return prefix.startsWith('<!doctype html') || prefix.startsWith('<html') || prefix.startsWith('<head');
 }
 
-export function detectExtensionAndMime(buffer: Buffer, contentTypeHeader?: string, url?: string): { ext: string; mimeType: string } {
-  // 1. Magic bytes (highest authority)
-  if (buffer.length >= 4) {
-    if (buffer.subarray(0, 5).toString('ascii') === '%PDF-') {
-      return { ext: '.pdf', mimeType: 'application/pdf' };
-    }
-    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
-      return { ext: '.png', mimeType: 'image/png' };
-    }
-    if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
-      return { ext: '.jpg', mimeType: 'image/jpeg' };
-    }
-    if (buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04) {
-      const slice = buffer.subarray(0, Math.min(buffer.length, 2048)).toString('binary');
-      if (slice.includes('word/')) {
-        return { ext: '.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
-      }
-      if (slice.includes('xl/')) {
-        return { ext: '.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-      }
-      return { ext: '.zip', mimeType: 'application/zip' };
-    }
-    if (buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0) {
-      return { ext: '.doc', mimeType: 'application/msword' };
-    }
-  }
-
-  // 2. Content-Type header
-  if (contentTypeHeader) {
-    const cleanCt = contentTypeHeader.split(';')[0].trim().toLowerCase();
-    switch (cleanCt) {
-      case 'application/pdf': return { ext: '.pdf', mimeType: 'application/pdf' };
-      case 'image/png': return { ext: '.png', mimeType: 'image/png' };
-      case 'image/jpeg':
-      case 'image/jpg': return { ext: '.jpg', mimeType: 'image/jpeg' };
-      case 'application/msword': return { ext: '.doc', mimeType: 'application/msword' };
-      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        return { ext: '.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
-      case 'application/vnd.ms-excel': return { ext: '.xls', mimeType: 'application/vnd.ms-excel' };
-      case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-        return { ext: '.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-    }
-  }
-
-  // 3. Remote URL extension
-  if (url) {
-    try {
-      const urlPath = new URL(url).pathname;
-      const urlExt = path.extname(urlPath).toLowerCase();
-      if (urlExt && /^\.[a-z0-9]{2,5}$/.test(urlExt)) {
-        return { ext: urlExt, mimeType: getMimeType(urlExt) };
-      }
-    } catch {}
-  }
-
-  return { ext: '.pdf', mimeType: 'application/pdf' };
-}
-
 /**
  * Downloads a remote file, saves it to data/dossiers/{tenderId}/, and computes SHA-256
  */
@@ -221,14 +170,9 @@ export async function downloadAndCacheDossier(
   options?: DownloadDossierOptions
 ): Promise<CachedDossier | null> {
   // Derive smart label if passed label is generic, empty, or legacy *_Doc fallback
-  let effectiveLabel = label?.trim() || 'Bidding Document';
-  if (
-    !label ||
-    /_Doc(\s+\d+)?$/i.test(label.trim()) ||
-    /^(bidding document|tender document|document|notice|tender notice|tender notice image)(\s+\d+)?$/i.test(label.trim())
-  ) {
-    effectiveLabel = deriveDossierLabel(remoteUrl, label, docIndex);
-  }
+  const effectiveLabel = isGenericDossierLabel(label)
+    ? deriveDossierLabel(remoteUrl, label, docIndex)
+    : label.trim();
 
   let hostForTelemetry = '';
   try { hostForTelemetry = new URL(remoteUrl).hostname; } catch {}
@@ -268,7 +212,7 @@ export async function downloadAndCacheDossier(
     try {
       const candidateName = path.basename(new URL(remoteUrl).pathname);
       if (candidateName && candidateName !== '/' && !/^download$/i.test(candidateName)) {
-        remoteBasename = decodeURIComponent(candidateName);
+        remoteBasename = safeDecodeURIComponent(candidateName);
       }
     } catch {}
 
@@ -314,15 +258,9 @@ export function saveManualDossier(
   } catch {}
 
   const rawExt = path.extname(originalFilename || '');
-  const ext =
-    rawExt ||
-    (explicitMimeType === 'application/pdf'
-      ? '.pdf'
-      : explicitMimeType === 'image/png'
-        ? '.png'
-        : explicitMimeType === 'image/webp'
-          ? '.webp'
-          : '.jpg');
+  const detected = detectExtensionAndMime(buffer, explicitMimeType, originalFilename);
+  const ext = rawExt ? rawExt.toLowerCase() : detected.ext;
+  const mimeType = explicitMimeType || (rawExt ? getMimeTypeFromExt(rawExt) : detected.mimeType);
 
   const doc = saveTenderDocument(tenderId, buffer, {
     portalCode: tender?.portal_id ? getPortalFileCode(tender.portal_id) : undefined,
@@ -331,7 +269,7 @@ export function saveManualDossier(
     label: label?.trim(),
     originalName: originalFilename || `attachment${ext}`,
     extension: ext,
-    mimeType: explicitMimeType,
+    mimeType,
     existingDossiers: Array.isArray(tender?.cached_dossiers) ? tender.cached_dossiers : undefined,
     source: 'manual_upload'
   });
@@ -369,6 +307,8 @@ export function fetchFileBuffer(
 
     const limitBytes = options?.maxBytes ?? maxFileBytes();
     const isHttps = parsedUrl.protocol === 'https:';
+    const hostKey = parsedUrl.hostname.toLowerCase();
+    const effectiveUseLegacyTls = useLegacyTls || (isHttps && isLegacyTlsHost(hostKey));
     const client = isHttps ? https : http;
 
     const headers: Record<string, string> = {
@@ -387,16 +327,23 @@ export function fetchFileBuffer(
     };
 
     const req = client.get(url, {
-      agent: isHttps ? (useLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
+      agent: isHttps ? (effectiveUseLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
       headers,
       timeout: options?.timeoutMs ?? 45000
     }, res => {
-      // Follow redirects cleanly
+      // Follow redirects cleanly without leaking weak TLS across cross-origin hosts
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         const nextUrl = new URL(res.headers.location, url).toString();
+        const nextHost = new URL(nextUrl).hostname.toLowerCase();
         return finish(() => {
-          fetchFileBuffer(nextUrl, cookie, redirectCount + 1, options, useLegacyTls).then(resolve).catch(reject);
+          fetchFileBuffer(
+            nextUrl,
+            cookie,
+            redirectCount + 1,
+            options,
+            nextHost === hostKey ? effectiveUseLegacyTls : false
+          ).then(resolve).catch(reject);
         });
       }
 
@@ -459,9 +406,15 @@ export function fetchFileBuffer(
     }
 
     req.on('error', err => {
-      if (isHttps && !useLegacyTls && isTlsFallbackError(err)) {
+      if (isHttps && !effectiveUseLegacyTls && isTlsFallbackError(err)) {
+        const shouldCacheHost = isStrictTlsHandshakeError(err);
         return finish(() => {
-          fetchFileBuffer(url, cookie, redirectCount, options, true).then(resolve).catch(() => reject(err));
+          fetchFileBuffer(url, cookie, redirectCount, options, true)
+            .then(buf => {
+              if (shouldCacheHost) markLegacyTlsHost(hostKey);
+              resolve(buf);
+            })
+            .catch(() => reject(err));
         });
       }
       finish(() => reject(err));
@@ -471,19 +424,4 @@ export function fetchFileBuffer(
       finish(() => reject(new Error('File download timed out')));
     });
   });
-}
-
-function getMimeType(filename: string): string {
-  const ext = filename.startsWith('.') ? filename.toLowerCase() : path.extname(filename).toLowerCase();
-  switch (ext) {
-    case '.pdf': return 'application/pdf';
-    case '.jpg':
-    case '.jpeg': return 'image/jpeg';
-    case '.png': return 'image/png';
-    case '.doc': return 'application/msword';
-    case '.docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    case '.xls': return 'application/vnd.ms-excel';
-    case '.xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-    default: return 'application/octet-stream';
-  }
 }

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { asyncHandler } from './routeUtils.js';
+import { asyncHandler, maskApiKey, decodeBase64Payload } from './routeUtils.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -135,11 +135,7 @@ systemRouter.post('/backups', asyncHandler(async (_req, res) => {
 
 systemRouter.get('/storage', (_req, res) => {
   const key = getGeminiApiKey();
-  const maskedKey = key
-    ? key.length > 8
-      ? `${key.slice(0, 4)}••••${key.slice(-4)}`
-      : '••••••••'
-    : null;
+  const maskedKey = maskApiKey(key);
   const digestSettings = getDigestSettings();
   res.json({
     ...getStorageStats(),
@@ -173,11 +169,7 @@ systemRouter.post('/system/ingest-budgets', handleUpdateIngestBudgets);
 // 4. Google AI Studio (Gemini API) Configuration & Extraction Routes
 systemRouter.get('/ai/status', (_req, res) => {
   const key = getGeminiApiKey();
-  const maskedKey = key
-    ? key.length > 8
-      ? `${key.slice(0, 4)}••••${key.slice(-4)}`
-      : '••••••••'
-    : null;
+  const maskedKey = maskApiKey(key);
   res.json({
     configured: Boolean(key),
     maskedKey,
@@ -190,11 +182,7 @@ systemRouter.post('/ai/config', (req, res) => {
   const { apiKey } = req.body || {};
   setAppSetting('gemini_api_key', typeof apiKey === 'string' ? apiKey : null);
   const key = getGeminiApiKey();
-  const maskedKey = key
-    ? key.length > 8
-      ? `${key.slice(0, 4)}••••${key.slice(-4)}`
-      : '••••••••'
-    : null;
+  const maskedKey = maskApiKey(key);
   res.json({
     success: true,
     configured: Boolean(key),
@@ -212,8 +200,7 @@ systemRouter.post('/ai/extract-file', asyncHandler(async (req, res) => {
   if (!getGeminiApiKey()) {
     return res.status(400).json({ error: 'Google AI Studio API key is not configured. Add it in Sources & Keywords > Data.' });
   }
-  const cleanBase64 = String(rawBase64).replace(/^data:[^;]+;base64,/, '');
-  const buffer = Buffer.from(cleanBase64, 'base64');
+  const buffer = decodeBase64Payload(rawBase64);
   const extracted = await extractTenderFromImage(buffer, mimeType || 'image/jpeg');
   if (!extracted) {
     return res.status(422).json({ error: 'Could not extract structured tender information from this file.' });

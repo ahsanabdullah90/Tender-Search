@@ -3,6 +3,8 @@ import { BidBrief, ScanDepth } from '../../shared/types.js';
 import { PortalDefinition } from './portalList.js';
 import { sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { fetchHtmlSmart } from './crawlerDeps.js';
+import { launchHeadlessChromium } from './playwrightEngine.js';
+import { resolvePaginationMaxPages, shouldEarlyStopKnownPage, KnownTenderStopEntry } from './scraperUtils.js';
 import { parsePortalHtml, RawScrapedItem, ScrapeResult } from './portalParsers.js';
 
 export const BPPRA_PORTAL_ORIGIN = 'https://bpptwo.vdc.services:5451';
@@ -310,21 +312,12 @@ async function waitForShowingChange(page: any, prevShowing: string, timeoutMs: n
 async function fetchBppraBlazorPages(
   portal: PortalDefinition & { sessionCookies?: string },
   maxPages: number,
-  knownMap: Map<string, { closing_date?: string | null; title?: string | null }> | null | undefined,
+  knownMap: Map<string, KnownTenderStopEntry> | null | undefined,
   timeoutMs: number
 ): Promise<{ items: RawScrapedItem[]; pagesScanned: number }> {
-  const modName = 'playwright';
-  const playwright: any = await (Function('m', 'return import(m)')(modName) as Promise<any>).catch(() => null);
-  if (!playwright?.chromium) {
-    throw new Error('Playwright Chromium not available');
-  }
-
   let browser: any = null;
   try {
-    browser = await playwright.chromium
-      .launch({ headless: true, channel: 'chromium' })
-      .catch(() => playwright.chromium.launch({ headless: true }))
-      .catch(() => playwright.chromium.launch({ headless: true, channel: 'msedge' }));
+    browser = await launchHeadlessChromium();
 
     const context = await browser.newContext({
       ignoreHTTPSErrors: true,
@@ -396,20 +389,9 @@ async function fetchBppraBlazorPages(
       pagesScanned++;
       if (parsed.items.length === 0) break;
 
-      let knownUnchanged = 0;
-      if (knownMap) {
-        for (const item of parsed.items) {
-          if (!item.directUrl) continue;
-          const existing = knownMap.get(item.directUrl.toLowerCase());
-          if (existing && (existing.closing_date || '') === (item.closingDate || '')) {
-            knownUnchanged++;
-          }
-        }
-      }
-
       const added = mergeParsedItems(collected, seen, parsed.items);
       if (added === 0) break;
-      if (knownMap && parsed.items.length > 0 && knownUnchanged / parsed.items.length >= 0.85) {
+      if (shouldEarlyStopKnownPage(parsed.items, knownMap)) {
         break;
       }
     }
@@ -430,16 +412,12 @@ export async function scrapeBppraPortal(
   portal: PortalDefinition & { sessionCookies?: string },
   options?: {
     depth?: ScanDepth;
-    knownMap?: Map<string, { closing_date?: string | null; title?: string | null }> | null;
+    knownMap?: Map<string, KnownTenderStopEntry> | null;
     timeoutMs?: number;
   }
 ): Promise<ScrapeResult> {
   const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
-  const maxPages = portal.pagination
-    ? (depth === 'deep'
-        ? (portal.pagination.deepMaxPages ?? portal.pagination.maxPages)
-        : (portal.pagination.quickMaxPages ?? portal.pagination.maxPages))
-    : 2;
+  const maxPages = resolvePaginationMaxPages(portal, depth, 2);
   const timeoutMs = options?.timeoutMs ?? 25000;
 
   const items: RawScrapedItem[] = [];

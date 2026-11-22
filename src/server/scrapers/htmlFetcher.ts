@@ -16,6 +16,11 @@ export function resetLegacyTlsHostsForTests(): void {
   legacyTlsHosts.clear();
 }
 
+export function markLegacyTlsHost(hostname: string): void {
+  if (!hostname) return;
+  legacyTlsHosts.set(hostname.toLowerCase(), Date.now());
+}
+
 export function isLegacyTlsHost(hostname: string): boolean {
   const key = hostname.toLowerCase();
   const cachedAt = legacyTlsHosts.get(key);
@@ -210,7 +215,7 @@ function requestHtmlWithMetadata(
           useLegacyTls: true
         }).then((res) => {
           if (shouldCacheHost) {
-            legacyTlsHosts.set(hostKey, Date.now());
+            markLegacyTlsHost(hostKey);
           }
           finishResolve(res);
         }).catch(() => finishReject(err));

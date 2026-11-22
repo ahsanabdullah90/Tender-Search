@@ -1,4 +1,5 @@
 import { MODELS_DIR } from '../db/connection.js';
+import { normalizeText } from '../../shared/documentUtils.js';
 
 export const EMBEDDING_DIM = 384;
 export const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
@@ -164,14 +165,7 @@ const STOP_WORDS = new Set([
 /**
  * Normalizes text for embedding and token extraction.
  */
-export function normalizeEmbeddingText(text: string): string {
-  if (!text) return '';
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+export const normalizeEmbeddingText = normalizeText;
 
 /**
  * Lightweight morphological stemmer for English procurement terms.

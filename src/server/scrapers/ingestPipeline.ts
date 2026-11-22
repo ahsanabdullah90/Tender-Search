@@ -1,5 +1,9 @@
 import crypto from 'crypto';
+import { getPktDateKey } from '../../shared/pktDate.js';
+import { isDirectDocumentUrl, isDownloadableCandidateUrl } from '../../shared/documentUtils.js';
 import { Tender, CachedDossier } from '../../shared/types.js';
+
+export { isDirectDocumentUrl, isDownloadableCandidateUrl };
 import { RawScrapedItem } from './portalParsers.js';
 import { PortalDefinition } from './portalList.js';
 import { normalizeText, findCanonicalMatch } from '../services/deduplicator.js';
@@ -93,14 +97,6 @@ export function computeTenderId(portalId: string, item: Pick<RawScrapedItem, 're
   const idMaterial = `${portalId}:${item.referenceNo || ''}:${normalizeText(item.title)}:${item.directUrl}`;
   const tenderHash = crypto.createHash('sha256').update(idMaterial).digest('hex').slice(0, 16);
   return `tender-${portalId}-${tenderHash}`;
-}
-
-export function isDirectDocumentUrl(url?: string | null): boolean {
-  return Boolean(url && (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url)));
-}
-
-export function isDownloadableCandidateUrl(url?: string | null): boolean {
-  return Boolean(url && (!/\.(html?|aspx?|php|jsp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url) || /\/pdf\?file=/i.test(url)));
 }
 
 /**
@@ -231,8 +227,7 @@ export function applyRescannedDeadline(existing: Tender, scannedRaw: string | nu
   }
   const scannedMs = new Date(scanned).getTime();
   const existingMs = new Date(existing.closing_date).getTime();
-  const pktDay = (ms: number) => new Date(ms + 5 * 3600 * 1000).toISOString().slice(0, 10);
-  if (pktDay(scannedMs) === pktDay(existingMs)) return false;
+  if (getPktDateKey(scannedMs) === getPktDateKey(existingMs)) return false;
 
   const previousFormatted = existing.closing_date_formatted || formatClosingDate(existing.closing_date);
   if (scannedMs > existingMs) {
@@ -346,6 +341,68 @@ export function applyRescanToExistingTender(
   return { isNew: false, hasCorrigendum: corrigendumDetected, matched: true };
 }
 
+function buildScrapedTenderPayload(
+  base: {
+    tenderId: string;
+    canonicalId?: string;
+    item: RawScrapedItem;
+    portal: PortalDefinition;
+    candidates: string[];
+    publishDate: string | null;
+    publishDateSource: 'listing' | 'upload_folder' | null;
+  },
+  overrides: {
+    domain_tracks?: string[];
+    matched_keywords?: string[];
+    match_score?: number;
+    semantic_score?: number | null;
+    embedding?: Buffer | null;
+    closing_date?: string | null;
+    closing_date_formatted: string;
+    cached_dossiers?: CachedDossier[];
+    has_corrigendum: number;
+    ingestion_status: 'awaiting_scope' | 'staging' | 'ready';
+    deadline_source: string | null;
+    deadline_confidence?: string | null;
+    doc_fetch_status: 'none' | 'pending' | 'partial' | 'complete' | 'failed';
+    needs_review?: number;
+    review_reason?: string | null;
+  }
+): Parameters<typeof upsertScrapedTender>[0] {
+  const { tenderId, canonicalId, item, portal, candidates, publishDate, publishDateSource } = base;
+  return {
+    id: tenderId,
+    canonical_id: canonicalId ?? tenderId,
+    reference_no: item.referenceNo || null,
+    title: item.title,
+    organization: item.organization,
+    portal_id: portal.id,
+    portal_name: portal.name,
+    direct_url: item.directUrl,
+    domain_tracks: overrides.domain_tracks ?? [],
+    matched_keywords: overrides.matched_keywords ?? [],
+    match_score: overrides.match_score ?? 0,
+    semantic_score: overrides.semantic_score ?? 0,
+    embedding: overrides.embedding ?? null,
+    publish_date: publishDate,
+    publish_date_source: publishDateSource,
+    closing_date: overrides.closing_date ?? null,
+    closing_date_formatted: overrides.closing_date_formatted,
+    estimated_value: item.estimatedValue || null,
+    location: item.location || 'Pakistan',
+    description: item.description ?? '',
+    cached_dossiers: overrides.cached_dossiers ?? [],
+    attachment_urls: candidates,
+    has_corrigendum: overrides.has_corrigendum,
+    ingestion_status: overrides.ingestion_status,
+    deadline_source: overrides.deadline_source,
+    deadline_confidence: overrides.deadline_confidence ?? null,
+    doc_fetch_status: overrides.doc_fetch_status,
+    needs_review: overrides.needs_review ?? 0,
+    review_reason: overrides.review_reason ?? null
+  };
+}
+
 /**
  * A listing that matched no track but has documents is held as 'awaiting_scope' (hidden from
  * every view) and its first documents are queued; the worker releases it if the document text
@@ -368,37 +425,24 @@ export function holdForDocumentScope(tenderId: string, item: RawScrapedItem, por
   } catch {}
 
   const inferredPublish = item.publishDate ? null : inferPublishDateFromUrl(item.directUrl) || candidates.map(inferPublishDateFromUrl).find(Boolean) || null;
-  upsertScrapedTender({
-    id: tenderId,
-    canonical_id: tenderId,
-    reference_no: item.referenceNo || null,
-    title: item.title,
-    organization: item.organization,
-    portal_id: portal.id,
-    portal_name: portal.name,
-    direct_url: item.directUrl,
-    domain_tracks: [],
-    matched_keywords: [],
-    match_score: 0,
-    semantic_score: 0,
-    embedding: null,
-    publish_date: item.publishDate || inferredPublish || null,
-    publish_date_source: item.publishDate ? 'listing' : inferredPublish ? 'upload_folder' : null,
-    closing_date: item.closingDate || null,
-    closing_date_formatted: formatClosingDate(item.closingDate || null),
-    estimated_value: item.estimatedValue || null,
-    location: item.location || 'Pakistan',
-    description: item.description ?? '',
-    cached_dossiers: [],
-    attachment_urls: candidates,
-    has_corrigendum: item.isCorrigendum ? 1 : 0,
-    ingestion_status: 'awaiting_scope',
-    deadline_source: item.closingDate ? 'html_row' : null,
-    deadline_confidence: null,
-    doc_fetch_status: 'pending',
-    needs_review: 0,
-    review_reason: null
-  });
+  upsertScrapedTender(buildScrapedTenderPayload(
+    {
+      tenderId,
+      item,
+      portal,
+      candidates,
+      publishDate: item.publishDate || inferredPublish || null,
+      publishDateSource: item.publishDate ? 'listing' : inferredPublish ? 'upload_folder' : null
+    },
+    {
+      closing_date: item.closingDate || null,
+      closing_date_formatted: formatClosingDate(item.closingDate || null),
+      has_corrigendum: item.isCorrigendum ? 1 : 0,
+      ingestion_status: 'awaiting_scope',
+      deadline_source: item.closingDate ? 'html_row' : null,
+      doc_fetch_status: 'pending'
+    }
+  ));
   try {
     enqueueDocumentJobs(tenderId, candidates.slice(0, UPFRONT_MAX_DOCS).map(url => ({ url, label: deriveDossierLabel(url) })));
     refreshTenderDocFetchStatus(tenderId);
@@ -508,37 +552,30 @@ export async function processAndSaveTender(
   if (runUpfront) {
     // Stage the new tender so Inbox/Pipeline/analytics queries ignore it via NOT_STAGING_SQL
     // until verification passes (P2-4). Only ever done for a row that did not exist (step 1).
-    upsertScrapedTender({
-      id: tenderId,
-      canonical_id: canonicalId,
-      reference_no: item.referenceNo || null,
-      title: item.title,
-      organization: item.organization,
-      portal_id: portal.id,
-      portal_name: portal.name,
-      direct_url: item.directUrl,
-      domain_tracks: matchedTracks,
-      matched_keywords: matchedKeywords,
-      match_score: matchScore,
-      semantic_score: semanticScore ?? 0,
-      embedding: tenderEmbeddingBuf,
-      publish_date: item.publishDate || inferredPublishDate || null,
-      publish_date_source: publishDateSource,
-      closing_date: item.closingDate || null,
-      closing_date_formatted: formattedDate,
-      estimated_value: item.estimatedValue || null,
-      location: item.location || 'Pakistan',
-      description: item.description ?? '',
-      cached_dossiers: [],
-      attachment_urls: candidates,
-      has_corrigendum: item.isCorrigendum ? 1 : 0,
-      ingestion_status: 'staging',
-      deadline_source: item.closingDate ? 'html_row' : null,
-      deadline_confidence: null,
-      doc_fetch_status: 'pending',
-      needs_review: 0,
-      review_reason: null
-    });
+    upsertScrapedTender(buildScrapedTenderPayload(
+      {
+        tenderId,
+        canonicalId,
+        item,
+        portal,
+        candidates,
+        publishDate: item.publishDate || inferredPublishDate || null,
+        publishDateSource
+      },
+      {
+        domain_tracks: matchedTracks,
+        matched_keywords: matchedKeywords,
+        match_score: matchScore,
+        semantic_score: semanticScore ?? 0,
+        embedding: tenderEmbeddingBuf,
+        closing_date: item.closingDate || null,
+        closing_date_formatted: formattedDate,
+        has_corrigendum: item.isCorrigendum ? 1 : 0,
+        ingestion_status: 'staging',
+        deadline_source: item.closingDate ? 'html_row' : null,
+        doc_fetch_status: 'pending'
+      }
+    ));
   }
 
   const upfront = runUpfront
@@ -661,40 +698,37 @@ export async function processAndSaveTender(
           ? 'failed'
           : 'none';
 
-  upsertScrapedTender({
-    id: tenderId,
-    canonical_id: canonicalId,
-    reference_no: item.referenceNo || null,
-    title: item.title,
-    organization: item.organization,
-    portal_id: portal.id,
-    portal_name: portal.name,
-    direct_url: item.directUrl,
-    domain_tracks: finalTracks,
-    matched_keywords: finalKeywords,
-    match_score: matchScore,
-    semantic_score: semanticScore ?? 0,
-    embedding: embeddingBuf,
-    // Unknown publish dates are never defaulted to today (that made old archive items look
-    // fresh). A CMS upload-folder month is used as an upper-bound fallback (marked as such, so it
-    // is never used for ageing; docs/16 A2); otherwise NULL and ageing falls back to created_at.
-    publish_date: item.publishDate || inferredPublishDate || null,
-    publish_date_source: publishDateSource,
-    closing_date: item.closingDate || null,
-    closing_date_formatted: formattedDate,
-    estimated_value: item.estimatedValue || null,
-    location: item.location || 'Pakistan',
-    description: item.description ?? '',
-    cached_dossiers: upfront.dossiers,
-    attachment_urls: candidates,
-    has_corrigendum: item.isCorrigendum || resolved.isExtension ? 1 : 0,
-    ingestion_status: 'ready',
-    deadline_source: deadlineSource,
-    deadline_confidence: deadlineConfidence,
-    doc_fetch_status: docFetchStatus,
-    needs_review: needsReview ? 1 : 0,
-    review_reason: reviewReason
-  });
+  upsertScrapedTender(buildScrapedTenderPayload(
+    {
+      tenderId,
+      canonicalId,
+      item,
+      portal,
+      candidates,
+      // Unknown publish dates are never defaulted to today (that made old archive items look
+      // fresh). A CMS upload-folder month is used as an upper-bound fallback (marked as such, so it
+      // is never used for ageing; docs/16 A2); otherwise NULL and ageing falls back to created_at.
+      publishDate: item.publishDate || inferredPublishDate || null,
+      publishDateSource
+    },
+    {
+      domain_tracks: finalTracks,
+      matched_keywords: finalKeywords,
+      match_score: matchScore,
+      semantic_score: semanticScore ?? 0,
+      embedding: embeddingBuf,
+      closing_date: item.closingDate || null,
+      closing_date_formatted: formattedDate,
+      cached_dossiers: upfront.dossiers,
+      has_corrigendum: item.isCorrigendum || resolved.isExtension ? 1 : 0,
+      ingestion_status: 'ready',
+      deadline_source: deadlineSource,
+      deadline_confidence: deadlineConfidence,
+      doc_fetch_status: docFetchStatus,
+      needs_review: needsReview ? 1 : 0,
+      review_reason: reviewReason
+    }
+  ));
 
   // Everything not read upfront (dated tenders, remaining attachments, timeouts, scanned files
   // waiting for Vision budget) or dedicated detail pages goes to the durable queue for the worker.

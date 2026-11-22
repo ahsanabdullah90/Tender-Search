@@ -41,6 +41,8 @@ const PIPELINE_STAGES_SQL = "'Under Review', 'Preparing Bid', 'Submitted', 'Won'
 export const UNDATED_AGE_ANCHOR_SQL =
   "CASE WHEN publish_date IS NULL OR COALESCE(publish_date_source, 'listing') = 'upload_folder' THEN created_at ELSE publish_date END";
 
+export const ACTIVE_UNEXPIRED_SQL = `((closing_date IS NULL AND ((${UNDATED_AGE_ANCHOR_SQL}) IS NULL OR julianday('now') - julianday(${UNDATED_AGE_ANCHOR_SQL}) <= ${UNDATED_MAX_AGE_DAYS})) OR julianday(closing_date) >= julianday('now') OR is_bookmarked = 1 OR COALESCE(needs_review, 0) = 1)`;
+
 export function setTenderIngestionStatus(id: string, status: IngestionStatus): boolean {
   return db.prepare('UPDATE tenders SET ingestion_status = ? WHERE id = ?').run(status, id).changes > 0;
 }
@@ -230,7 +232,7 @@ export function getAllTenders(filters?: {
 
   if (filters?.excludeExpired) {
     // Undated tenders age from their publish date, or from when we first saw them if the portal gave none.
-    query += ` AND ((closing_date IS NULL AND ((${UNDATED_AGE_ANCHOR_SQL}) IS NULL OR julianday('now') - julianday(${UNDATED_AGE_ANCHOR_SQL}) <= ${UNDATED_MAX_AGE_DAYS})) OR julianday(closing_date) >= julianday('now') OR is_bookmarked = 1 OR COALESCE(needs_review, 0) = 1)`;
+    query += ` AND ${ACTIVE_UNEXPIRED_SQL}`;
   }
 
   if (filters?.bookmarkedOnly) {
@@ -638,7 +640,7 @@ export function getPortalTenderSummary(): {
     FROM tenders
     WHERE pipeline_status = 'New Opportunity'
       AND ${NOT_STAGING_SQL}
-      AND (closing_date IS NULL OR julianday(closing_date) >= julianday('now') OR is_bookmarked = 1)
+      AND ${ACTIVE_UNEXPIRED_SQL}
     GROUP BY portal_id, portal_name
     ORDER BY unread_count DESC, total_count DESC
   `).all() as any[];

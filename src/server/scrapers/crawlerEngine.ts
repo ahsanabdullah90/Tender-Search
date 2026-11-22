@@ -29,7 +29,6 @@ import {
   setDeepScanPending
 } from '../services/networkMonitor.js';
 import {
-  parseDateString,
   extractDatesFromText
 } from './dateParser.js';
 import {
@@ -56,6 +55,8 @@ import {
 } from './healer.js';
 import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
 import { processAndSaveTender } from './ingestPipeline.js';
+import { launchHeadlessChromium } from './playwrightEngine.js';
+import { resolvePaginationMaxPages, shouldEarlyStopKnownPage } from './scraperUtils.js';
 
 // ===========================================================================
 // Re-exports for backward compatibility across active callers and tests
@@ -571,13 +572,6 @@ export async function startCrawlerScan(
   }
 }
 
-function normalizeClosingDayForEarlyStop(value?: string | null): string {
-  if (!value) return '';
-  if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
-  const parsed = parseDateString(value);
-  return parsed && /^\d{4}-\d{2}-\d{2}/.test(parsed) ? parsed.slice(0, 10) : value.trim().toLowerCase();
-}
-
 /**
  * Scrapes a portal via Playwright headless (if tier === 'playwright') with fallback to tolerant HTTP/Cheerio (Bug B1),
  * enhanced with Self-Healing Phase 2 (Adaptive AI Layout Extraction) and strictly gated Phase 3 (Auto-Healer on dead links only).
@@ -637,40 +631,26 @@ export async function scrapePortal(
   let playwrightError: Error | null = null;
 
   if (portal.tier === 'playwright' && usingRealTransport) {
+    let browser: any = null;
     try {
-      const modName = 'playwright';
-      const playwright: any = await (Function('m', 'return import(m)')(modName) as Promise<any>).catch(() => null);
-      if (playwright && playwright.chromium) {
-        let browser: any = null;
-        try {
-          browser = await playwright.chromium
-            .launch({ headless: true, channel: 'chromium' })
-            .catch(() => playwright.chromium.launch({ headless: true }))
-            .catch(() => playwright.chromium.launch({ headless: true, channel: 'msedge' }));
-          const context = await browser.newContext({
-            ignoreHTTPSErrors: true,
-            userAgent: HUMAN_CHROME_HEADERS['User-Agent']
-          });
-          const page = await context.newPage();
-          await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-          await page
-            .waitForSelector('table, .job-post-item, .notice-table, .tableRow.dataRow, .tender-card, a[href*=".pdf"]', { timeout: 6000 })
-            .catch(() => {});
-          html = await page.content();
-          await browser.close();
-        } catch (pwErr: any) {
-          playwrightError = pwErr;
-          console.warn(`[Crawler] Playwright execution failed for ${portal.id}:`, pwErr?.message || pwErr);
-          if (browser) {
-            try { await browser.close(); } catch {}
-          }
-        }
-      } else {
-        playwrightError = new Error('Playwright or Chromium binary not available on host');
-        console.warn(`[Crawler] Playwright not available for ${portal.id}`);
+      browser = await launchHeadlessChromium();
+      const context = await browser.newContext({
+        ignoreHTTPSErrors: true,
+        userAgent: HUMAN_CHROME_HEADERS['User-Agent']
+      });
+      const page = await context.newPage();
+      await page.goto(portal.tendersUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      await page
+        .waitForSelector('table, .job-post-item, .notice-table, .tableRow.dataRow, .tender-card, a[href*=".pdf"]', { timeout: 6000 })
+        .catch(() => {});
+      html = await page.content();
+      await browser.close();
+    } catch (pwErr: any) {
+      playwrightError = pwErr;
+      console.warn(`[Crawler] Playwright execution failed for ${portal.id}:`, pwErr?.message || pwErr);
+      if (browser) {
+        try { await browser.close(); } catch {}
       }
-    } catch (e: any) {
-      playwrightError = e;
     }
   }
 
@@ -745,11 +725,7 @@ export async function scrapePortal(
 
   // Two-speed pagination (quick vs deep) + DB early-stop when page >= 2 repeats already-known unchanged notices
   const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
-  const maxPages = portal.pagination
-    ? (depth === 'deep'
-        ? (portal.pagination.deepMaxPages ?? portal.pagination.maxPages)
-        : (portal.pagination.quickMaxPages ?? portal.pagination.maxPages))
-    : 1;
+  const maxPages = resolvePaginationMaxPages(portal, depth, 1);
   let pagesScanned = 1;
   if (portal.pagination && maxPages > 1 && !result.hitlRequired && result.items.length > 0) {
     const seenUrls = new Set(result.items.map(it => (it.directUrl || it.title).toLowerCase()));
@@ -793,7 +769,6 @@ export async function scrapePortal(
         }
 
         let newOnThisPage = 0;
-        let allKnownAndUnchanged = Boolean(knownMap && knownMap.size > 0);
         for (const item of cleanPageItems) {
           const key = (item.directUrl || item.title).toLowerCase();
           if (!seenUrls.has(key)) {
@@ -801,25 +776,13 @@ export async function scrapePortal(
             result.items.push(item);
             newOnThisPage++;
           }
-          if (allKnownAndUnchanged && knownMap) {
-            const known = knownMap.get(key);
-            if (!known || item.isCorrigendum) {
-              allKnownAndUnchanged = false;
-            } else {
-              const incomingClosing = normalizeClosingDayForEarlyStop(item.closingDate);
-              const storedClosing = normalizeClosingDayForEarlyStop(known.closing_date);
-              if (incomingClosing !== storedClosing) {
-                allKnownAndUnchanged = false;
-              }
-            }
-          }
         }
 
         if (newOnThisPage === 0) {
           break; // Stop when page yields only items already seen
         }
         pagesScanned++;
-        if (allKnownAndUnchanged) {
+        if (shouldEarlyStopKnownPage(cleanPageItems, knownMap, { threshold: 1, keyMode: 'urlOrTitle' })) {
           // Quick scan caught up to already-indexed unchanged pages in SQLite
           break;
         }

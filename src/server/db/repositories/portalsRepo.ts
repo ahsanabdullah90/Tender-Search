@@ -1,9 +1,9 @@
 import { db } from '../connection.js';
+import { sanitizeOriginUrl } from '../../../shared/documentUtils.js';
 import { PortalHealth } from '../../../shared/types.js';
 
-export function getPortalHealthList(): PortalHealth[] {
-  const rows = db.prepare('SELECT * FROM portal_health ORDER BY portal_name ASC').all() as any[];
-  return rows.map(r => ({
+function mapPortalHealthRow(r: any): PortalHealth {
+  return {
     portal_id: r.portal_id,
     portal_name: r.portal_name,
     category: r.category,
@@ -24,7 +24,12 @@ export function getPortalHealthList(): PortalHealth[] {
     verified_status: r.verified_status,
     last_success_at: r.last_success_at ?? null,
     pages_scanned: r.pages_scanned ?? 0
-  }));
+  };
+}
+
+export function getPortalHealthList(): PortalHealth[] {
+  const rows = db.prepare('SELECT * FROM portal_health ORDER BY portal_name ASC').all() as any[];
+  return rows.map(mapPortalHealthRow);
 }
 
 export function updatePortalHealth(portalId: string, updates: Partial<PortalHealth> & { auth_password?: string }) {
@@ -46,9 +51,7 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
     if (allowedColumns.has(key) && val !== undefined) {
       let normalizedVal = val;
       if (key === 'base_url' && typeof val === 'string' && val.trim()) {
-        try {
-          normalizedVal = new URL(val.trim()).origin;
-        } catch {}
+        normalizedVal = sanitizeOriginUrl(val, val);
       }
       fields.push(`${key} = ?`);
       values.push(normalizedVal);
@@ -82,29 +85,7 @@ export function getPortalAuthCredentials(portalId: string): { username?: string;
 
 export function getPortalById(portalId: string): PortalHealth | null {
   const r = db.prepare('SELECT * FROM portal_health WHERE portal_id = ?').get(portalId) as any;
-  if (!r) return null;
-  return {
-    portal_id: r.portal_id,
-    portal_name: r.portal_name,
-    category: r.category,
-    tier: r.tier,
-    base_url: r.base_url,
-    tenders_url: r.tenders_url,
-    login_url: r.login_url,
-    auth_username: r.auth_username,
-    has_credentials: Boolean(r.auth_password),
-    session_cookies: r.session_cookies,
-    status: r.status,
-    last_scan_at: r.last_scan_at,
-    last_items_found: r.last_items_found,
-    consecutive_zero_yields: r.consecutive_zero_yields,
-    last_error_message: r.last_error_message,
-    last_error_code: r.last_error_code ?? null,
-    access_mode: r.access_mode,
-    verified_status: r.verified_status,
-    last_success_at: r.last_success_at ?? null,
-    pages_scanned: r.pages_scanned ?? 0
-  };
+  return r ? mapPortalHealthRow(r) : null;
 }
 
 export function createPortal(input: {
@@ -119,18 +100,10 @@ export function createPortal(input: {
 }): PortalHealth {
   const name = input.portal_name.trim();
   const tendersUrl = input.tenders_url.trim();
-  let baseUrl = (input.base_url || '').trim();
-  if (!baseUrl) {
-    try {
-      baseUrl = new URL(tendersUrl).origin;
-    } catch {
-      baseUrl = tendersUrl;
-    }
-  } else {
-    try {
-      baseUrl = new URL(baseUrl).origin;
-    } catch {}
-  }
+  const rawBaseUrl = (input.base_url || '').trim();
+  const baseUrl = rawBaseUrl
+    ? sanitizeOriginUrl(rawBaseUrl, rawBaseUrl)
+    : sanitizeOriginUrl(tendersUrl, tendersUrl);
 
   // Derive unique portal_id slug
   let portalId = (input.portal_id || '').trim();

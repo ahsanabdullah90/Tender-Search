@@ -13,6 +13,7 @@ import { authenticatePortal } from '../scrapers/portalAuth.js';
 import { healPortalConnection, getActivePortalsList } from '../scrapers/crawlerEngine.js';
 import { launchLocalBrowserHITL, verifyAndResumePortal } from '../scrapers/playwrightEngine.js';
 import { validateExternalHttpUrl } from '../services/urlSafety.js';
+import { sanitizeOriginUrl } from '../../shared/documentUtils.js';
 
 export const portalsRouter = Router();
 
@@ -102,19 +103,15 @@ portalsRouter.put('/:portalId', (req, res) => {
   }
 
   if (typeof updates.base_url === 'string' && updates.base_url.trim()) {
-    try {
-      updates.base_url = new URL(updates.base_url.trim()).origin;
-    } catch {}
+    updates.base_url = sanitizeOriginUrl(updates.base_url, updates.base_url.trim());
   }
 
   // If operator updated tenders_url, derive clean base_url origin and clear stale offline/error states
   if (typeof updates.tenders_url === 'string' && updates.tenders_url.trim()) {
-    try {
-      const parsedOrigin = new URL(updates.tenders_url.trim()).origin;
-      if (!updates.base_url || updates.base_url === updates.tenders_url) {
-        updates.base_url = parsedOrigin;
-      }
-    } catch {}
+    const parsedOrigin = sanitizeOriginUrl(updates.tenders_url);
+    if (parsedOrigin && (!updates.base_url || updates.base_url === updates.tenders_url)) {
+      updates.base_url = parsedOrigin;
+    }
     if (updates.status === undefined) {
       updates.status = 'online';
     }
@@ -122,7 +119,7 @@ portalsRouter.put('/:portalId', (req, res) => {
       updates.last_error_message = null;
     }
     if (updates.access_mode === undefined) {
-      const existing = getPortalHealthList().find(p => p.portal_id === portalId);
+      const existing = getPortalById(portalId);
       if (existing && existing.access_mode === 'offline_broken') {
         updates.access_mode = 'public';
       }

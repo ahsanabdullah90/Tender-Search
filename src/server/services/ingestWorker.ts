@@ -23,7 +23,7 @@ import {
 } from '../db/repositories/tendersRepo.js';
 import { getAllDomainTracks } from '../db/repositories/tracksRepo.js';
 import { deriveDossierLabel } from './dossierManager.js';
-import { shouldUpgradeDocType, renameDossierToCanonical } from './dossierStore.js';
+import { upgradeDossierDocTypeIfNeeded } from './dossierStore.js';
 import { extractFromDocument, DocumentExtractionResult } from './documentExtractor.js';
 import { maxFileBytes, tryConsumeDailyVision } from './ingestBudget.js';
 import {
@@ -349,6 +349,15 @@ async function processJob(job: IngestJob): Promise<ProcessJobResult> {
       return { outcome: 'deferred', visibleChange: false };
     }
 
+    const applyDocUpgradeIfNeeded = () => {
+      const latest = getTenderById(current.id) || current;
+      const latestDossiers = Array.isArray(latest.cached_dossiers) ? latest.cached_dossiers : dossiers;
+      const upgraded = upgradeDossierDocTypeIfNeeded(latest, doc!, result.docType, latestDossiers);
+      if (upgraded.upgraded) {
+        updateTenderFields(latest.id, { cached_dossiers: upgraded.dossiers });
+      }
+    };
+
     // A tender held because its listing matched no track (docs/15 F2): decide from the document.
     let becameVisible = current.ingestion_status === 'ready';
     if (current.ingestion_status === 'awaiting_scope') {
@@ -356,32 +365,14 @@ async function processJob(job: IngestJob): Promise<ProcessJobResult> {
       if (decision === 'removed') return { outcome: 'completed', visibleChange: false };
       if (decision === 'released') becameVisible = true;
       if (decision === 'waiting') {
-        if (shouldUpgradeDocType(doc.docType, result.docType)) {
-          const latest = getTenderById(current.id) || current;
-          const latestDossiers = Array.isArray(latest.cached_dossiers) ? [...latest.cached_dossiers] : [...dossiers];
-          const targetIdx = latestDossiers.findIndex(d => d.localPath === doc!.localPath || (Boolean(doc!.sha256) && d.sha256 === doc!.sha256));
-          if (targetIdx >= 0) {
-            const renamed = renameDossierToCanonical(latest, latestDossiers[targetIdx], result.docType, latestDossiers);
-            latestDossiers[targetIdx] = renamed.dossier;
-            updateTenderFields(latest.id, { cached_dossiers: latestDossiers });
-          }
-        }
+        applyDocUpgradeIfNeeded();
         completeJob(job.id);
         refreshTenderDocFetchStatus(current.id);
         return { outcome: 'completed', visibleChange: false };
       }
     }
 
-    if (shouldUpgradeDocType(doc.docType, result.docType)) {
-      const latest = getTenderById(current.id) || current;
-      const latestDossiers = Array.isArray(latest.cached_dossiers) ? [...latest.cached_dossiers] : [...dossiers];
-      const targetIdx = latestDossiers.findIndex(d => d.localPath === doc!.localPath || (Boolean(doc!.sha256) && d.sha256 === doc!.sha256));
-      if (targetIdx >= 0) {
-        const renamed = renameDossierToCanonical(latest, latestDossiers[targetIdx], result.docType, latestDossiers);
-        latestDossiers[targetIdx] = renamed.dossier;
-        updateTenderFields(latest.id, { cached_dossiers: latestDossiers });
-      }
-    }
+    applyDocUpgradeIfNeeded();
 
     const applied = applyDocumentResultToTender(getTenderById(current.id) || current, result);
     if (applied === 'expired') return { outcome: 'expired', visibleChange: true }; // tender (and its jobs) deleted

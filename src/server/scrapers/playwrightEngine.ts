@@ -29,6 +29,17 @@ export const playwrightDeps = {
   }
 };
 
+export async function launchHeadlessChromium(): Promise<any> {
+  const playwright: any = await playwrightDeps.importPlaywright();
+  if (!playwright?.chromium) {
+    throw new Error('Playwright Chromium not available');
+  }
+  return playwright.chromium
+    .launch({ headless: true, channel: 'chromium' })
+    .catch(() => playwright.chromium.launch({ headless: true }))
+    .catch(() => playwright.chromium.launch({ headless: true, channel: 'msedge' }));
+}
+
 // Active HITL browser contexts tracked to prevent multiple hanging processes
 const activeHitlContexts = new Map<string, any>();
 

@@ -1,9 +1,16 @@
-import { RawScrapedItem, ScrapeResult, isNonBidEvaluationOrPlanTitle } from './portalParsers.js';
+import { RawScrapedItem, ScrapeResult, isNonBidEvaluationOrPlanTitle, extractLocationFromPatterns } from './portalParsers.js';
 import { PortalDefinition } from './portalList.js';
 import { parseDateString, formatClosingDate } from './dateParser.js';
 import { isValidReferenceNo } from '../services/referenceNo.js';
 import { reportNetworkOutcome, PASSIVE_SLOW_HTML_MS } from '../services/networkMonitor.js';
 import { sslTolerantDispatcher } from './baseScraper.js';
+import {
+  CLOSED_STATUS_RE,
+  isAuctionOrDisposalTender,
+  resolvePaginationMaxPages,
+  shouldEarlyStopKnownPage,
+  KnownTenderStopEntry
+} from './scraperUtils.js';
 
 export const KP_API_BASE = 'https://mgn1.kp.gov.pk';
 export const KP_TENDERS_API_URL = `${KP_API_BASE}/api/tenders`;
@@ -60,8 +67,6 @@ export interface KpTenderRecord {
   corrigendum?: string | boolean | null;
   corrigenda?: KpCorrigendumRecord[] | null;
 }
-
-const CLOSED_STATUS_RE = /\b(closed|cancelled|canceled|completed|awarded|archived|expired|dropped)\b/i;
 
 const KP_LOCATION_PATTERNS: Array<[RegExp, string]> = [
   // Multi-word and abbreviated districts/towns first
@@ -128,16 +133,13 @@ const KP_LOCATION_PATTERNS: Array<[RegExp, string]> = [
  * Extracts a canonical Khyber Pakhtunkhwa district/city location from department text (or title fallback).
  */
 export function extractKpLocation(deptText: string, title?: string): string {
-  const candidates = title ? [deptText, title] : [deptText];
-  for (const source of candidates) {
-    if (!source) continue;
-    for (const [pattern, city] of KP_LOCATION_PATTERNS) {
-      if (pattern.test(source)) {
-        return `${city}, Khyber Pakhtunkhwa`;
-      }
-    }
-  }
-  return 'Khyber Pakhtunkhwa, Pakistan';
+  return extractLocationFromPatterns(
+    KP_LOCATION_PATTERNS,
+    'Khyber Pakhtunkhwa',
+    'Khyber Pakhtunkhwa, Pakistan',
+    deptText,
+    title
+  );
 }
 
 function resolveKpFileUrl(raw?: string | null): string | null {
@@ -172,10 +174,7 @@ export function mapKpRecordToScrapedTender(record: KpTenderRecord): RawScrapedIt
   }
 
   const tenderType = (record.tender_type || '').replace(/\s+/g, ' ').trim();
-  const isAuctionOrDisposal =
-    /\b(?:auction|disposal|sales?)\b/i.test(tenderType) ||
-    /^(?:auction|disposal|sale)\b|\b(?:open\s+auction|public\s+auction|auction\s+(?:notice|of\b)|auction\s+of\s+toll\s+tax|toll\s+tax\s+auction|sale\s+of\s+(?:scrap|condemned|unserviceable|obsolete|vehicles|trees|fruit)|disposal\s+of\s+(?:scrap|condemned|unserviceable|obsolete|old|surplus|assets))\b/i.test(title);
-  if (isAuctionOrDisposal) {
+  if (isAuctionOrDisposalTender(title, tenderType)) {
     return null;
   }
 
@@ -327,28 +326,33 @@ export async function scrapeKpPortal(
   portal: PortalDefinition,
   options?: {
     depth?: 'quick' | 'deep';
-    knownMap?: Map<string, { closing_date?: string | null; has_corrigendum?: number; title?: string | null }> | null;
+    knownMap?: Map<string, KnownTenderStopEntry> | null;
     timeoutMs?: number;
   }
 ): Promise<ScrapeResult> {
   const depth = options?.depth === 'deep' ? 'deep' : 'quick';
-  const maxPages = portal.pagination
-    ? (depth === 'deep'
-        ? (portal.pagination.deepMaxPages ?? 15)
-        : (portal.pagination.quickMaxPages ?? 8))
-    : 8;
+  const maxPages = resolvePaginationMaxPages(portal, depth, 8);
 
   const allItems: RawScrapedItem[] = [];
   const seenKeys = new Set<string>();
   let pagesScanned = 0;
 
   for (let page = 1; page <= maxPages; page++) {
-    const { records, lastPage } = await fetchKpTendersPage(page, options?.timeoutMs ?? 20000);
+    let pageData: { records: KpTenderRecord[]; lastPage: number };
+    try {
+      pageData = await fetchKpTendersPage(page, options?.timeoutMs ?? 20000);
+    } catch (err: any) {
+      if (pagesScanned > 0) {
+        console.warn(`[KP] Stopping pagination on page ${page} after collecting ${allItems.length} item(s): ${err?.message || err}`);
+        break;
+      }
+      throw err;
+    }
+    const { records, lastPage } = pageData;
     pagesScanned++;
     if (records.length === 0) break;
 
-    let addedOnPage = 0;
-    let knownUnchanged = 0;
+    const pageItems: RawScrapedItem[] = [];
 
     for (const rec of records) {
       const mapped = mapKpRecordToScrapedTender(rec);
@@ -357,28 +361,11 @@ export async function scrapeKpPortal(
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
 
-      if (page >= 2 && options?.knownMap && mapped.directUrl) {
-        const existing = options.knownMap.get(mapped.directUrl.toLowerCase());
-        const normalizeDay = (val?: string | null) => {
-          if (!val) return '';
-          const trimmed = val.trim();
-          if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
-          const parsed = parseDateString(trimmed);
-          return parsed ? parsed.slice(0, 10) : trimmed.toLowerCase();
-        };
-        const mappedClosingDay = normalizeDay(mapped.closingDate);
-        const existingClosingDay = normalizeDay(existing?.closing_date);
-        const hasNewCorrigendum = Boolean(mapped.isCorrigendum && !existing?.has_corrigendum);
-        if (existing && !hasNewCorrigendum && existingClosingDay === mappedClosingDay) {
-          knownUnchanged++;
-        }
-      }
-
       allItems.push(mapped);
-      addedOnPage++;
+      pageItems.push(mapped);
     }
 
-    if (page >= 2 && options?.knownMap && addedOnPage > 0 && knownUnchanged / addedOnPage >= 0.85) {
+    if (page >= 2 && shouldEarlyStopKnownPage(pageItems, options?.knownMap)) {
       break;
     }
     if (page >= lastPage) break;

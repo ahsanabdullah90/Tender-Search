@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { asyncHandler } from './routeUtils.js';
+import { asyncHandler, decodeBase64Payload } from './routeUtils.js';
 import {
   getAllTenders,
   getTenderById,
@@ -213,8 +213,7 @@ tendersRouter.post('/:id/attachments', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'base64Data is required' });
   }
 
-  const cleanBase64 = String(rawBase64).replace(/^data:[^;]+;base64,/, '');
-  const buffer = Buffer.from(cleanBase64, 'base64');
+  const buffer = decodeBase64Payload(rawBase64);
   const doc = saveManualDossier(existing.id, filename || 'notice.png', buffer, label, mimeType);
   const updatedDossiers = [...(Array.isArray(existing.cached_dossiers) ? existing.cached_dossiers : []), doc];
 
@@ -319,8 +318,7 @@ tendersRouter.post('/', (req, res) => {
 
   const attachBase64 = attachment?.base64Data || attachment?.dataBase64 || fileBase64;
   if (attachBase64) {
-    const cleanBase64 = String(attachBase64).replace(/^data:[^;]+;base64,/, '');
-    const buffer = Buffer.from(cleanBase64, 'base64');
+    const buffer = decodeBase64Payload(attachBase64);
     const doc = saveManualDossier(
       created.id,
       attachment?.filename || filename || 'notice.png',

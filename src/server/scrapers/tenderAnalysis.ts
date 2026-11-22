@@ -12,10 +12,16 @@ import {
   markDocumentJobsDoneForUrls,
   refreshTenderDocFetchStatus
 } from '../db/index.js';
+import {
+  safeDecodeURIComponent,
+  sanitizeOriginUrl,
+  isDirectDocumentUrl,
+  isImageUrl
+} from '../../shared/documentUtils.js';
 import { Tender, CachedDossier } from '../../shared/types.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
-import { downloadAndCacheDossier, deriveDossierLabel, isHtmlContent, detectExtensionAndMime } from '../services/dossierManager.js';
-import { saveTenderDocument, getPortalFileCode, shouldUpgradeDocType, renameDossierToCanonical } from '../services/dossierStore.js';
+import { deriveDossierLabel, isHtmlContent, detectExtensionAndMime } from '../services/dossierManager.js';
+import { saveTenderDocument, getPortalFileCode, upgradeDossierDocTypeIfNeeded, DocType } from '../services/dossierStore.js';
 import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import { applyDocumentResultToTender } from '../services/documentApply.js';
 import { summarizeTenderTextWithAI } from '../services/ocrService.js';
@@ -29,11 +35,93 @@ import { crawlerDeps } from './crawlerDeps.js';
 
 /** Reads a cached dossier's bytes from disk, or null if it is missing. */
 export function readCachedDossier(tenderId: string, dossier: CachedDossier): Buffer | null {
-  const filename = decodeURIComponent(path.basename(dossier.localPath || ''));
+  const filename = safeDecodeURIComponent(path.basename(dossier.localPath || ''));
   if (!filename) return null;
   const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
   if (!diskPath.startsWith(path.resolve(DOSSIERS_DIR) + path.sep) || !fs.existsSync(diskPath)) return null;
   return fs.readFileSync(diskPath);
+}
+
+function resolvePortalDefForTender(tender: Tender): PortalDefinition {
+  return (
+    PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) ||
+    ({
+      id: tender.portal_id,
+      name: tender.portal_name,
+      baseUrl: sanitizeOriginUrl(tender.direct_url, tender.direct_url || ''),
+      tendersUrl: tender.direct_url
+    } as PortalDefinition)
+  );
+}
+
+function findListingRowContainer($: cheerio.CheerioAPI, tender: Tender): cheerio.Cheerio<any> | null {
+  let matchingContainer: cheerio.Cheerio<any> | null = null;
+  $('tr, .job-post-item, .tender-card, .card, article').each((_, el) => {
+    const text = $(el).text();
+    if (
+      (tender.reference_no && text.includes(tender.reference_no)) ||
+      (tender.title && text.toLowerCase().includes(tender.title.toLowerCase().slice(0, 30)))
+    ) {
+      matchingContainer = $(el);
+      return false;
+    }
+  });
+  return matchingContainer;
+}
+
+async function downloadAndAttachCandidateUrl(
+  tender: Tender,
+  portalCode: string,
+  url: string,
+  idx: number,
+  dossiers: CachedDossier[],
+  cachedUrls: Set<string>,
+  options: {
+    defaultLabel?: string;
+    maxDossiers?: number;
+    checkCachedUrls?: boolean;
+    warnPrefix?: string;
+  } = {}
+): Promise<boolean> {
+  const maxDossiers = options.maxDossiers ?? 5;
+  if (!url || dossiers.length >= maxDossiers) return false;
+  if (options.checkCachedUrls && cachedUrls.has(url)) return false;
+  const tag = options.warnPrefix || 'FetchDocs';
+  try {
+    const buf = await crawlerDeps.fetchFileBuffer(url);
+    const ct = (buf as any)?.contentType;
+    if (isHtmlContent(buf, ct)) {
+      console.warn(`[${tag}] Rejected HTML content from ${url} for ${tender.id}`);
+      return false;
+    }
+    const detected = detectExtensionAndMime(buf, ct, url);
+    const cdHeader = (buf as any)?.contentDisposition as string | undefined;
+    const defaultLabel = options.defaultLabel ?? (isImageUrl(url) ? 'Tender Notice Image' : 'Bidding Document');
+    const doc = saveTenderDocument(tender.id, buf, {
+      portalCode,
+      referenceNo: tender.reference_no,
+      title: tender.title,
+      label: deriveDossierLabel(url, defaultLabel, idx + 1),
+      originalUrl: url,
+      contentDisposition: cdHeader,
+      extension: detected.ext,
+      mimeType: detected.mimeType,
+      index: idx + 1,
+      existingDossiers: dossiers,
+      source: 'portal_scrape'
+    });
+    const added = !dossiers.some(
+      d => d.sha256 === doc.sha256 || d.originalUrl === doc.originalUrl || d.localPath === doc.localPath
+    );
+    if (added) {
+      dossiers.push(doc);
+    }
+    cachedUrls.add(url);
+    return added;
+  } catch (dlErr: any) {
+    console.warn(`[${tag}] Failed to download attachment ${url} for ${tender.id}:`, dlErr.message);
+    return false;
+  }
 }
 
 /** Document types the extractor can read: PDF, Word (.docx) and images. */
@@ -150,46 +238,17 @@ async function runFetchDocumentsForTender(
   } catch {}
   try {
 
-  const isDirectFile = Boolean(
-    tender.direct_url &&
-    (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url) || /[?&]wpdmdl=\d+/i.test(tender.direct_url))
-  );
+  const isDirectFile = isDirectDocumentUrl(tender.direct_url);
 
   const downloadAndAttachUrl = async (u: string, idx: number): Promise<boolean> => {
-    if (!u || cachedUrls.has(u) || dossiers.length >= 5) return false;
-    try {
-      const buf = await crawlerDeps.fetchFileBuffer(u);
-      const ct = (buf as any)?.contentType;
-      if (isHtmlContent(buf, ct)) {
-        console.warn(`[FetchDocs] Rejected HTML content from ${u} for ${tender.id}`);
-        return false;
-      }
-      const isDirect = isDirectFile && u === tender.direct_url;
-      const detected = detectExtensionAndMime(buf, ct, u);
-      const cdHeader = (buf as any)?.contentDisposition as string | undefined;
-      const doc = saveTenderDocument(tender.id, buf, {
-        portalCode,
-        referenceNo: tender.reference_no,
-        title: tender.title,
-        label: deriveDossierLabel(u, isDirect ? 'Tender Document' : 'Bidding Document', idx + 1),
-        originalUrl: u,
-        contentDisposition: cdHeader,
-        extension: detected.ext,
-        mimeType: detected.mimeType,
-        index: idx + 1,
-        existingDossiers: dossiers,
-        source: 'portal_scrape'
-      });
-      if (!dossiers.some(d => d.sha256 === doc.sha256 || d.originalUrl === doc.originalUrl || d.localPath === doc.localPath)) {
-        dossiers.push(doc);
-        newlyFetched++;
-      }
-      cachedUrls.add(u);
-      return true;
-    } catch (dlErr: any) {
-      console.warn(`[FetchDocs] Failed to download attachment ${u} for ${tender.id}:`, dlErr.message);
-      return false;
-    }
+    const added = await downloadAndAttachCandidateUrl(tender, portalCode, u, idx, dossiers, cachedUrls, {
+      defaultLabel: isDirectFile && u === tender.direct_url ? 'Tender Document' : 'Bidding Document',
+      maxDossiers: 5,
+      checkCachedUrls: true,
+      warnPrefix: 'FetchDocs'
+    });
+    if (added) newlyFetched++;
+    return added;
   };
 
   // Step A: Download known candidate URLs (attachment_urls + direct document URL) first.
@@ -266,13 +325,7 @@ async function runFetchDocumentsForTender(
     !isDirectFile &&
     (dossiers.length === 0 || Boolean(options.forceRefresh) || tender.direct_url.includes('epms.ppra.gov.pk'))
   ) {
-    const portalDef = PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) || {
-      id: tender.portal_id,
-      name: tender.portal_name,
-      baseUrl: new URL(tender.direct_url).origin,
-      tendersUrl: tender.direct_url
-    } as PortalDefinition;
-
+    const portalDef = resolvePortalDefForTender(tender);
     const isListing = isGenericListingUrl(tender.direct_url, portalDef);
 
     try {
@@ -286,17 +339,7 @@ async function runFetchDocumentsForTender(
       let skipListingAttachmentScrape = false;
 
       if (isListing) {
-        let matchingContainer: cheerio.Cheerio<any> | null = null;
-        $('tr, .job-post-item, .tender-card, .card, article').each((_, el) => {
-          const text = $(el).text();
-          if (
-            (tender.reference_no && text.includes(tender.reference_no)) ||
-            (tender.title && text.toLowerCase().includes(tender.title.toLowerCase().slice(0, 30)))
-          ) {
-            matchingContainer = $(el);
-            return false;
-          }
-        });
+        const matchingContainer = findListingRowContainer($, tender);
         if (matchingContainer) {
           targetEl = (matchingContainer as any).get(0);
         } else {
@@ -351,9 +394,9 @@ async function runFetchDocumentsForTender(
           title: tender.title,
           organization: tender.organization
         });
-        if (shouldUpgradeDocType(doc.docType as any, docResult.docType)) {
-          const renamed = renameDossierToCanonical(tender, doc, docResult.docType, dossiers);
-          dossiers[i] = renamed.dossier;
+        const upgraded = upgradeDossierDocTypeIfNeeded(tender, doc, docResult.docType as DocType, dossiers);
+        if (upgraded.upgraded) {
+          dossiers.splice(0, dossiers.length, ...upgraded.dossiers);
           dossiersRenamed = true;
         }
         if (
@@ -413,26 +456,21 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
   if (!tender) return null;
 
   const dossiers = Array.isArray(tender.cached_dossiers) ? [...tender.cached_dossiers] : [];
+  const cachedUrls = new Set(dossiers.map(d => d.originalUrl).filter(Boolean));
+  const portalCode = getPortalFileCode(tender.portal_id);
   let detailText = '';
   const shouldFetchLive = Boolean(options.forceRefresh || dossiers.length === 0);
 
   // 1. Fetch from direct_url or scrape detail page for images/PDFs
   if (shouldFetchLive && tender.direct_url && tender.direct_url.startsWith('http')) {
-    if (/\.(pdf|jpe?g|png|webp)(\?|$)/i.test(tender.direct_url) || /[?&]wpdmdl=\d+/i.test(tender.direct_url)) {
-      const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(tender.direct_url);
-      const label = deriveDossierLabel(tender.direct_url, isImg ? 'Tender Notice Image' : 'Tender Document');
-      const doc = await downloadAndCacheDossier(tender.id, tender.direct_url, label);
-      if (doc && !dossiers.some(d => d.sha256 === doc.sha256 || d.localPath === doc.localPath)) {
-        dossiers.unshift(doc);
-      }
+    if (isDirectDocumentUrl(tender.direct_url)) {
+      await downloadAndAttachCandidateUrl(tender, portalCode, tender.direct_url, 0, dossiers, cachedUrls, {
+        defaultLabel: isImageUrl(tender.direct_url) ? 'Tender Notice Image' : 'Tender Document',
+        maxDossiers: Number.MAX_SAFE_INTEGER,
+        warnPrefix: 'Analyze'
+      });
     } else {
-      const portalDef = PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) || {
-        id: tender.portal_id,
-        name: tender.portal_name,
-        baseUrl: new URL(tender.direct_url).origin,
-        tendersUrl: tender.direct_url
-      } as PortalDefinition;
-
+      const portalDef = resolvePortalDefForTender(tender);
       const isListing = isGenericListingUrl(tender.direct_url, portalDef);
 
       try {
@@ -441,48 +479,21 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
         const $ = cheerio.load(html);
         $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
 
-        if (isListing) {
-          // Guard: shared listing page. Only collect attachments from the matching row or card
-          let matchingContainer: cheerio.Cheerio<any> | null = null;
-          $('tr, .job-post-item, .tender-card, .card, article').each((_, el) => {
-            const text = $(el).text();
-            if (
-              (tender.reference_no && text.includes(tender.reference_no)) ||
-              (tender.title && text.toLowerCase().includes(tender.title.toLowerCase().slice(0, 30)))
-            ) {
-              matchingContainer = $(el);
-              return false;
-            }
-          });
-
-          if (matchingContainer) {
-            detailText = (matchingContainer as any).text().replace(/\s+/g, ' ').trim();
-            const discoveredUrls = collectRowAttachments($, (matchingContainer as any).get(0), portalDef);
-            for (let idx = 0; idx < discoveredUrls.slice(0, 3).length; idx++) {
-              const u = discoveredUrls[idx];
-              const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(u);
-              const label = deriveDossierLabel(u, isImg ? 'Tender Notice Image' : 'Bidding Document', idx + 1);
-              const doc = await downloadAndCacheDossier(tender.id, u, label, undefined, idx + 1);
-              if (doc && !dossiers.some(d => d.sha256 === doc.sha256 || d.originalUrl === doc.originalUrl || d.localPath === doc.localPath)) {
-                dossiers.push(doc);
-              }
-            }
-          } else {
-            console.warn(`[Analyze] Tender ${tender.id} has listing URL ${tender.direct_url} and was not found in page rows. Skipping body PDF scraping.`);
+        const targetEl: any = isListing ? (findListingRowContainer($, tender)?.get(0) ?? null) : $('body').get(0);
+        if (targetEl) {
+          detailText = (isListing ? $(targetEl) : $('main, article, .content, .card, .package-details, body').first())
+            .text()
+            .replace(/\s+/g, ' ')
+            .trim();
+          const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
+          for (let idx = 0; idx < discoveredUrls.slice(0, 3).length; idx++) {
+            await downloadAndAttachCandidateUrl(tender, portalCode, discoveredUrls[idx], idx, dossiers, cachedUrls, {
+              maxDossiers: Number.MAX_SAFE_INTEGER,
+              warnPrefix: 'Analyze'
+            });
           }
         } else {
-          // Dedicated detail page
-          detailText = $('main, article, .content, .card, .package-details, body').first().text().replace(/\s+/g, ' ').trim();
-          const discoveredUrls = collectRowAttachments($, $('body').get(0), portalDef);
-          for (let idx = 0; idx < discoveredUrls.slice(0, 3).length; idx++) {
-            const u = discoveredUrls[idx];
-            const isImg = /\.(jpe?g|png|webp)(\?|$)/i.test(u);
-            const label = deriveDossierLabel(u, isImg ? 'Tender Notice Image' : 'Bidding Document', idx + 1);
-            const doc = await downloadAndCacheDossier(tender.id, u, label, undefined, idx + 1);
-            if (doc && !dossiers.some(d => d.sha256 === doc.sha256 || d.originalUrl === doc.originalUrl || d.localPath === doc.localPath)) {
-              dossiers.push(doc);
-            }
-          }
+          console.warn(`[Analyze] Tender ${tender.id} has listing URL ${tender.direct_url} and was not found in page rows. Skipping body PDF scraping.`);
         }
       } catch (err: any) {
         console.warn(`[Analyze] Could not fetch detail page for ${tender.id}:`, err.message);
@@ -505,8 +516,9 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
       title: tender.title,
       organization: tender.organization
     });
-    if (shouldUpgradeDocType(doc.docType as any, r.docType)) {
-      dossiers[i] = renameDossierToCanonical(tender, doc, r.docType, dossiers).dossier;
+    const upgraded = upgradeDossierDocTypeIfNeeded(tender, doc, r.docType as DocType, dossiers);
+    if (upgraded.upgraded) {
+      dossiers.splice(0, dossiers.length, ...upgraded.dossiers);
       updateTenderFields(tender.id, { cached_dossiers: dossiers });
     }
     if (r.closingDateISO || r.referenceNo || r.summaryScope || r.bidBrief || r.extractedText) {

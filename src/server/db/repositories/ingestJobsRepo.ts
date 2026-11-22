@@ -1,5 +1,11 @@
 import crypto from 'crypto';
 import { db, safeJsonParse } from '../connection.js';
+import {
+  safeDecodeURIComponent,
+  isDirectDocumentUrl,
+  isDownloadableCandidateUrl,
+  isCorrigendumLabel
+} from '../../../shared/documentUtils.js';
 
 /**
  * Durable document-ingest queue (docs/13-ingestion-pipeline-plan.md, Phase 1.2).
@@ -46,7 +52,7 @@ export const JOB_BACKOFF_MINUTES = [2, 10, 30];
  */
 export function isDetailPageDiscoveryUrl(url?: string | null, portalId?: string | null): boolean {
   if (!url || !/^https?:\/\//i.test(url)) return false;
-  if (isDirectDocLink(url)) return false;
+  if (isDirectDocumentUrl(url)) return false;
   if (/epms\.ppra\.gov\.pk\/public\/tenders\/tender-details\//i.test(url)) return true;
   if (portalId === 'epms_ppra' && /\/tender-details\//i.test(url)) return true;
   if (/fde\.gov\.pk\/download\/[^/?#]+/i.test(url) && !/\/download-category\//i.test(url) && !/[?&]wpdmdl=\d+/i.test(url)) {
@@ -63,14 +69,10 @@ export function isDetailPageDiscoveryUrl(url?: string | null, portalId?: string 
  * documents, then everything else (BOQs, drawings, annexures).
  */
 export function documentJobPriority(labelOrUrl: string): number {
-  const text = decodeURIComponentSafe(labelOrUrl).toLowerCase();
-  if (/corrigend|addend|amendment|extension|errat/.test(text)) return JOB_PRIORITY.corrigendum;
+  const text = safeDecodeURIComponent(labelOrUrl).toLowerCase();
+  if (isCorrigendumLabel(text) || /\bextension\b/.test(text)) return JOB_PRIORITY.corrigendum;
   if (/\brfp\b|\brfq\b|\bnit\b|\beoi\b|bidding|tender[\s_-]*(notice|document)|notice|\bifb\b/.test(text)) return JOB_PRIORITY.primary;
   return JOB_PRIORITY.other;
-}
-
-function decodeURIComponentSafe(s: string): string {
-  try { return decodeURIComponent(s); } catch { return s; }
 }
 
 /**
@@ -248,19 +250,11 @@ export function requeueFailedJobs(tenderId: string): number {
   return requeued + newlyQueued;
 }
 
-function isDirectDocLink(url?: string | null): boolean {
-  return Boolean(url && (/\.(pdf|docx?|xlsx?|jpe?g|png|webp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url)));
-}
-
-function isDownloadableCandidateLink(url?: string | null): boolean {
-  return Boolean(url && (!/\.(html?|aspx?|php|jsp)(\?|$)/i.test(url) || /[?&]wpdmdl=\d+/i.test(url) || /\/pdf\?file=/i.test(url)));
-}
-
 function collectRowDocumentUrls(directUrl?: string | null, attachmentUrlsRaw?: string | null): string[] {
   const urls: string[] = [];
-  if (isDirectDocLink(directUrl)) urls.push(directUrl!);
+  if (isDirectDocumentUrl(directUrl)) urls.push(directUrl!);
   for (const u of safeJsonParse<string[]>(attachmentUrlsRaw || '[]', [])) {
-    if (u && isDownloadableCandidateLink(u) && !urls.includes(u)) urls.push(u);
+    if (u && isDownloadableCandidateUrl(u) && !urls.includes(u)) urls.push(u);
   }
   return urls.slice(0, 5);
 }

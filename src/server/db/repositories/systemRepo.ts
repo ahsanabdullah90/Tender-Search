@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import { getPktDateKey } from '../../../shared/pktDate.js';
+import { getPathSizeBytes } from '../../services/fileUtils.js';
 import { db, BACKUPS_DIR, DOSSIERS_DIR } from '../connection.js';
 import { deleteTenders, NOT_STAGING_SQL } from './tendersRepo.js';
 import { DigestAlertItem, DigestSummary } from '../../../shared/types.js';
@@ -228,23 +230,13 @@ export async function backupNow(): Promise<BackupInfo | null> {
   }
 }
 
-function folderSize(dir: string): number {
-  if (!fs.existsSync(dir)) return 0;
-  let total = 0;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.resolve(dir, entry.name);
-    total += entry.isDirectory() ? folderSize(full) : fs.statSync(full).size;
-  }
-  return total;
-}
-
 export function getStorageStats() {
   const passed = db.prepare(`SELECT id FROM tenders WHERE pipeline_status = 'Passed'`).all() as { id: string }[];
-  const passedBytes = passed.reduce((sum, t) => sum + folderSize(path.resolve(DOSSIERS_DIR, t.id)), 0);
+  const passedBytes = passed.reduce((sum, t) => sum + getPathSizeBytes(path.resolve(DOSSIERS_DIR, t.id)), 0);
   const withDocs = db.prepare(`SELECT COUNT(*) AS n FROM tenders WHERE cached_dossiers IS NOT NULL AND cached_dossiers != '[]'`).get() as { n: number };
   const awaitingScope = db.prepare(`SELECT COUNT(*) AS n FROM tenders WHERE ingestion_status = 'awaiting_scope'`).get() as { n: number };
   return {
-    total_bytes: folderSize(DOSSIERS_DIR),
+    total_bytes: getPathSizeBytes(DOSSIERS_DIR),
     passed_bytes: passedBytes,
     passed_tenders: passed.length,
     tenders_with_documents: withDocs.n,
@@ -261,7 +253,7 @@ export function pruneDossiersForPassed(): { freed_bytes: number; tenders: number
     const dir = path.resolve(DOSSIERS_DIR, id);
     // Never follow an id that would leave the dossiers folder.
     if (!dir.startsWith(DOSSIERS_DIR + path.sep) || !fs.existsSync(dir)) continue;
-    freed += folderSize(dir);
+    freed += getPathSizeBytes(dir);
     fs.rmSync(dir, { recursive: true, force: true });
     db.prepare(`UPDATE tenders SET cached_dossiers = '[]' WHERE id = ?`).run(id);
     count++;
@@ -296,8 +288,7 @@ export function clearAllTenders(unreviewedOnly: boolean = false) {
  */
 export function pruneOldDailyVisionCounters(keepDays: number = 7): number {
   try {
-    const cutoffMs = Date.now() + 5 * 3600000 - Math.max(1, keepDays) * 86400000;
-    const cutoffDay = new Date(cutoffMs).toISOString().slice(0, 10);
+    const cutoffDay = getPktDateKey(Date.now() - Math.max(1, keepDays) * 86400000);
     // Vision counters: ingest_vision_calls_YYYY-MM-DD; AI text counters: ingest_ai_text_calls_YYYY-MM-DD.
     return db.prepare(`
       DELETE FROM app_settings

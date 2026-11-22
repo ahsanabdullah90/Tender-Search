@@ -16,7 +16,7 @@ tests/
     test-env.ts           # Test environment initialization
     node-setup.ts         # Temp directory database isolation & safety assertions
     jsdom-setup.ts        # JSDOM matchMedia mock & automatic afterEach(cleanup)
-  unit/                   # Pure function tests (dates, networkMonitor, document extractor, deduplication, embeddings, keywords, theme, urlSafety, docs-consistency)
+  unit/                   # Pure function tests (dates, shared-utils, networkMonitor, document extractor, deduplication, embeddings, keywords, theme, urlSafety, docs-consistency)
   db/                     # SQLite repositories, durable document_ingest_jobs queue, triggers, and audit logging
   scraper/                # Offline crawler engine, portal-contracts, ingest-queue, URL healer, Playwright, auth, and Gemini OCR tests
   api/                    # Supertest HTTP integration tests against createApp()

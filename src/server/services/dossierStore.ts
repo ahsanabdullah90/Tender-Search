@@ -2,6 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { DOSSIERS_DIR } from '../db/connection.js';
+import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
+import {
+  safeDecodeURIComponent,
+  isCorrigendumLabel,
+  isGenericDossierLabel
+} from '../../shared/documentUtils.js';
+import { getMimeTypeFromExt, getPathSizeBytes } from './fileUtils.js';
 import {
   enqueuePendingFilePurge,
   getPendingFilePurges,
@@ -16,7 +23,9 @@ import {
   getAllTendersWithDossiers,
   setTenderCachedDossiersRaw
 } from '../db/repositories/tendersRepo.js';
-import { CachedDossier } from '../../shared/types.js';
+import { CachedDossier, Tender } from '../../shared/types.js';
+
+export { getMimeTypeFromExt };
 
 export const TRASH_DIR = path.resolve(DOSSIERS_DIR, '.trash');
 
@@ -63,28 +72,14 @@ export function formatDocTypeDisplayLabel(docType: DocType, index?: number): str
 }
 
 /**
- * Standard portal file codes mapping
+ * Standard portal file codes mapping derived from PORTAL_DEFINITIONS
  */
 export const PORTAL_FILE_CODES: Record<string, string> = {
-  epms_ppra: 'FPPRA',
-  punjab_eproc: 'PPPRA',
-  sppra: 'SPPRA',
-  kppra: 'KPPRA',
-  bppra: 'BPPRA',
-  ajk_ppra: 'AJKPPRA',
-  ndma: 'NDMA',
-  fde: 'FDE',
-  mofept: 'MOFEPT',
-  gilgit: 'GBPPRA',
-  psdf: 'PSDF',
-  psda: 'PSDA',
-  peef: 'PEEF',
-  ungm: 'UNGM',
-  giz: 'GIZ',
-  tender_services: 'TSP',
-  pid: 'PID',
-  pseb: 'PSEB',
-  ignite: 'IGNITE',
+  ...Object.fromEntries(
+    PORTAL_DEFINITIONS
+      .filter((p): p is typeof p & { fileCode: string } => Boolean(p.fileCode))
+      .map(p => [p.id, p.fileCode])
+  ),
   manual: 'MAN'
 };
 
@@ -100,8 +95,8 @@ function extractUrlClues(remoteUrl?: string | null): string {
   const parts: string[] = [];
   try {
     const parsed = new URL(remoteUrl);
-    parts.push(decodeURIComponentSafe(parsed.pathname));
-    parts.push(decodeURIComponentSafe(parsed.search));
+    parts.push(safeDecodeURIComponent(parsed.pathname));
+    parts.push(safeDecodeURIComponent(parsed.search));
 
     const fileParam = parsed.searchParams.get('file');
     if (fileParam && /^[A-Za-z0-9+/=]{8,}$/.test(fileParam)) {
@@ -120,17 +115,9 @@ function extractUrlClues(remoteUrl?: string | null): string {
       } catch {}
     }
   } catch {
-    parts.push(decodeURIComponentSafe(remoteUrl));
+    parts.push(safeDecodeURIComponent(remoteUrl));
   }
   return parts.join(' ').toLowerCase();
-}
-
-function decodeURIComponentSafe(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
 }
 
 /**
@@ -138,7 +125,7 @@ function decodeURIComponentSafe(value: string): string {
  */
 export function inferDocType(labelOrName: string = '', remoteUrl?: string | null): DocType {
   const combined = `${labelOrName || ''} ${extractUrlClues(remoteUrl)}`.toLowerCase();
-  if (/(corrigend|amendment|addendum|errat|(?:^|[^a-z0-9])corr\.?(?:[^a-z0-9]|$)|corri\d+)/i.test(combined)) return 'corrigendum';
+  if (isCorrigendumLabel(combined)) return 'corrigendum';
   if (/(?:^|[^a-z0-9])boq(?:[^a-z0-9]|$)|\/boqmanual\/|bill[\s_-]*of[\s_-]*quantit|pricing[\s_-]*schedule|schedule[\s_-]*of[\s_-]*requirement/i.test(combined)) return 'boq';
   if (/(?:^|[^a-z0-9])rfp(?:[^a-z0-9]|$)|request[\s_-]*for[\s_-]*proposal/i.test(combined)) return 'rfp';
   if (/(?:^|[^a-z0-9])tor(?:[^a-z0-9]|$)|terms[\s_-]*of[\s_-]*reference/i.test(combined)) return 'tor';
@@ -254,33 +241,15 @@ export function generateCanonicalFilename(opts: FilenameOptions): { filename: st
   };
 }
 
-export function getMimeTypeFromExt(filename: string): string {
-  const ext = path.extname(filename).toLowerCase();
-  switch (ext) {
-    case '.pdf': return 'application/pdf';
-    case '.png': return 'image/png';
-    case '.jpg':
-    case '.jpeg': return 'image/jpeg';
-    case '.webp': return 'image/webp';
-    case '.docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    case '.doc': return 'application/msword';
-    case '.xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-    case '.xls': return 'application/vnd.ms-excel';
-    case '.zip': return 'application/zip';
-    case '.rar': return 'application/x-rar-compressed';
-    default: return 'application/octet-stream';
-  }
-}
-
 function parseContentDispositionFilename(header?: string): string {
   if (!header) return '';
   const utfMatch = header.match(/filename\*\s*=\s*UTF-8''([^;\r\n]+)/i);
   if (utfMatch?.[1]) {
-    return path.basename(decodeURIComponentSafe(utfMatch[1].trim().replace(/^["']|["']$/g, '')));
+    return path.basename(safeDecodeURIComponent(utfMatch[1].trim().replace(/^["']|["']$/g, '')));
   }
   const plainMatch = header.match(/filename\s*=\s*"?([^";\r\n]+)"?/i);
   if (plainMatch?.[1]) {
-    return path.basename(decodeURIComponentSafe(plainMatch[1].trim()));
+    return path.basename(safeDecodeURIComponent(plainMatch[1].trim()));
   }
   return '';
 }
@@ -303,13 +272,9 @@ function fallbackTitleFromLabel(label?: string, originalName?: string): string |
 }
 
 function isGenericOrNoisyLabel(label?: string | null): boolean {
-  if (!label || !label.trim()) return true;
-  const trimmed = label.trim();
-  if (/_Doc(?:\s+\d+)?$/i.test(trimmed)) return true;
-  if (/^(bidding document|tender document|tender notice|tender notice image|document|notice|file|download)(?:\s+\d+)?(?:\s*\(Updated\))?$/i.test(trimmed)) {
-    return true;
-  }
-  return false;
+  if (isGenericDossierLabel(label)) return true;
+  const trimmed = (label || '').trim();
+  return /^(bidding document|tender document|tender notice|tender notice image|document|notice|file|download)(?:\s+\d+)?(?:\s*\(Updated\))?$/i.test(trimmed);
 }
 
 function computeFileSha256(filePath: string): string | null {
@@ -369,10 +334,17 @@ export function saveTenderDocument(
     fs.mkdirSync(tenderDir, { recursive: true });
   }
 
+  const needsTenderLookup =
+    meta.portalCode === undefined ||
+    meta.referenceNo === undefined ||
+    meta.title === undefined ||
+    meta.existingDossiers === undefined;
   let tender: ReturnType<typeof getTenderById> | undefined;
-  try {
-    tender = getTenderById(tenderId);
-  } catch {}
+  if (needsTenderLookup) {
+    try {
+      tender = getTenderById(tenderId);
+    } catch {}
+  }
 
   const portalCode = meta.portalCode || (tender?.portal_id ? getPortalFileCode(tender.portal_id) : 'GEN');
   const referenceNo = meta.referenceNo !== undefined ? meta.referenceNo : tender?.reference_no ?? null;
@@ -397,7 +369,7 @@ export function saveTenderDocument(
 
   const exactHashMatch = existingDossiers.find(d => d.sha256 === sha256);
   if (exactHashMatch) {
-    const existingDiskName = decodeURIComponentSafe(path.basename(exactHashMatch.localPath || ''));
+    const existingDiskName = safeDecodeURIComponent(path.basename(exactHashMatch.localPath || ''));
     const existingDiskPath = existingDiskName ? path.resolve(tenderDir, existingDiskName) : '';
     if (existingDiskPath && fs.existsSync(existingDiskPath)) {
       return {
@@ -441,11 +413,12 @@ export function saveTenderDocument(
     }
 
     const ownerDossier = existingDossiers.find(
-      d => decodeURIComponentSafe(path.basename(d.localPath || '')).toLowerCase() === candidate.toLowerCase()
+      d => safeDecodeURIComponent(path.basename(d.localPath || '')).toLowerCase() === candidate.toLowerCase()
     );
+    const hasTenderContext = Boolean(tender || meta.existingDossiers !== undefined);
     const isSameUrl =
       Boolean(meta.originalUrl) &&
-      ((ownerDossier && ownerDossier.originalUrl === meta.originalUrl) || (!ownerDossier && !tender));
+      ((ownerDossier && ownerDossier.originalUrl === meta.originalUrl) || (!ownerDossier && !hasTenderContext));
 
     if (isSameUrl) {
       for (let v = 2; v <= 20; v++) {
@@ -551,7 +524,7 @@ export function renameDossierToCanonical(
   allDossiers: CachedDossier[]
 ): { dossier: CachedDossier; renamed: boolean } {
   const tenderDir = path.resolve(DOSSIERS_DIR, tender.id);
-  const currentFilename = decodeURIComponentSafe(path.basename(dossier.localPath || ''));
+  const currentFilename = safeDecodeURIComponent(path.basename(dossier.localPath || ''));
   if (!currentFilename || !fs.existsSync(tenderDir)) {
     return { dossier: { ...dossier, docType: nextDocType }, renamed: false };
   }
@@ -573,7 +546,7 @@ export function renameDossierToCanonical(
   } catch {}
   for (const other of allDossiers) {
     if (other === dossier || other.localPath === dossier.localPath) continue;
-    const otherName = decodeURIComponentSafe(path.basename(other.localPath || ''));
+    const otherName = safeDecodeURIComponent(path.basename(other.localPath || ''));
     if (otherName && otherName.toLowerCase() !== currentFilename.toLowerCase()) {
       siblingNames.add(otherName.toLowerCase());
     }
@@ -621,6 +594,24 @@ export function renameDossierToCanonical(
   };
 }
 
+export function upgradeDossierDocTypeIfNeeded(
+  tender: Pick<Tender, 'id' | 'portal_id' | 'reference_no' | 'title'>,
+  doc: CachedDossier,
+  extractedDocType: DocType | undefined,
+  dossiers: CachedDossier[]
+): { upgraded: boolean; dossiers: CachedDossier[]; index: number } {
+  const index = dossiers.findIndex(
+    d => d === doc || d.localPath === doc.localPath || (Boolean(doc.sha256) && d.sha256 === doc.sha256)
+  );
+  if (!extractedDocType || !shouldUpgradeDocType(doc.docType as DocType | undefined, extractedDocType) || index < 0) {
+    return { upgraded: false, dossiers, index };
+  }
+  const updated = [...dossiers];
+  const renamed = renameDossierToCanonical(tender, updated[index], extractedDocType, updated);
+  updated[index] = renamed.dossier;
+  return { upgraded: true, dossiers: updated, index };
+}
+
 /**
  * Idempotently migrates existing cached dossier filenames on disk (e.g. legacy `*_Doc.pdf` or
  * `PORTAL__REF__type-1__hash8.pdf`) to the unified `{PORTAL}_{Slug}_{DocType}-{N}.{ext}` rule.
@@ -645,7 +636,7 @@ export function migrateDossierFilenames(): { tendersUpdated: number; filesRename
 
     const portalCode = getPortalFileCode(row.portal_id);
     const usedNames = new Set<string>();
-    const currentNames = dossiers.map(d => decodeURIComponentSafe(path.basename(d.localPath || '')));
+    const currentNames = dossiers.map(d => safeDecodeURIComponent(path.basename(d.localPath || '')));
     // Seed usedNames with non-dossier files present in tenderDir so we never clobber them
     try {
       const currentSet = new Set(currentNames.map(n => n.toLowerCase()));
@@ -658,7 +649,7 @@ export function migrateDossierFilenames(): { tendersUpdated: number; filesRename
 
     let rowChanged = false;
     const updatedDossiers: CachedDossier[] = dossiers.map(doc => {
-      const srcFilename = decodeURIComponentSafe(path.basename(doc.localPath || ''));
+      const srcFilename = safeDecodeURIComponent(path.basename(doc.localPath || ''));
       if (!srcFilename) return doc;
       const srcPath = path.resolve(tenderDir, srcFilename);
       if (!srcPath.startsWith(tenderDir + path.sep) || !fs.existsSync(srcPath)) {
@@ -775,7 +766,7 @@ export async function reclassifyExistingDossiersFromText(options?: { force?: boo
         continue;
       }
 
-      const filename = decodeURIComponentSafe(path.basename(doc.localPath || ''));
+      const filename = safeDecodeURIComponent(path.basename(doc.localPath || ''));
       const diskPath = path.resolve(tenderDir, filename);
       if (!diskPath.startsWith(tenderDir + path.sep) || !fs.existsSync(diskPath)) continue;
 
@@ -907,13 +898,7 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
         if (!existingIdSet.has(entry)) {
           // Check grace period (bypassed if graceMs <= 0)
           if (graceMs <= 0 || now - stat.mtimeMs >= graceMs) {
-            let size = 0;
-            try {
-              const files = fs.readdirSync(fullPath);
-              for (const f of files) {
-                try { size += fs.statSync(path.resolve(fullPath, f)).size; } catch {}
-              }
-            } catch {}
+            const size = getPathSizeBytes(fullPath);
 
             result.orphanFoldersCount++;
             result.orphanFolders.push({ id: entry, sizeBytes: size });
@@ -935,7 +920,7 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
         if (dossiers.length === 0) continue;
 
         const validDossiers = dossiers.filter(doc => {
-          const filename = decodeURIComponent(path.basename(doc.localPath));
+          const filename = safeDecodeURIComponent(path.basename(doc.localPath));
           const diskPath = path.resolve(DOSSIERS_DIR, row.id, filename);
           return fs.existsSync(diskPath);
         });
@@ -949,20 +934,6 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
   }
 
   // 4. Age out .trash/ contents older than 24 hours
-  const getPathSizeBytes = (targetPath: string): number => {
-    try {
-      const st = fs.statSync(targetPath);
-      if (!st.isDirectory()) return st.size || 0;
-      let total = 0;
-      for (const child of fs.readdirSync(targetPath)) {
-        total += getPathSizeBytes(path.resolve(targetPath, child));
-      }
-      return total;
-    } catch {
-      return 0;
-    }
-  };
-
   if (fs.existsSync(TRASH_DIR)) {
     try {
       const trashItems = fs.readdirSync(TRASH_DIR);

@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { sanitizeOriginUrl } from '../../shared/documentUtils.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { updatePortalHealth } from '../db/index.js';
 import { discoverTenderLinkWithAI, extractTenderListFromHtmlWithAI } from '../services/ocrService.js';
@@ -84,11 +85,7 @@ export function scoreCandidateTenderLinks(
  * Rule 6: Strict base_url Origin Normalization — never store file paths or queries in base_url.
  */
 export function sanitizeBaseOrigin(url: string, fallback: string = ''): string {
-  try {
-    return new URL(url.trim()).origin;
-  } catch {
-    return fallback;
-  }
+  return sanitizeOriginUrl(url, fallback);
 }
 
 /**
