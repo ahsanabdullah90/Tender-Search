@@ -915,29 +915,42 @@ export function findTendersByReferenceNorm(referenceNorm: string, _portalId?: st
 }
 
 /**
- * Similarity-dedup candidates: tenders (not 'awaiting_scope') from OTHER portals whose deadline is within
- * ±1.5 days, or (for an undated candidate) undated tenders first seen in the last 14 days.
- * Rows of the same portal are never similarity candidates (docs/16 A3).
+ * Similarity-dedup candidates from OTHER portals:
+ * - Dated incoming candidate: other-portal dated tenders within ±1.5 days OR recent undated tenders (last 30 days).
+ * - Undated incoming candidate: other-portal undated tenders (last 14 days) OR recent dated open tenders (last 30 days).
+ * Rows of the same portal are never similarity candidates (docs/16 A3, DED-3).
  */
-export function findDedupCandidates(closingDate?: string | null, excludePortalId?: string | null): DedupCandidateRow[] {
+export function findDedupCandidates(
+  closingDate?: string | null,
+  excludePortalId?: string | null,
+  options?: { includeAwaitingScope?: boolean }
+): DedupCandidateRow[] {
   const portalClause = excludePortalId ? 'AND portal_id != ?' : '';
   const portalParams = excludePortalId ? [excludePortalId] : [];
+  const scopeClause = options?.includeAwaitingScope
+    ? ''
+    : "AND COALESCE(ingestion_status, 'ready') != 'awaiting_scope'";
+
   if (closingDate) {
     return db.prepare(`
       SELECT id, canonical_id, title, organization, closing_date, embedding, portal_id
       FROM tenders
-      WHERE closing_date IS NOT NULL
-      AND ABS(julianday(closing_date) - julianday(?)) <= 1.5
-      AND COALESCE(ingestion_status, 'ready') != 'awaiting_scope'
+      WHERE (
+        (closing_date IS NOT NULL AND ABS(julianday(closing_date) - julianday(?)) <= 1.5)
+        OR (closing_date IS NULL AND created_at >= datetime('now', '-30 days'))
+      )
+      ${scopeClause}
       ${portalClause}
     `).all(closingDate, ...portalParams) as DedupCandidateRow[];
   }
   return db.prepare(`
     SELECT id, canonical_id, title, organization, closing_date, embedding, portal_id
     FROM tenders
-    WHERE closing_date IS NULL
-    AND created_at >= datetime('now', '-14 days')
-    AND COALESCE(ingestion_status, 'ready') != 'awaiting_scope'
+    WHERE (
+      (closing_date IS NULL AND created_at >= datetime('now', '-14 days'))
+      OR (closing_date IS NOT NULL AND created_at >= datetime('now', '-30 days') AND julianday(closing_date) >= julianday('now', '-2 days'))
+    )
+    ${scopeClause}
     ${portalClause}
   `).all(...portalParams) as DedupCandidateRow[];
 }

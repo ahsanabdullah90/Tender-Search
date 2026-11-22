@@ -124,8 +124,8 @@ When government agencies issue amendments or when documents are read during inge
 
 ## Ingestion Order, Deduplication & Pipeline Safety Invariants
 
-### 1. Re-scan Identity Path First (`src/server/scrapers/ingestPipeline.ts`)
-Whenever a crawler visits a portal:
+### 1. Re-scan Identity Path & Two-Phase Statutory Priority (`src/server/scrapers/crawlerEngine.ts`, `ingestPipeline.ts`)
+Multi-portal scans enforce **Two-Phase Scan Execution** (`isStatutoryPortal`): Phase 1 completes all 7 Federal & Provincial statutory boards (`epms_ppra`, `punjab_eproc`, `sppra`, `bppra`, `kppra`, `gilgit`, `ajk_ppra`) before Phase 2 scans individual agency portals, ensuring canonical statutory cards are indexed first. Whenever a crawler visits a portal:
 1. It calculates the deterministic `tenderId`.
 2. It checks if the tender already exists in SQLite:
    - If it exists: It takes the **Re-scan Path**. It NEVER switches the row to `staging`, NEVER deletes the row, and NEVER overwrites pipeline statuses (`Under Review`, `Preparing Bid`, `Submitted`, `Won`, `Passed`) or operator `status_notes`.
@@ -153,7 +153,7 @@ Whenever a crawler visits a portal:
 
 ### 4. Deduplication & Provenance Rules (`src/server/services/deduplicator.ts`)
 - **Tier 1 (Strict Reference)**: Match on `reference_norm`. Requires corroborating signals (organization similarity $\ge 0.5$, title similarity $\ge 0.5$, or closing dates within 1.5 days) unless the reference is long and structured ($\ge 12$ chars with $\ge 2$ segments).
-- **Tier 2 (Title Dice Similarity)**: Evaluated only against different portals (own portal is strictly excluded from duplicate candidate search). The `titlesAreDistinguishable` check prevents merging distinct procurement packages that differ by 1–2 key nouns (e.g., "Laptops" vs "Printers").
+- **Tier 2 (Title Dice Similarity & Undated-vs-Dated Matching)**: Evaluated only against different portals (own portal is strictly excluded from duplicate candidate search). Same-date-status matches require Dice $\ge 0.85$ within 1.5 days (or undated recent). Mixed undated-vs-dated cross-portal candidates (`findDedupCandidates` in `tendersRepo.ts`) match strictly when `Dice >= 0.90` with `orgSim >= 0.50`, or `Dice >= 0.94` regardless of `orgSim`, provided `!titlesAreDistinguishable`. Both matched and pre-hold (`awaiting_scope`) paths run duplicate detection before creating new rows so agency listings merge cleanly under `secondary_sources`. The `titlesAreDistinguishable` check prevents merging distinct procurement packages that differ by 1–2 key nouns (e.g., "Laptops" vs "Printers" or distinct lots).
 - **Secondary Sources**: The tender's own originating portal is never recorded under `secondary_sources`. Secondary source entries are unique by `direct_url`.
 
 ### 5. Slimming, Suppression & Ageing Invariants (`src/server/services/retention.ts`)

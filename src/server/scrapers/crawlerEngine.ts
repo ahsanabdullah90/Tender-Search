@@ -280,6 +280,20 @@ export function getActivePortalsList(targetPortalId?: string): PortalDefinition[
 export const HTTP_PORTAL_CONCURRENCY = 3;
 export const PLAYWRIGHT_PORTAL_CONCURRENCY = 1;
 
+export const STATUTORY_PORTAL_IDS = new Set([
+  'epms_ppra',
+  'punjab_eproc',
+  'sppra',
+  'bppra',
+  'kppra',
+  'gilgit',
+  'ajk_ppra'
+]);
+
+export function isStatutoryPortal(portal: Pick<PortalDefinition, 'id' | 'category'>): boolean {
+  return portal.category === 'Regulatory' || STATUTORY_PORTAL_IDS.has(portal.id);
+}
+
 /**
  * Classifies an uncaught scraper failure into a compact diagnostic category for portal_health.last_error_code.
  */
@@ -498,23 +512,36 @@ export async function startCrawlerScan(
           else if (outcome === 'network_error') networkFailedPortals++;
         }
       } else {
-        const httpPortals = portalsToScan.filter(p => p.tier !== 'playwright');
-        const pwPortals = portalsToScan.filter(p => p.tier === 'playwright');
+        const runPortalPhase = async (phasePortals: typeof portalsToScan) => {
+          const httpPortals = phasePortals.filter(p => p.tier !== 'playwright');
+          const pwPortals = phasePortals.filter(p => p.tier === 'playwright');
 
-        await Promise.all([
-          runWithConcurrency(httpPortals, effectiveHttpConcurrency, async portal => {
-            const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
-            if (outcome === 'ok') succeededPortals++;
-            else if (outcome === 'network_error') networkFailedPortals++;
-            await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
-          }),
-          runWithConcurrency(pwPortals, PLAYWRIGHT_PORTAL_CONCURRENCY, async portal => {
-            const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
-            if (outcome === 'ok') succeededPortals++;
-            else if (outcome === 'network_error') networkFailedPortals++;
-            await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
-          })
-        ]);
+          await Promise.all([
+            runWithConcurrency(httpPortals, effectiveHttpConcurrency, async portal => {
+              const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+              if (outcome === 'ok') succeededPortals++;
+              else if (outcome === 'network_error') networkFailedPortals++;
+              await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
+            }),
+            runWithConcurrency(pwPortals, PLAYWRIGHT_PORTAL_CONCURRENCY, async portal => {
+              const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+              if (outcome === 'ok') succeededPortals++;
+              else if (outcome === 'network_error') networkFailedPortals++;
+              await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
+            })
+          ]);
+        };
+
+        // Two-Phase Scan Execution: Phase 1 (Statutory Backbone) completes before Phase 2 (Individual Agencies)
+        const phase1Statutory = portalsToScan.filter(p => isStatutoryPortal(p));
+        const phase2Agencies = portalsToScan.filter(p => !isStatutoryPortal(p));
+
+        if (phase1Statutory.length > 0) {
+          await runPortalPhase(phase1Statutory);
+        }
+        if (phase2Agencies.length > 0) {
+          await runPortalPhase(phase2Agencies);
+        }
       }
     } finally {
       const budget = endScanBudget();

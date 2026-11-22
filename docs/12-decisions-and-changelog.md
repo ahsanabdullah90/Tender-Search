@@ -115,6 +115,10 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Workstream E — Two-Phase Scan Execution & Anti-Duplication Protection (November 22, 2026)**:
+  - Implemented **Two-Phase Scan Execution** in `src/server/scrapers/crawlerEngine.ts` (`STATUTORY_PORTAL_IDS`, `isStatutoryPortal`), completing all 7 Federal & Provincial statutory boards before running individual agency portals.
+  - Extended `findDedupCandidates` (`src/server/db/repositories/tendersRepo.ts`), `findCanonicalMatch` (`src/server/services/deduplicator.ts`), and pre-hold deduplication (`src/server/scrapers/ingestPipeline.ts`) to match undated-vs-dated cross-portal pairs (`Dice >= 0.90` with `orgSim >= 0.50`, or `Dice >= 0.94` when `!titlesAreDistinguishable`) and merge agency listings onto existing `ready` or `awaiting_scope` statutory records under `secondary_sources`.
+  - Merged 4 historical PSDF vs `punjab_eproc` `New Opportunity` duplicate rows in `./data/tender_tracker.db` (`349` $\rightarrow$ `345` tenders) while preserving tracked `Under Review` records, and added unit/integration coverage in `tests/unit/deduplicator.test.ts` and `tests/scraper/crawler.test.ts`.
 - **Workstream D — Azad Jammu & Kashmir PPRA (`ajk_ppra`) Connector (November 22, 2026)**:
   - Registered `ajk_ppra` (`https://www.ajkppra.gov.pk/advertisements.php`, `Regulatory`, `AJKPPRA` file code) in `src/server/scrapers/portalList.ts` and `src/server/services/dossierStore.ts` (including `Corr.` corrigendum filename detection), completing the 19-portal canonical catalog and 7-board statutory backbone in `./data/tender_tracker.db` (`14` active portals).
   - Implemented Section 3g `table.table` parsing and `extractAjkLocation` in `src/server/scrapers/portalParsers.ts` (skipping `Sales/Auction/Disposal`, extracting `DD-MM-YYYY` dates, main + inline red `Corrigendum` PDFs, and all 10 AJK districts), added portal `Referer` headers to `fetchFileBuffer` in `src/server/services/dossierManager.ts`, and added `tests/fixtures/portals/ajk_ppra/page.html` + `tests/scraper/ajk-ppra.test.ts`.

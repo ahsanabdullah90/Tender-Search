@@ -270,6 +270,34 @@ export function applyRescanToExistingTender(
       setTenderTracksAndRelease(existing.id, opts.matchedTracks, opts.matchedKeywords || [], opts.matchScore || 0);
       return { isNew: true, hasCorrigendum: false, matched: true };
     }
+    if (existing.portal_name !== portal.name) {
+      appendSecondarySource(existing.id, {
+        portalName: portal.name,
+        directUrl: item.directUrl,
+        discoveredAt: new Date().toISOString(),
+        closingDate: item.closingDate || null
+      });
+    }
+    if (candidates.length > 0) {
+      const cachedUrls = new Set(
+        (Array.isArray(existing.cached_dossiers) ? existing.cached_dossiers : [])
+          .map(d => d.originalUrl)
+          .filter(Boolean)
+      );
+      mergeTenderAttachmentUrls(existing.id, candidates);
+      const uncachedCandidates = candidates.filter(url => !cachedUrls.has(url)).slice(0, UPFRONT_MAX_DOCS);
+      if (uncachedCandidates.length > 0) {
+        try {
+          const added = enqueueDocumentJobs(
+            existing.id,
+            uncachedCandidates.map(url => ({ url, label: deriveDossierLabel(url) }))
+          );
+          if (added > 0) refreshTenderDocFetchStatus(existing.id);
+        } catch (err: any) {
+          console.warn(`[CrawlIngest] Could not queue scope documents for ${existing.id}:`, err.message);
+        }
+      }
+    }
     return { isNew: false, hasCorrigendum: false, matched: false, awaitingScope: true };
   }
 
@@ -402,8 +430,27 @@ export async function processAndSaveTender(
     });
   }
 
-  // 2. No track matched from the listing text: hold it until its documents are read (F2).
+  // 2. No track matched from the listing text: check cross-portal canonical match first so
+  //    agency listings matching a statutory (ready or awaiting_scope) tender merge instead of
+  //    creating duplicate awaiting_scope rows, otherwise hold until its documents are read (F2).
   if (matchedTracks.length === 0) {
+    const preHoldMatch = findCanonicalMatch({
+      referenceNo: item.referenceNo,
+      title: item.title,
+      organization: item.organization,
+      closingDate: item.closingDate,
+      embedding: null,
+      portalId: portal.id,
+      includeAwaitingScope: true
+    });
+    if (preHoldMatch.isDuplicate && preHoldMatch.matchedTenderId) {
+      const existing = getTenderById(preHoldMatch.matchedTenderId);
+      if (existing) {
+        return applyRescanToExistingTender(existing, item, portal, candidates, {
+          trustListingDeadline: preHoldMatch.tier === 'reference'
+        });
+      }
+    }
     return holdForDocumentScope(tenderId, item, portal, candidates);
   }
 

@@ -98,7 +98,7 @@ graph TD
   - Provides a simplified two-field Edit Dialog (**Portal name** and **Website address**). Saving sends `PUT /api/portals/:portalId`, which updates both `tenders_url` and derived `base_url` in SQLite and clears stale error states.
 
 ### 2. Crawler Engine & Scraper Submodules (`src/server/scrapers/`)
-When `startCrawlerScan()` in `crawlerEngine.ts` processes a portal via `scrapePortal(portal)`, four coordinated stages run across dedicated submodules:
+When `startCrawlerScan()` in `crawlerEngine.ts` runs a multi-portal scan, it enforces **Two-Phase Scan Execution** (`isStatutoryPortal`): Phase 1 completes all 7 statutory boards (`epms_ppra`, `punjab_eproc`, `sppra`, `bppra`, `kppra`, `gilgit`, `ajk_ppra`) before Phase 2 scans individual agency boards (`psdf`, `pseb`, `fde`, `mofept`, `peef`, etc.). Each portal is processed via `scrapePortal(portal)` across four coordinated stages:
 1. **Stage 1 — Redirect-Aware Fetch (`src/server/scrapers/htmlFetcher.ts`)**:
    - Connects using `sslTolerantAgent` and `HUMAN_CHROME_HEADERS`, following up to 5 HTTP 301/302 redirects across domains and custom ports (such as `https://bppra.gob.pk` $\rightarrow$ `https://bpptwo.vdc.services:5451/`) and returning `{ html, finalUrl }`.
    - Portals with a `pagination` setting in `PORTAL_DEFINITIONS` are read across several listing pages, up to that portal's `maxPages` bound. The number of pages read is stored in `portal_health.pages_scanned`.
@@ -118,7 +118,7 @@ When `startCrawlerScan()` in `crawlerEngine.ts` processes a portal via `scrapePo
 1. **Hybrid Track Matching (`matchTracks` & `embeddingService.ts`)**:
    - Evaluates each scraped item against active `domain_tracks` using positive/negative keywords and 384-dimensional `all-MiniLM-L6-v2` semantic embeddings (`model`-tagged vs `fast`-tagged vector spaces are never mixed).
 2. **3-Tier Canonical Deduplication (`src/server/services/deduplicator.ts`)**:
-   - Checks `findCanonicalMatch()` across Tier 1 (normalized `reference_no`), Tier 2 ($\ge 0.85$ bigram Dice-coefficient title similarity within 1.5 days), and Tier 3 (same-space semantic vector cosine similarity).
+   - Checks `findCanonicalMatch()` across Tier 1 (normalized `reference_no`), Tier 2 ($\ge 0.85$ bigram Dice-coefficient title similarity within 1.5 days, plus strict undated-vs-dated cross-portal matching at $\text{Dice} \ge 0.90$ with $\text{orgSim} \ge 0.50$ or $\text{Dice} \ge 0.94$ when `!titlesAreDistinguishable`), and Tier 3 (same-space semantic vector cosine similarity).
    - Tier 2 and Tier 3 similarity matching only considers tenders from other portals; a tender's own portal is excluded from the candidate search.
    - On a duplicate match: the other portal is appended to `secondary_sources` and any new document links are queued for the background worker.
    - The stored deadline may change only when the listing is known to describe the same tender: the same source, or a Tier 1 reference-number match (rule `A4`). In that case `applyRescannedDeadline` logs a `deadline_extension` corrigendum if the scanned deadline falls on a later PKT calendar day, and flags `needs_review = 1` (`deadline_moved_earlier`) if it falls on an earlier day, keeping the stored deadline. A Tier 2 or Tier 3 similarity match never changes the deadline; its date is only recorded on the secondary source.

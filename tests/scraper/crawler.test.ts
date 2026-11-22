@@ -2423,5 +2423,62 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       const fullScanRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'last_full_scan_at'`).get();
       expect(fullScanRow).toBeUndefined();
     });
+
+    it('Workstream E: runs Phase 1 statutory portals completely before Phase 2 agencies and prevents cross-portal duplicates on undated agency listings', async () => {
+      db.prepare(`UPDATE portal_health SET access_mode = 'public', status = 'online' WHERE portal_id IN ('punjab_eproc', 'psdf')`).run();
+      db.prepare(`UPDATE portal_health SET access_mode = 'offline_broken' WHERE portal_id NOT IN ('punjab_eproc', 'psdf')`).run();
+      crawlerDeps.downloadAndCacheDossier = vi.fn().mockResolvedValue(null);
+
+      const events: string[] = [];
+      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('eproc.punjab.gov.pk')) {
+          events.push('start:punjab_eproc');
+          await new Promise(resolve => setTimeout(resolve, 25));
+          events.push('end:punjab_eproc');
+          return `
+            <form id="aspnetForm" action="./ActiveTenders.aspx">
+              <table class="rgMasterTable">
+                <tbody>
+                  <tr class="rgRow">
+                    <td>Tender Notice</td>
+                    <td>Solarization of Vocational Training Centers in Punjab</td>
+                    <td>Works</td>
+                    <td>20 Nov 2026</td>
+                    <td>22 Dec 2026</td>
+                    <td>Punjab Skills Development Fund</td>
+                    <td>Active</td>
+                    <td><a href="Tenders/500/punjab-solar.pdf">Notice</a></td>
+                  </tr>
+                </tbody>
+              </table>
+            </form>
+          `;
+        }
+        if (url.includes('psdf.org.pk/procurement')) {
+          events.push('start:psdf');
+          return `
+            <div class="inner-advertisement-listing-box">
+              <h3>Solarization of Vocational Training Centers in Punjab</h3>
+              <a href="https://psdf.org.pk/wp-content/uploads/2026/11/psdf-solar.pdf">Download Notice</a>
+            </div>
+          `;
+        }
+        return '<html><body></body></html>';
+      });
+
+      const status = await startCrawlerScan(undefined, true, { depth: 'quick' });
+      expect(status.isScanning).toBe(false);
+      expect(status.completedPortals).toBe(2);
+
+      // Phase 1 statutory portal completed before Phase 2 agency portal began
+      expect(events).toEqual(['start:punjab_eproc', 'end:punjab_eproc', 'start:psdf']);
+
+      // Only 1 canonical statutory tender exists in SQLite; PSDF merged as secondary_source with its PDF
+      const tenders = getAllTenders();
+      expect(tenders).toHaveLength(1);
+      expect(tenders[0].portal_id).toBe('punjab_eproc');
+      expect(tenders[0].secondary_sources.some(s => s.portalName.includes('PSDF'))).toBe(true);
+      expect(tenders[0].attachment_urls).toContain('https://psdf.org.pk/wp-content/uploads/2026/11/psdf-solar.pdf');
+    });
   });
 });

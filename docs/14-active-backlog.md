@@ -81,7 +81,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
      - Fix undated-vs-dated cross-portal deduplication: allow candidates where one notice has a closing date and the other does not yet have an HTML closing date, comparing on high lexical similarity (`Dice >= 0.90` with `orgSim >= 0.50`, or `Dice >= 0.94` when `!titlesAreDistinguishable`).
      - When an individual website scrapes a tender already present from a statutory portal, `applyRescanToExistingTender` records the agency listing under `secondary_sources` ("Also listed on"), queues any new document or corrigendum links, and creates 0 duplicate cards.
   3. Merge existing historical cross-portal duplicate pairs in SQLite (e.g. `psdf` vs `punjab_eproc` `Provision of HR Outsourcing Services` and `Advance Technology Program`).
-- **Status:** `QUEUED` (Designed & Root cause diagnosed).
+- **Status:** `COMPLETED (2026-11-22)` — Implemented Two-Phase Scan Execution in `crawlerEngine.ts`, undated-vs-dated cross-portal dedup (`findDedupCandidates`, `findCanonicalMatch`, `ingestPipeline.ts`), merged 4 unbookmarked `New Opportunity` PSDF duplicates onto statutory `punjab_eproc` records in `./data/tender_tracker.db`, added unit/integration tests in `deduplicator.test.ts` and `crawler.test.ts`, and verified with `npm run verify`.
 
 #### Workstream F: Domain Track Organization Watchlist
 - **Objective:** Automate discovery of high-value education, PPP, and TVET tenders across all statutory boards.

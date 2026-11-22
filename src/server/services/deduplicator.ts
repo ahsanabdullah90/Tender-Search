@@ -120,6 +120,7 @@ export function findCanonicalMatch(candidate: {
   closingDate?: string | null;
   embedding?: Buffer | Uint8Array | null;
   portalId?: string | null;
+  includeAwaitingScope?: boolean;
 }): DuplicateMatchResult {
   const portalId = candidate.portalId ?? null;
 
@@ -140,20 +141,40 @@ export function findCanonicalMatch(candidate: {
     }
   }
 
-  // Tiers 2-3: candidates from other portals with a nearby deadline (or both undated and recent)
-  const candidates = findDedupCandidates(candidate.closingDate, portalId);
+  // Tiers 2-3: candidates from other portals with a nearby deadline, undated-recent, or undated-vs-dated
+  const candidates = findDedupCandidates(candidate.closingDate, portalId, {
+    includeAwaitingScope: candidate.includeAwaitingScope
+  });
   let bestMatch: DuplicateMatchResult = { isDuplicate: false, similarity: 0 };
 
   for (const existing of candidates) {
     if (titlesAreDistinguishable(candidate.title, existing.title)) continue;
 
+    const mixedDateStatus = Boolean(candidate.closingDate) !== Boolean(existing.closing_date);
     const lexicalSim = calculateStringSimilarity(candidate.title, existing.title);
+    const orgSim = calculateStringSimilarity(candidate.organization, existing.organization);
+
+    if (mixedDateStatus) {
+      const meetsMixedDateThreshold =
+        (lexicalSim >= 0.90 && orgSim >= 0.50) ||
+        lexicalSim >= 0.94;
+      if (meetsMixedDateThreshold && lexicalSim > bestMatch.similarity) {
+        bestMatch = {
+          isDuplicate: true,
+          canonicalId: existing.canonical_id,
+          matchedTenderId: existing.id,
+          similarity: lexicalSim,
+          tier: 'lexical'
+        };
+      }
+      continue;
+    }
+
     if (lexicalSim >= 0.85 && lexicalSim > bestMatch.similarity) {
       bestMatch = { isDuplicate: true, canonicalId: existing.canonical_id, matchedTenderId: existing.id, similarity: lexicalSim, tier: 'lexical' };
       continue;
     }
 
-    const orgSim = calculateStringSimilarity(candidate.organization, existing.organization);
     if (orgSim >= 0.50) {
       const semanticSim = computeTextSemanticSimilarity(candidate.title, existing.title, candidate.embedding, existing.embedding);
       if (semanticSim >= 0.88 && semanticSim > bestMatch.similarity) {
