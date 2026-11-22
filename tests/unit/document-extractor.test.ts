@@ -12,7 +12,13 @@ import {
   findScopeText,
   inferDocTypeFromText
 } from '../../src/server/services/documentExtractor.js';
-import { localOcrDeps, hasValidImageMagicBytes, extractTextWithLocalOcr } from '../../src/server/services/localOcrService.js';
+import {
+  configureLocalOcrPorts,
+  resetLocalOcrPorts,
+  rasterizePdfDefault,
+  hasValidImageMagicBytes,
+  extractTextWithLocalOcr
+} from '../../src/server/services/localOcrService.js';
 import { makePdf, makeMultiPagePdf, makeDocx, FILLER } from '../fixtures/documents/buildFixtures.js';
 
 const pkt = (iso: string) => new Date(iso).toISOString();
@@ -235,8 +241,6 @@ describe('documentExtractor (Phase 2)', () => {
       expect(hasValidImageMagicBytes(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]))).toBe(true);
       expect(hasValidImageMagicBytes(Buffer.from('fake png'))).toBe(false);
 
-      const origRecognize = localOcrDeps.recognizeImage;
-      const origRasterize = localOcrDeps.rasterizePdf;
       const ocrSampleText = [
         'GOVERNMENT OF PAKISTAN FEDERAL DIRECTORATE OF EDUCATION',
         'Tender No. FDE-SOLAR-2026-88',
@@ -246,8 +250,12 @@ describe('documentExtractor (Phase 2)', () => {
         ...FILLER
       ].join('\n');
 
-      localOcrDeps.recognizeImage = vi.fn().mockResolvedValue(ocrSampleText);
-      localOcrDeps.rasterizePdf = vi.fn().mockResolvedValue([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])]);
+      const recognizeMock = vi.fn().mockResolvedValue(ocrSampleText);
+      const rasterizeMock = vi.fn().mockResolvedValue([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])]);
+      const restoreOcrPorts = configureLocalOcrPorts({
+        recognizeImage: recognizeMock,
+        rasterizePdf: rasterizeMock
+      });
 
       try {
         // 1. Scanned image with no Gemini key -> falls back to local_ocr, indexes FTS text, never auto-expires (DL-7/AI-3)
@@ -263,7 +271,7 @@ describe('documentExtractor (Phase 2)', () => {
         // 2. Scanned PDF over Vision budget -> rasterizes PDF pages and runs local_ocr
         setAppSetting('gemini_api_key', 'test-key');
         const pdfRes = await extractFromDocument(makePdf([]), 'application/pdf', 'scanned-rfp.pdf', { allowVisionCall: () => false });
-        expect(localOcrDeps.rasterizePdf).toHaveBeenCalled();
+        expect(rasterizeMock).toHaveBeenCalled();
         expect(pdfRes.extractionMethod).toBe('local_ocr');
         expect(pdfRes.closingDateISO).toBe(pkt('2026-12-28T11:00:00+05:00'));
         expect(pdfRes.canAutoExpire).toBe(false);
@@ -274,8 +282,8 @@ describe('documentExtractor (Phase 2)', () => {
         expect(disabled).toBeNull();
       } finally {
         setAppSetting('local_ocr_enabled', 'true');
-        localOcrDeps.recognizeImage = origRecognize;
-        localOcrDeps.rasterizePdf = origRasterize;
+        restoreOcrPorts();
+        resetLocalOcrPorts();
       }
     });
   });
@@ -343,7 +351,7 @@ describe('documentExtractor (Phase 2)', () => {
         for (const off of offsets) pdf += `${String(off).padStart(10, '0')} 00000 n \n`;
         pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`;
 
-        const pages = await localOcrDeps.rasterizePdf(Buffer.from(pdf, 'latin1'), 1);
+        const pages = await rasterizePdfDefault(Buffer.from(pdf, 'latin1'), 1);
         expect(pages).toHaveLength(1);
         expect(hasValidImageMagicBytes(pages[0])).toBe(true);
       } finally {

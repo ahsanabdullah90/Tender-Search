@@ -14,6 +14,27 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 ```
 
+### Versioned SQLite Migration Engine (`src/server/db/migrations.ts` & `src/server/db/schema.ts`)
+Database initialization runs through `initDatabase(database = db)` in `src/server/db/schema.ts`, powered by the sequential `PRAGMA user_version` migration runner in `src/server/db/migrations.ts`:
+
+- **Core Migration Primitives (`src/server/db/migrations.ts`)**:
+  - `getSchemaVersion` / `setSchemaVersion`: Reads and validates SQLite's built-in `PRAGMA user_version` integer.
+  - `hasTable` / `hasColumn` / `addColumnIfMissing`: Safe SQLite schema introspection (`sqlite_master` and `PRAGMA table_info`) with strict SQL identifier validation; SQL errors in `addColumnIfMissing` propagate instead of being swallowed so failed migrations roll back cleanly.
+  - `runMigrations(database, SCHEMA_MIGRATIONS)`: Validates strictly sequential migration versions (`1..N` with non-empty names and no duplicates) and returns a `MigrationRunResult` (`{ fromVersion, toVersion, applied, skipped }`).
+- **Ordered Transactional Migrations (`SCHEMA_MIGRATIONS`, `LATEST_SCHEMA_VERSION = 6`)**:
+  Each pending migration executes inside a `database.transaction(...)` alongside `setSchemaVersion(database, version)`. If any DDL/DML step fails, both the schema change and `PRAGMA user_version` roll back atomically:
+  1. `v1` (`baseline_core_tables`): Core tables (`tenders`, `corrigendum_logs`, `pipeline_audit_logs`, `domain_tracks`, `portal_health`, `app_settings`, `pending_file_purges`, `deleted_tenders`, `document_ingest_jobs`, `deleted_portals`) and core indexes (`idx_tenders_canonical`, `idx_tenders_status`, `idx_tenders_closing`, `idx_deleted_tenders_canonical`, `idx_ingest_jobs_due`, `idx_ingest_jobs_tender`).
+  2. `v2` (`tenders_embeddings_bid_brief_and_portal_error_code`): Adds `result_expected_date`, `embedding`, `semantic_score`, `extracted_text`, `bid_brief` on `tenders`; `embedding` on `domain_tracks`; and `last_error_code` on `portal_health`.
+  3. `v3` (`ingestion_provenance_columns_and_backfills`): Adds `ingestion_status`, `deadline_source`, `deadline_confidence`, `doc_fetch_status`, `needs_review`, `review_reason`, `attachment_urls` on `tenders`, creates `idx_tenders_ingestion`, conditionally backfills `deadline_source` / `doc_fetch_status` only when `addColumnIfMissing` actually added the column, and calls `backfillExistingTenderDocumentJobs(database)`.
+  4. `v4` (`audit_fix_columns_and_reference_index`): Adds `tenders.reference_norm`, `tenders.publish_date_source`, `deleted_tenders.reason`, `portal_health.last_success_at`, `portal_health.pages_scanned`, and `idx_tenders_reference_norm`.
+  5. `v5` (`tenders_fts5_index_and_triggers`): Creates external-content `tenders_fts` virtual table and synchronization triggers (`tenders_fts_ai`, `tenders_fts_ad`, `tenders_fts_au`), running the initial rebuild once under `app_settings` sentinel `migration_tenders_fts_v1_2026_11`.
+  6. `v6` (`retire_epads_and_audit_data_cleanup`): Retires the legacy Federal EPADS source in favor of `epms_ppra` (recording the retired ID in `deleted_portals` while preserving historical `tenders` rows, gated by `migration_epms_ppra_2026_11`) and executes one-time data cleanup `runAuditCleanupOnce(database)` (gated by `migration_audit_fixes_2026_11`).
+- **Safety & Startup Guarantees**:
+  - **Safe Legacy `user_version = 0` Upgrade Path**: Pre-versioned production databases and legacy backups start with `PRAGMA user_version = 0`. Every `v1`–`v6` migration uses `IF NOT EXISTS`, `addColumnIfMissing`, conditional backfills (never overwriting existing `deadline_source` or `doc_fetch_status` values), and `app_settings` sentinel keys to upgrade cleanly to `LATEST_SCHEMA_VERSION` (`6`).
+  - **Forward-Version Guard**: If `PRAGMA user_version > LATEST_SCHEMA_VERSION`, `runMigrations` refuses to start and throws immediately to prevent older application code from corrupting a newer database schema.
+  - **Steady-State Fast Path**: When `PRAGMA user_version === LATEST_SCHEMA_VERSION`, `runMigrations` skips all DDL and returns `{ fromVersion: 6, toVersion: 6, applied: [], skipped: true }`.
+  - **Always-Run Idempotent Catalog & Portal Syncs**: After migrations complete, `initDatabase()` always executes `seedDefaultDomainTracks(database)` (seeds default tracks only when `domain_tracks` is empty) and `seedPortalHealth(database)` (runs `INSERT OR IGNORE` respecting `deleted_portals`, repairs TLS-legacy `offline_broken` flags, enforces clean `base_url` origins, and upgrades known dead portal domains to `PORTAL_DEFINITIONS` defaults).
+
 ---
 
 ## Entity-Relationship Diagram

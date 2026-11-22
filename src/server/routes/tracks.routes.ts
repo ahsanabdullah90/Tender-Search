@@ -1,4 +1,5 @@
 import { Request, Response, Router } from 'express';
+import { getValidatedBody, v, validateBody, type InferSchema } from './routeUtils.js';
 import {
   getAllDomainTracks,
   saveDomainTrack,
@@ -8,30 +9,43 @@ import {
   acknowledgeCorrigendum
 } from '../db/index.js';
 
-export const tracksRouter = Router();
-
-tracksRouter.get('/', (_req, res) => {
-  const tracks = getAllDomainTracks();
-  res.json(tracks);
+const createTrackSchema = v.object({
+  id: v.optional(v.string({ trim: true })),
+  name: v.nonEmptyString('Track name is required'),
+  positive_keywords: v.optional(v.array(v.string({ trim: true }))),
+  negative_keywords: v.optional(v.array(v.string({ trim: true }))),
+  is_active: v.optional(v.number({ integer: true, min: 0, max: 1 }))
 });
 
-tracksRouter.post('/', (req, res) => {
-  const { name, positive_keywords, negative_keywords, id } = req.body;
-  if (!name || !name.trim()) return res.status(400).json({ error: 'Track name is required' });
-  const trackId = saveDomainTrack({
-    id,
-    name: name.trim(),
-    positive_keywords: positive_keywords || [],
-    negative_keywords: negative_keywords || [],
-    is_active: 1
+export function createTracksRouter(): Router {
+  const router = Router();
+
+  router.get('/', (_req, res) => {
+    const tracks = getAllDomainTracks();
+    res.json(tracks);
   });
-  res.json({ success: true, id: trackId });
-});
 
-tracksRouter.delete('/:id', (req, res) => {
-  deleteDomainTrack(req.params.id);
-  res.json({ success: true });
-});
+  router.post('/', validateBody(createTrackSchema), (req, res) => {
+    const body = getValidatedBody<InferSchema<typeof createTrackSchema>>(res, req);
+    const trackId = saveDomainTrack({
+      id: body.id || undefined,
+      name: body.name,
+      positive_keywords: body.positive_keywords || [],
+      negative_keywords: body.negative_keywords || [],
+      is_active: body.is_active ?? 1
+    });
+    res.json({ success: true, id: trackId });
+  });
+
+  router.delete('/:id', (req, res) => {
+    deleteDomainTrack(req.params.id);
+    res.json({ success: true });
+  });
+
+  return router;
+}
+
+export const tracksRouter = createTracksRouter();
 
 export const kpisRouter = Router();
 kpisRouter.get('/', (_req, res) => {

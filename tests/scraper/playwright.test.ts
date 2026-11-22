@@ -1,18 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
-import { launchLocalBrowserHITL, verifyAndResumePortal, playwrightDeps } from '../../src/server/scrapers/playwrightEngine.js';
+import {
+  launchLocalBrowserHITL,
+  verifyPortalHITL,
+  verifyAndResumePortal,
+  defaultImportPlaywright,
+  defaultPlaywrightManager
+} from '../../src/server/scrapers/playwrightEngine.js';
 import { initDatabase, getPortalHealthList, updatePortalHealth, SESSIONS_DIR } from '../../src/server/db/index.js';
 
 describe('playwrightEngine & HITL orchestration', () => {
-  let originalImport: any;
-
   beforeEach(() => {
     initDatabase();
-    originalImport = playwrightDeps.importPlaywright;
+    defaultPlaywrightManager.resetPorts();
   });
 
   afterEach(() => {
-    playwrightDeps.importPlaywright = originalImport;
+    defaultPlaywrightManager.resetPorts();
     vi.restoreAllMocks();
   });
 
@@ -34,7 +38,7 @@ describe('playwrightEngine & HITL orchestration', () => {
     expect(result.message).toBeDefined();
   });
 
-  it('resumes portal status to online and clears error message on verifyAndResumePortal', () => {
+  it('resumes portal status to online and clears error message on verifyPortalHITL / verifyAndResumePortal', () => {
     updatePortalHealth('epms_ppra', {
       status: 'hitl_required',
       last_error_message: 'Verification challenge'
@@ -43,12 +47,16 @@ describe('playwrightEngine & HITL orchestration', () => {
     const before = getPortalHealthList().find(p => p.portal_id === 'epms_ppra');
     expect(before?.status).toBe('hitl_required');
 
-    const success = verifyAndResumePortal('epms_ppra');
+    const success = verifyPortalHITL('epms_ppra');
     expect(success).toBe(true);
 
     const after = getPortalHealthList().find(p => p.portal_id === 'epms_ppra');
     expect(after?.status).toBe('online');
     expect(after?.last_error_message).toBeNull();
+
+    updatePortalHealth('epms_ppra', { status: 'hitl_required', last_error_message: 'Challenge 2' });
+    expect(verifyAndResumePortal('epms_ppra')).toBe(true);
+    expect(getPortalHealthList().find(p => p.portal_id === 'epms_ppra')?.status).toBe('online');
   });
 
   it('launches local browser window when Playwright is available and handles close event', async () => {
@@ -69,8 +77,10 @@ describe('playwrightEngine & HITL orchestration', () => {
       }
     };
 
-    playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
-    vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(true);
+    defaultPlaywrightManager.configurePorts({
+      importPlaywright: vi.fn().mockResolvedValue(mockPlaywright),
+      hasDisplay: () => true
+    });
 
     const result = await launchLocalBrowserHITL('epms_ppra');
     expect(result.success).toBe(true);
@@ -87,7 +97,7 @@ describe('playwrightEngine & HITL orchestration', () => {
 
     // Verify and resume with active browser context
     await launchLocalBrowserHITL('epms_ppra');
-    verifyAndResumePortal('epms_ppra');
+    verifyPortalHITL('epms_ppra');
   });
 
   it('handles error gracefully when browser close or page goto throws', async () => {
@@ -102,8 +112,10 @@ describe('playwrightEngine & HITL orchestration', () => {
       }
     };
 
-    playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
-    vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(true);
+    defaultPlaywrightManager.configurePorts({
+      importPlaywright: vi.fn().mockResolvedValue(mockPlaywright),
+      hasDisplay: () => true
+    });
 
     const result = await launchLocalBrowserHITL('epms_ppra');
     expect(result.success).toBe(true);
@@ -118,8 +130,10 @@ describe('playwrightEngine & HITL orchestration', () => {
       }
     };
 
-    playwrightDeps.importPlaywright = vi.fn().mockResolvedValue(mockPlaywright);
-    vi.spyOn(playwrightDeps, 'hasDisplay').mockReturnValue(false);
+    defaultPlaywrightManager.configurePorts({
+      importPlaywright: vi.fn().mockResolvedValue(mockPlaywright),
+      hasDisplay: () => false
+    });
 
     const result = await launchLocalBrowserHITL('epms_ppra');
     expect(result.success).toBe(true);
@@ -137,8 +151,8 @@ describe('playwrightEngine & HITL orchestration', () => {
     expect(fs.existsSync(SESSIONS_DIR)).toBe(true);
   });
 
-  it('calls default playwrightDeps.importPlaywright wrapper', async () => {
-    const defaultRes = await originalImport();
+  it('calls defaultImportPlaywright wrapper', async () => {
+    const defaultRes = await defaultImportPlaywright();
     expect(defaultRes === null || typeof defaultRes === 'object').toBe(true);
   });
 });

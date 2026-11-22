@@ -7,11 +7,11 @@ import {
   reScoreTendersAgainstTracks,
   closeDatabase
 } from './src/server/db/index.js';
-import { initStartupScheduler, stopStartupScheduler } from './src/server/runtime/scheduler.js';
+import { getDefaultRuntimeContext, type RuntimeContext } from './src/server/runtime/context.js';
 import { initEmbeddingModel } from './src/server/services/embeddingService.js';
 import { backfillModelEmbeddings } from './src/server/services/embeddingBackfill.js';
-import { apiRouter } from './src/server/routes/index.js';
-import { setShutdownHandler } from './src/server/routes/system.routes.js';
+import { createApiRouter } from './src/server/routes/index.js';
+import { errorHandler } from './src/server/routes/httpErrors.js';
 import { initSessionLogger, closeSessionLogger, requestLoggerMiddleware } from './src/server/services/logger.js';
 import { terminateLocalOcrWorker } from './src/server/services/localOcrService.js';
 
@@ -19,30 +19,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.basename(__dirname) === 'dist-server' ? path.resolve(__dirname, '..') : __dirname;
 
-export function createApp(): express.Express {
+export function createApp(ctx: RuntimeContext = getDefaultRuntimeContext()): express.Express {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
   app.use(requestLoggerMiddleware);
 
   // Mount modular API domain routers
+  const apiRouter = createApiRouter(ctx);
   app.use('/api', apiRouter);
 
-  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    if (res.headersSent) return;
-    const status = typeof err?.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600
-      ? err.statusCode
-      : 500;
-    res.status(status).json({ error: err?.message || 'Internal server error' });
-  });
+  app.use(errorHandler);
 
   return app;
 }
 
 // Vite Integration & Server Startup
-export async function startServer() {
+export async function startServer(ctx: RuntimeContext = getDefaultRuntimeContext()) {
   initSessionLogger();
   initDatabase();
-  initStartupScheduler();
+  ctx.scheduler.start();
 
   let isShuttingDown = false;
   void initEmbeddingModel().then(async () => {
@@ -54,7 +49,7 @@ export async function startServer() {
     try { reScoreTendersAgainstTracks(); } catch {}
   });
 
-  const app = createApp();
+  const app = createApp(ctx);
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   const HOST = process.env.HOST || '127.0.0.1';
 
@@ -86,9 +81,9 @@ export async function startServer() {
     isShuttingDown = true;
     process.off('SIGINT', handleExit);
     process.off('SIGTERM', handleExit);
-    setShutdownHandler(null);
+    ctx.setShutdownHandler(null);
     console.log('\n[Tender Tracker] Shutting down cleanly...');
-    stopStartupScheduler();
+    ctx.scheduler.stop();
 
     const shutdownOcr = Promise.resolve(terminateLocalOcrWorker()).catch(() => {});
     const ocrWait = Promise.race([shutdownOcr, new Promise<void>(resolve => setTimeout(resolve, 2000))]);
@@ -107,7 +102,7 @@ export async function startServer() {
     });
   };
 
-  setShutdownHandler(handleExit);
+  ctx.setShutdownHandler(handleExit);
   process.on('SIGINT', handleExit);
   process.on('SIGTERM', handleExit);
 

@@ -11,7 +11,7 @@ import { parsePortalHtml } from '../../src/server/scrapers/portalParsers.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { isDetailPageDiscoveryUrl } from '../../src/server/db/repositories/ingestJobsRepo.js';
 import { db, initDatabase, getAllTenders, setAppSetting } from '../../src/server/db/index.js';
-import { processAndSaveTender, fetchDocumentsForTender, crawlerDeps } from '../../src/server/scrapers/crawlerEngine.js';
+import { processAndSaveTender, fetchDocumentsForTender, configureCrawlerPorts, getCrawlerPorts } from '../../src/server/scrapers/crawlerEngine.js';
 
 describe('Balochistan BPPRA upgraded scraper & :9446 API integration', () => {
   const bppraPortal = PORTAL_DEFINITIONS.find(p => p.id === 'bppra')!;
@@ -207,13 +207,16 @@ describe('Balochistan BPPRA upgraded scraper & :9446 API integration', () => {
     }
     setAppSetting('gemini_api_key', '');
 
-    const origDownload = crawlerDeps.downloadAndCacheDossier;
-    crawlerDeps.downloadAndCacheDossier = vi.fn().mockResolvedValue(null);
-    const fetchHtmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml');
-    const fetchBufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockImplementation(async (u: string) => {
+    const fetchHtmlSpy = vi.fn(getCrawlerPorts().fetchHtml);
+    const fetchBufSpy = vi.fn().mockImplementation(async (u: string) => {
       const b = Buffer.from(`%PDF-1.7 BPPRA BOQ from ${u}`);
       (b as any).contentType = 'application/pdf';
       return b;
+    });
+    const restoreCrawlerPorts = configureCrawlerPorts({
+      downloadAndCacheDossier: vi.fn().mockResolvedValue(null),
+      fetchHtml: fetchHtmlSpy,
+      fetchFileBuffer: fetchBufSpy
     });
 
     const httpsGetSpy = vi.spyOn(https, 'get').mockImplementation(((_url: any, _opts: any, cb: any) => {
@@ -290,9 +293,7 @@ describe('Balochistan BPPRA upgraded scraper & :9446 API integration', () => {
       expect(res.tender?.bid_brief?.tenderFee).toBe('PKR 2,000');
       expect(res.tender?.bid_brief?.requiredRegistrations).toContain('PEC (EE-04)');
     } finally {
-      crawlerDeps.downloadAndCacheDossier = origDownload;
-      fetchHtmlSpy.mockRestore();
-      fetchBufSpy.mockRestore();
+      restoreCrawlerPorts();
       httpsGetSpy.mockRestore();
     }
   });

@@ -4,13 +4,10 @@ import {
   getPortalById,
   updatePortalHealth,
   getPortalHealthList,
-  getAppSetting,
   setAppSetting,
-  getKnownTenderMapForPortal,
-  getDocumentQueueCounts
+  getKnownTenderMapForPortal
 } from '../db/index.js';
 import { getPortalAdapter } from './adapters/registry.js';
-import { fetchHtmlWithTolerantAgent } from './htmlFetcher.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { getHumanJitterDelay, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { ScanStatus, ScraperErrorCode, ScanDepth, DomainTrack, DocumentQueueStatus } from '../../shared/types.js';
@@ -20,20 +17,22 @@ import {
   endScanBudget,
   getActiveScanBudget
 } from '../services/ingestBudget.js';
-import {
-  checkNetworkHealth,
-  canRunHeavyNetworkTask,
-  canRunLightNetworkTask,
-  setDeepScanPending
-} from '../services/networkMonitor.js';
+import { defaultNetworkMonitor, type NetworkMonitor } from '../services/networkMonitor.js';
 import {
   extractDatesFromText
 } from './dateParser.js';
 import {
-  crawlerDeps,
+  getCrawlerPorts,
+  isUsingRealFetchTransport,
   fetchHtmlSmart,
-  postFormSmart
+  postFormSmart,
+  type CrawlerPorts
 } from './crawlerDeps.js';
+import {
+  ScanStateStore,
+  scanState,
+  type ProgressListener
+} from './scanState.js';
 import {
   ScrapeResult,
   parsePortalHtml,
@@ -51,9 +50,8 @@ import {
   isValidHealedTendersUrl,
   sanitizeBaseOrigin
 } from './healer.js';
-import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
 import { processAndSaveTender } from './ingestPipeline.js';
-import { launchHeadlessChromium } from './playwrightEngine.js';
+import { launchHeadlessChromium, type PlaywrightManager } from './playwrightEngine.js';
 import { resolvePaginationMaxPages, shouldEarlyStopKnownPage } from './scraperUtils.js';
 
 // ===========================================================================
@@ -71,9 +69,21 @@ export {
 } from './htmlFetcher.js';
 
 export {
-  crawlerDeps,
-  fetchHtmlSmart
+  getCrawlerPorts,
+  configureCrawlerPorts,
+  resetCrawlerPorts,
+  isUsingRealFetchTransport,
+  fetchHtmlSmart,
+  postFormSmart,
+  type CrawlerPorts
 } from './crawlerDeps.js';
+
+export {
+  ScanStateStore,
+  scanState,
+  type ScanProgressEventType,
+  type ProgressListener
+} from './scanState.js';
 
 export {
   type RawScrapedItem,
@@ -120,94 +130,28 @@ export {
 // Scan State & Progress Broadcasting
 // ===========================================================================
 
-export let currentScanStatus: ScanStatus = {
-  isScanning: false,
-  currentPortal: null,
-  activePortals: [],
-  scanDepth: 'quick',
-  progressPercent: 0,
-  completedPortals: 0,
-  totalPortals: PORTAL_DEFINITIONS.length,
-  newTendersFound: 0,
-  corrigendaFound: 0,
-  heldForScope: 0,
-  lastScanTimestamp: null
-};
-
-export type ScanProgressEventType = 'scan_progress' | 'documents_updated' | 'doc_queue_progress';
-type ProgressListener = (status: ScanStatus, eventType?: ScanProgressEventType) => void;
-const progressListeners: Set<ProgressListener> = new Set();
-
 export function addProgressListener(listener: ProgressListener) {
-  progressListeners.add(listener);
+  return scanState.subscribe(listener);
 }
 
 export function removeProgressListener(listener: ProgressListener) {
-  progressListeners.delete(listener);
-}
-
-function broadcastProgress(eventType: ScanProgressEventType = 'scan_progress') {
-  const fullScanAt = getAppSetting('last_full_scan_at') || null;
-  currentScanStatus.lastFullScanTimestamp = fullScanAt;
-  const snapshot: ScanStatus = { ...currentScanStatus, lastFullScanTimestamp: fullScanAt };
-  for (const listener of progressListeners) {
-    try {
-      listener(snapshot, eventType);
-    } catch (e) {
-      // Ignore stale subscriber errors
-    }
-  }
+  scanState.unsubscribe(listener);
 }
 
 export function mergeLiveDocQueueStatus(docQueue: DocumentQueueStatus): DocumentQueueStatus {
-  const inFlightManual = getInFlightDocFetchTenderIds();
-  const activeTenderIds = Array.from(new Set([...(docQueue.activeTenderIds || []), ...inFlightManual]));
-  const processing = Math.max(docQueue.processing ?? 0, inFlightManual.length);
-  const processingTenders = Math.max(docQueue.processingTenders ?? 0, activeTenderIds.length);
-  return {
-    ...docQueue,
-    isFetching: Boolean(docQueue.isFetching || activeTenderIds.length > 0),
-    processing,
-    processingTenders,
-    activeTenderIds
-  };
+  return scanState.mergeLiveDocQueueStatus(docQueue);
 }
 
 export function updateDocQueueStatus(
   docQueue: DocumentQueueStatus,
   options?: { documentsUpdated?: boolean }
 ): void {
-  currentScanStatus.docQueue = mergeLiveDocQueueStatus(docQueue);
-  broadcastProgress(options?.documentsUpdated ? 'documents_updated' : 'doc_queue_progress');
+  scanState.updateDocQueueStatus(docQueue, options);
 }
 
 export function refreshLiveDocQueueStatus(options?: { documentsUpdated?: boolean }): void {
-  try {
-    const counts = getDocumentQueueCounts();
-    updateDocQueueStatus(
-      {
-        isFetching: Boolean(currentScanStatus.docQueue?.isFetching || counts.processing > 0),
-        readyPending: counts.readyPending,
-        readyTenders: counts.readyTenders,
-        awaitingScopePending: counts.awaitingScopePending,
-        awaitingScopeTenders: counts.awaitingScopeTenders,
-        totalPending: counts.totalPending,
-        processing: counts.processing,
-        processingTenders: counts.processingTenders,
-        activeTenderIds: counts.activeTenderIds,
-        completedInRun: currentScanStatus.docQueue?.completedInRun ?? 0,
-        lastUpdatedAt: currentScanStatus.docQueue?.lastUpdatedAt ?? null
-      },
-      options
-    );
-  } catch {
-    // DB may not be initialized in unit tests
-  }
+  scanState.refreshLiveDocQueueStatus(options);
 }
-
-crawlerDeps.onDocFetchChange = () => {
-  refreshLiveDocQueueStatus();
-};
 
 /**
  * Builds merged portal list combining SQLite overrides with base defaults
@@ -316,27 +260,32 @@ export async function runWithConcurrency<T>(
   await Promise.all(runners);
 }
 
-function updateActivePortalsState(activeSet: Set<string>) {
-  const active = Array.from(activeSet);
-  currentScanStatus.activePortals = active;
-  currentScanStatus.currentPortal = active[0] ?? null;
-  broadcastProgress();
-}
-
 async function scanSinglePortal(
   portal: PortalDefinition,
   activeTracks: DomainTrack[],
   depth: ScanDepth,
   activeSet: Set<string>,
   totalPortals: number,
-  options?: { degradedMode?: boolean }
+  options: {
+    degradedMode?: boolean;
+    scanState: ScanStateStore;
+    ports: CrawlerPorts;
+    networkMonitor: NetworkMonitor;
+    playwright?: PlaywrightManager;
+  }
 ): Promise<'ok' | 'network_error' | 'other_error'> {
+  const activeScanState = options.scanState;
   activeSet.add(portal.name);
-  updateActivePortalsState(activeSet);
+  activeScanState.setActivePortals(Array.from(activeSet));
   updatePortalHealth(portal.id, { status: 'scanning' });
 
   try {
-    const scrapeResult = await scrapePortal(portal, { depth, degradedMode: options?.degradedMode });
+    const scrapeResult = await scrapePortal(portal, {
+      depth,
+      degradedMode: options.degradedMode,
+      ports: options.ports,
+      playwright: options.playwright
+    });
 
     if (scrapeResult.hitlRequired) {
       updatePortalHealth(portal.id, {
@@ -352,17 +301,17 @@ async function scanSinglePortal(
       let itemsMatched = 0;
       const budgetNow = getActiveScanBudget();
       if (budgetNow) {
-        currentScanStatus.documentsDeferred = budgetNow.documentsDeferred;
-        currentScanStatus.visionDeferred = budgetNow.visionDeferred;
+        activeScanState.recordBudgetCounts(budgetNow.documentsDeferred, budgetNow.visionDeferred);
       }
 
       for (const item of rawItems) {
         try {
-          const result = await processAndSaveTender(item, portal, activeTracks);
-          if (result.isNew) currentScanStatus.newTendersFound++;
-          if (result.hasCorrigendum) currentScanStatus.corrigendaFound++;
+          const result = await processAndSaveTender(item, portal, activeTracks, {
+            ports: options.ports,
+            networkMonitor: options.networkMonitor
+          });
+          activeScanState.recordTenderResult(result);
           if (result.matched) itemsMatched++;
-          if (result.awaitingScope) currentScanStatus.heldForScope = (currentScanStatus.heldForScope || 0) + 1;
         } catch (itemErr: any) {
           console.warn(`[Crawler] Failed saving item from ${portal.id}:`, itemErr.message);
         }
@@ -402,9 +351,7 @@ async function scanSinglePortal(
     return errorCode === 'TIMEOUT' || errorCode === 'NETWORK_UNREACHABLE' ? 'network_error' : 'other_error';
   } finally {
     activeSet.delete(portal.name);
-    currentScanStatus.completedPortals++;
-    currentScanStatus.progressPercent = Math.round((currentScanStatus.completedPortals / Math.max(1, totalPortals)) * 100);
-    updateActivePortalsState(activeSet);
+    activeScanState.completePortal(totalPortals, Array.from(activeSet));
   }
 }
 
@@ -413,43 +360,49 @@ async function scanSinglePortal(
  * Multi-portal scans run HTTP portals concurrently (up to HTTP_PORTAL_CONCURRENCY)
  * and Playwright portals sequentially (PLAYWRIGHT_PORTAL_CONCURRENCY) for stability.
  */
-let scanStarting = false;
-
 export async function startCrawlerScan(
   targetPortalId?: string,
   awaitCompletion: boolean = false,
-  options?: { depth?: ScanDepth; forceOnDegraded?: boolean }
+  options?: {
+    depth?: ScanDepth;
+    forceOnDegraded?: boolean;
+    scanState?: ScanStateStore;
+    ports?: CrawlerPorts;
+    networkMonitor?: NetworkMonitor;
+    playwright?: PlaywrightManager;
+  }
 ): Promise<ScanStatus> {
-  if (currentScanStatus.isScanning || scanStarting) {
-    return currentScanStatus;
+  const activeScanState = options?.scanState ?? scanState;
+  const activePorts = options?.ports ?? getCrawlerPorts();
+  const activeNetworkMonitor = options?.networkMonitor ?? defaultNetworkMonitor;
+
+  if (!activeScanState.tryAcquireStart()) {
+    return activeScanState.getSnapshot();
   }
 
-  scanStarting = true;
   let depth: ScanDepth;
   let degradedMode: boolean;
   let effectiveHttpConcurrency: number;
   let portalsToScan: PortalDefinition[];
   try {
     depth = options?.depth === 'deep' ? 'deep' : 'quick';
-    const net = await checkNetworkHealth();
+    const net = await activeNetworkMonitor.checkHealth();
 
-    if (!canRunLightNetworkTask(net)) {
+    if (!activeNetworkMonitor.canRunLightTask(net)) {
       if (!targetPortalId && depth === 'deep') {
-        setDeepScanPending(true);
+        activeNetworkMonitor.setDeepScanPending(true);
       }
-      currentScanStatus.pausedReason = net.reason || 'No internet connection detected — scan paused';
-      broadcastProgress();
-      return currentScanStatus;
+      return activeScanState.pauseScan(net.reason || 'No internet connection detected — scan paused');
     }
 
-    if (!canRunHeavyNetworkTask(net) && !targetPortalId && depth === 'deep' && !options?.forceOnDegraded) {
-      setDeepScanPending(true);
-      currentScanStatus.pausedReason = 'Slow network detected — deep scan held until connection is healthy (Quick Scan remains available)';
-      broadcastProgress();
-      return currentScanStatus;
+    if (!activeNetworkMonitor.canRunHeavyTask(net) && !targetPortalId && depth === 'deep' && !options?.forceOnDegraded) {
+      activeNetworkMonitor.setDeepScanPending(true);
+      return activeScanState.pauseScan(
+        'Slow network detected — deep scan held until connection is healthy (Quick Scan remains available)'
+      );
     }
 
-    degradedMode = !canRunHeavyNetworkTask(net);
+    degradedMode = !activeNetworkMonitor.canRunHeavyTask(net);
     effectiveHttpConcurrency = degradedMode ? 1 : HTTP_PORTAL_CONCURRENCY;
     const allPortals = getActivePortalsList(targetPortalId);
     // In automated full scans, skip offline_broken portals unless explicitly triggered individually
@@ -457,39 +410,31 @@ export async function startCrawlerScan(
       ? allPortals
       : allPortals.filter(p => p.accessMode !== 'offline_broken');
 
-    currentScanStatus = {
-      isScanning: true,
-      currentPortal: null,
-      activePortals: [],
-      scanDepth: depth,
-      progressPercent: 0,
-      completedPortals: 0,
-      totalPortals: portalsToScan.length,
-      newTendersFound: 0,
-      corrigendaFound: 0,
-      heldForScope: 0,
-      pausedReason: null,
-      lastScanTimestamp: currentScanStatus.lastScanTimestamp,
-      docQueue: currentScanStatus.docQueue
-    };
-    broadcastProgress();
+    activeScanState.beginScan({ depth, totalPortals: portalsToScan.length });
   } finally {
-    scanStarting = false;
+    activeScanState.releaseStartLock();
   }
 
-  const scanExecution = async () => {
+  const scanExecution = async (): Promise<ScanStatus> => {
     // Per-scan document budget: time for upfront fetches and a Gemini Vision call cap (docs/13 §3.2).
     beginScanBudget();
     const activeSet = new Set<string>();
     let succeededPortals = 0;
     let networkFailedPortals = 0;
+    let finalStatus: ScanStatus;
     try {
       const activeTracks = getAllDomainTracks().filter(t => t.is_active === 1);
       const total = portalsToScan.length;
 
       if (portalsToScan.length <= 1) {
         for (const portal of portalsToScan) {
-          const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+          const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, {
+            degradedMode,
+            scanState: activeScanState,
+            ports: activePorts,
+            networkMonitor: activeNetworkMonitor,
+            playwright: options?.playwright
+          });
           if (outcome === 'ok') succeededPortals++;
           else if (outcome === 'network_error') networkFailedPortals++;
         }
@@ -500,16 +445,28 @@ export async function startCrawlerScan(
 
           await Promise.all([
             runWithConcurrency(httpPortals, effectiveHttpConcurrency, async portal => {
-              const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+              const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, {
+                degradedMode,
+                scanState: activeScanState,
+                ports: activePorts,
+                networkMonitor: activeNetworkMonitor,
+                playwright: options?.playwright
+              });
               if (outcome === 'ok') succeededPortals++;
               else if (outcome === 'network_error') networkFailedPortals++;
-              await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
+              await activePorts.sleep(getHumanJitterDelay(500, 1200));
             }),
             runWithConcurrency(pwPortals, PLAYWRIGHT_PORTAL_CONCURRENCY, async portal => {
-              const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, { degradedMode });
+              const outcome = await scanSinglePortal(portal, activeTracks, depth, activeSet, total, {
+                degradedMode,
+                scanState: activeScanState,
+                ports: activePorts,
+                networkMonitor: activeNetworkMonitor,
+                playwright: options?.playwright
+              });
               if (outcome === 'ok') succeededPortals++;
               else if (outcome === 'network_error') networkFailedPortals++;
-              await crawlerDeps.sleep(getHumanJitterDelay(500, 1200));
+              await activePorts.sleep(getHumanJitterDelay(500, 1200));
             })
           ]);
         };
@@ -527,46 +484,41 @@ export async function startCrawlerScan(
       }
     } finally {
       const budget = endScanBudget();
-      currentScanStatus.documentsDeferred = budget?.documentsDeferred ?? 0;
-      currentScanStatus.visionDeferred = budget?.visionDeferred ?? 0;
-      currentScanStatus.isScanning = false;
-      currentScanStatus.activePortals = [];
-      currentScanStatus.currentPortal = null;
-      currentScanStatus.lastScanTimestamp = new Date().toISOString();
-      currentScanStatus.progressPercent = 100;
+      const timestamp = new Date().toISOString();
+      let pausedReason: string | null | undefined;
       if (!targetPortalId) {
         const allFailedFromNetwork =
           portalsToScan.length > 0 && succeededPortals === 0 && networkFailedPortals >= portalsToScan.length;
         if (!allFailedFromNetwork) {
-          setAppSetting('last_full_scan_at', currentScanStatus.lastScanTimestamp);
+          setAppSetting('last_full_scan_at', timestamp);
           if (depth === 'deep') {
-            setAppSetting('last_deep_scan_at', currentScanStatus.lastScanTimestamp);
+            setAppSetting('last_deep_scan_at', timestamp);
             if (succeededPortals > 0) {
-              setDeepScanPending(false);
+              activeNetworkMonitor.setDeepScanPending(false);
             }
           }
         } else {
-          currentScanStatus.pausedReason = 'All portals timed out or unreachable — catch-up scan will retry when network recovers';
+          pausedReason = 'All portals timed out or unreachable — catch-up scan will retry when network recovers';
           if (depth === 'deep') {
-            setDeepScanPending(true);
+            activeNetworkMonitor.setDeepScanPending(true);
           }
         }
       }
-      broadcastProgress();
-      if (crawlerDeps.onScanFinished) {
-        try {
-          crawlerDeps.onScanFinished();
-        } catch {}
-      }
+      finalStatus = activeScanState.finishScan({
+        documentsDeferred: budget?.documentsDeferred ?? 0,
+        visionDeferred: budget?.visionDeferred ?? 0,
+        timestamp,
+        pausedReason
+      });
     }
-    return currentScanStatus;
+    return finalStatus;
   };
 
   if (awaitCompletion) {
     return await scanExecution();
   } else {
     scanExecution().catch(err => console.error('[Crawler] Background scan error:', err));
-    return currentScanStatus;
+    return activeScanState.getSnapshot();
   }
 }
 
@@ -576,9 +528,10 @@ export async function startCrawlerScan(
  */
 export async function scrapePortal(
   portal: PortalDefinition & { sessionCookies?: string },
-  options?: { depth?: ScanDepth; degradedMode?: boolean }
+  options?: { depth?: ScanDepth; degradedMode?: boolean; ports?: CrawlerPorts; playwright?: PlaywrightManager }
 ): Promise<ScrapeResult> {
-  const usingRealTransport = crawlerDeps.fetchHtml === fetchHtmlWithTolerantAgent;
+  const activePorts = options?.ports ?? getCrawlerPorts();
+  const usingRealTransport = isUsingRealFetchTransport(activePorts);
   const adapter = getPortalAdapter(portal.id);
 
   if (adapter.scrapeListings) {
@@ -607,7 +560,9 @@ export async function scrapePortal(
   if (portal.tier === 'playwright' && usingRealTransport) {
     let browser: any = null;
     try {
-      browser = await launchHeadlessChromium();
+      browser = options?.playwright
+        ? await options.playwright.launchHeadlessChromium()
+        : await launchHeadlessChromium();
       const context = await browser.newContext({
         ignoreHTTPSErrors: true,
         userAgent: HUMAN_CHROME_HEADERS['User-Agent']
@@ -632,7 +587,7 @@ export async function scrapePortal(
     const maxRetries = 2;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies, htmlTimeoutMs);
+        const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies, htmlTimeoutMs, activePorts);
         html = fetched.html;
         if (fetched.cookies) responseCookies = fetched.cookies;
         if (fetched.finalUrl && fetched.finalUrl !== portal.tendersUrl) {
@@ -646,7 +601,7 @@ export async function scrapePortal(
         if (isTimeout && attempt < maxRetries) {
           const backoffMs = attempt === 0 ? 30000 : 120000;
           console.log(`[Crawler] Timed out fetching ${portal.id}, retrying attempt ${attempt + 1}/${maxRetries} after backoff...`);
-          await crawlerDeps.sleep(backoffMs);
+          await activePorts.sleep(backoffMs);
           continue;
         }
         break;
@@ -727,11 +682,11 @@ export async function scrapePortal(
       }
 
       try {
-        await crawlerDeps.sleep(getHumanJitterDelay(1500, 3000));
+        await activePorts.sleep(getHumanJitterDelay(1500, 3000));
         const forwardCookies = adapter.transport?.forwardResponseCookiesOnPagination ?? true;
         const pageFetched = postBody
-          ? await postFormSmart(pageUrl, postBody, currentCookies, htmlTimeoutMs)
-          : await fetchHtmlSmart(pageUrl, forwardCookies ? currentCookies : portal.sessionCookies, htmlTimeoutMs);
+          ? await postFormSmart(pageUrl, postBody, currentCookies, htmlTimeoutMs, activePorts)
+          : await fetchHtmlSmart(pageUrl, forwardCookies ? currentCookies : portal.sessionCookies, htmlTimeoutMs, activePorts);
         if (!pageFetched.html) break;
         currentPageHtml = pageFetched.html;
         if (pageFetched.cookies) currentCookies = pageFetched.cookies;
@@ -774,7 +729,7 @@ export async function scrapePortal(
   if (undatedItems.length > 0 && undatedItems.length <= 20) {
     await Promise.allSettled(undatedItems.map(async (it) => {
       try {
-        const detailHtml = await crawlerDeps.fetchHtml(it.directUrl);
+        const detailHtml = await activePorts.fetchHtml(it.directUrl);
         const detail$ = cheerio.load(detailHtml);
         detail$('script, style, nav, header, footer, aside, noscript').remove();
 

@@ -14,6 +14,11 @@ export interface LocalOcrResult {
   engine: 'tesseract.js';
 }
 
+export interface LocalOcrPorts {
+  recognizeImage: (buf: Buffer) => Promise<string>;
+  rasterizePdf: (buf: Buffer, maxPages?: number) => Promise<Buffer[]>;
+}
+
 let tesseractWorkerPromise: Promise<any> | null = null;
 let ocrMutex: Promise<void> = Promise.resolve();
 
@@ -70,7 +75,10 @@ async function defaultRecognizeImage(buf: Buffer): Promise<string> {
   });
 }
 
-async function defaultRasterizePdf(buf: Buffer, maxPages: number = LOCAL_OCR_DEFAULT_MAX_PAGES): Promise<Buffer[]> {
+export async function rasterizePdfDefault(
+  buf: Buffer,
+  maxPages: number = LOCAL_OCR_DEFAULT_MAX_PAGES
+): Promise<Buffer[]> {
   if (process.env.VITEST && !hasCachedTrainedData()) return [];
 
   const pdfjs: any = await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -159,10 +167,32 @@ async function defaultRasterizePdf(buf: Buffer, maxPages: number = LOCAL_OCR_DEF
   return pngPages;
 }
 
-export const localOcrDeps = {
+const defaultLocalOcrPorts: LocalOcrPorts = {
   recognizeImage: defaultRecognizeImage,
-  rasterizePdf: defaultRasterizePdf
+  rasterizePdf: rasterizePdfDefault
 };
+
+let activeLocalOcrPorts: LocalOcrPorts = { ...defaultLocalOcrPorts };
+
+export function getLocalOcrPorts(): Readonly<LocalOcrPorts> {
+  return { ...activeLocalOcrPorts };
+}
+
+export function configureLocalOcrPorts(overrides: Partial<LocalOcrPorts>): () => void {
+  const previous: LocalOcrPorts = { ...activeLocalOcrPorts };
+  activeLocalOcrPorts = {
+    ...activeLocalOcrPorts,
+    ...(overrides.recognizeImage !== undefined ? { recognizeImage: overrides.recognizeImage } : {}),
+    ...(overrides.rasterizePdf !== undefined ? { rasterizePdf: overrides.rasterizePdf } : {})
+  };
+  return () => {
+    activeLocalOcrPorts = previous;
+  };
+}
+
+export function resetLocalOcrPorts(): void {
+  activeLocalOcrPorts = { ...defaultLocalOcrPorts };
+}
 
 /** Returns true unless explicitly disabled in app_settings (`local_ocr_enabled = 'false'`). */
 export function isLocalOcrEnabled(): boolean {
@@ -180,21 +210,26 @@ export function isLocalOcrEnabled(): boolean {
 export async function extractTextWithLocalOcr(
   buf: Buffer,
   mimeType: string = '',
-  opts: { maxPages?: number } = {}
+  opts: { maxPages?: number; ports?: Partial<LocalOcrPorts> } = {}
 ): Promise<LocalOcrResult | null> {
   if (!buf || buf.length === 0 || !isLocalOcrEnabled()) return null;
+
+  const ports: LocalOcrPorts = {
+    recognizeImage: opts.ports?.recognizeImage ?? activeLocalOcrPorts.recognizeImage,
+    rasterizePdf: opts.ports?.rasterizePdf ?? activeLocalOcrPorts.rasterizePdf
+  };
 
   const isPdfFile = mimeType === 'application/pdf' || buf.subarray(0, 5).toString('latin1') === '%PDF-';
   const isImageFile = mimeType.startsWith('image/');
 
   if (isPdfFile) {
     const maxPages = opts.maxPages ?? LOCAL_OCR_DEFAULT_MAX_PAGES;
-    const pageBuffers = await localOcrDeps.rasterizePdf(buf, maxPages);
+    const pageBuffers = await ports.rasterizePdf(buf, maxPages);
     if (!pageBuffers || pageBuffers.length === 0) return null;
 
     const chunks: string[] = [];
     for (const png of pageBuffers) {
-      const pageText = await localOcrDeps.recognizeImage(png);
+      const pageText = await ports.recognizeImage(png);
       if (pageText && pageText.trim()) {
         chunks.push(pageText.trim());
       }
@@ -204,7 +239,7 @@ export async function extractTextWithLocalOcr(
   }
 
   if (isImageFile) {
-    const text = (await localOcrDeps.recognizeImage(buf)).trim();
+    const text = (await ports.recognizeImage(buf)).trim();
     return text ? { text, pagesOcred: 1, engine: 'tesseract.js' } : null;
   }
 

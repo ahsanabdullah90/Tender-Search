@@ -23,18 +23,28 @@ export interface ProbeResult {
   error?: string;
 }
 
+export interface NetworkMonitorPorts {
+  probeEndpoint: (url: string, timeoutMs: number) => Promise<ProbeResult>;
+  now: () => number;
+  countPendingDocumentJobs: () => number;
+}
+
+export interface NetworkOutcomeOptions {
+  isTimeout?: boolean;
+  durationMs?: number;
+  slowThresholdMs?: number;
+}
+
 interface PassiveTimeoutEvent {
   host: string;
   at: number;
 }
 
-let cachedStatus: NetworkStatus | null = null;
-let lastCheckedMs: number | null = null;
-let inFlightProbe: Promise<NetworkStatus> | null = null;
-let deepScanPending = false;
-let passiveTimeouts: PassiveTimeoutEvent[] = [];
-
-function defaultProbeEndpoint(url: string, timeoutMs: number): Promise<ProbeResult> {
+function defaultProbeEndpoint(
+  url: string,
+  timeoutMs: number,
+  nowFn: () => number = () => Date.now()
+): Promise<ProbeResult> {
   // Never make real internet requests inside automated Vitest runs (QA-3).
   if (process.env.VITEST) {
     return Promise.resolve({ ok: true, latencyMs: 12 });
@@ -48,7 +58,7 @@ function defaultProbeEndpoint(url: string, timeoutMs: number): Promise<ProbeResu
       return resolve({ ok: false, latencyMs: null, error: 'Invalid probe URL' });
     }
 
-    const startedAt = networkMonitorDeps.now();
+    const startedAt = nowFn();
     const client = parsed.protocol === 'https:' ? https : http;
     let settled = false;
     let hardTimer: NodeJS.Timeout | null = null;
@@ -66,7 +76,7 @@ function defaultProbeEndpoint(url: string, timeoutMs: number): Promise<ProbeResu
       res => {
         res.resume();
         const status = res.statusCode ?? 0;
-        const latencyMs = Math.max(0, networkMonitorDeps.now() - startedAt);
+        const latencyMs = Math.max(0, nowFn() - startedAt);
         finish({
           ok: status > 0 && status < 500,
           latencyMs,
@@ -93,148 +103,281 @@ function defaultProbeEndpoint(url: string, timeoutMs: number): Promise<ProbeResu
   });
 }
 
-export const networkMonitorDeps = {
-  probeEndpoint: (url: string, timeoutMs: number) => defaultProbeEndpoint(url, timeoutMs),
-  now: () => Date.now(),
-  countPendingDocumentJobs: () => {
-    try {
-      return countPendingDocumentJobs();
-    } catch {
-      return 0;
-    }
-  }
-};
-
-function prunePassiveTimeouts(nowMs: number): void {
-  passiveTimeouts = passiveTimeouts.filter(ev => nowMs - ev.at <= PASSIVE_WINDOW_MS);
-}
-
-function hasMultiHostPassiveTimeouts(nowMs: number): boolean {
-  prunePassiveTimeouts(nowMs);
-  if (passiveTimeouts.length < PASSIVE_DEGRADED_MIN_TIMEOUTS) return false;
-  const hosts = new Set(passiveTimeouts.map(ev => ev.host));
-  return hosts.size >= PASSIVE_DEGRADED_MIN_HOSTS;
-}
-
-function withCurrentCounts(base: NetworkStatus): NetworkStatus {
+function filterDefinedPorts(overrides?: Partial<NetworkMonitorPorts>): Partial<NetworkMonitorPorts> {
+  if (!overrides) return {};
   return {
-    ...base,
-    deferredHeavyTasks: {
-      deepScanPending,
-      pendingDocumentJobs: networkMonitorDeps.countPendingDocumentJobs()
-    }
+    ...(overrides.probeEndpoint !== undefined ? { probeEndpoint: overrides.probeEndpoint } : {}),
+    ...(overrides.now !== undefined ? { now: overrides.now } : {}),
+    ...(overrides.countPendingDocumentJobs !== undefined
+      ? { countPendingDocumentJobs: overrides.countPendingDocumentJobs }
+      : {})
   };
 }
 
-function buildStatus(state: NetworkState, latencyMs: number | null, checkedAt: string | null, reason: string | null): NetworkStatus {
-  return {
-    state,
-    latencyMs,
-    checkedAt,
-    reason,
-    heavyTasksPaused: state !== 'online',
-    deferredHeavyTasks: {
-      deepScanPending,
-      pendingDocumentJobs: networkMonitorDeps.countPendingDocumentJobs()
-    }
-  };
-}
+export class NetworkMonitor {
+  private cachedStatus: NetworkStatus | null = null;
+  private lastCheckedMs: number | null = null;
+  private inFlightProbe: Promise<NetworkStatus> | null = null;
+  private deepScanPending = false;
+  private passiveTimeouts: PassiveTimeoutEvent[] = [];
+  private readonly initialPorts?: Partial<NetworkMonitorPorts>;
+  private ports: NetworkMonitorPorts;
 
-/**
- * Probes network reachability & latency against dual lightweight endpoints (45s TTL cache).
- */
-export async function checkNetworkHealth(options: { force?: boolean } = {}): Promise<NetworkStatus> {
-  const nowMs = networkMonitorDeps.now();
-  if (!options.force && cachedStatus && lastCheckedMs !== null && nowMs - lastCheckedMs < NETWORK_PROBE_CACHE_TTL_MS) {
-    return withCurrentCounts(cachedStatus);
+  constructor(initialPorts?: Partial<NetworkMonitorPorts>) {
+    this.initialPorts = initialPorts;
+    this.ports = {
+      ...this.createDefaultPorts(),
+      ...filterDefinedPorts(initialPorts)
+    };
   }
 
-  if (!options.force && inFlightProbe) {
-    return inFlightProbe;
-  }
-
-  const runProbe = async (): Promise<NetworkStatus> => {
-    const results = await Promise.all(
-      NETWORK_PROBE_ENDPOINTS.map(ep => networkMonitorDeps.probeEndpoint(ep, NETWORK_PROBE_TIMEOUT_MS))
-    );
-    const doneAtMs = networkMonitorDeps.now();
-    const checkedAt = new Date(doneAtMs).toISOString();
-    const okResults = results.filter(r => r.ok);
-
-    let next: NetworkStatus;
-    if (okResults.length === 0) {
-      const errDetail = results.map(r => r.error).filter(Boolean)[0];
-      next = buildStatus(
-        'offline',
-        null,
-        checkedAt,
-        errDetail ? `No internet connectivity detected (${errDetail})` : 'No internet connectivity detected'
-      );
-    } else if (okResults.length < results.length) {
-      const latency = typeof okResults[0].latencyMs === 'number' ? okResults[0].latencyMs : null;
-      next = buildStatus('degraded', latency, checkedAt, 'Unstable network (partial connectivity probe timeout)');
-    } else {
-      const latencies = okResults
-        .map(r => r.latencyMs)
-        .filter((ms): ms is number => typeof ms === 'number' && Number.isFinite(ms));
-      const latencyMs = latencies.length > 0 ? Math.min(...latencies) : 0;
-
-      if (latencyMs >= NETWORK_DEGRADED_RTT_MS) {
-        next = buildStatus('degraded', latencyMs, checkedAt, `Slow network detected (${latencyMs}ms latency)`);
-      } else {
-        // Explicit force re-check on a fast link clears stale passive timeout memory (no recovery deadlock)
-        if (options.force) {
-          passiveTimeouts = [];
-        }
-        if (hasMultiHostPassiveTimeouts(doneAtMs)) {
-          next = buildStatus('degraded', latencyMs, checkedAt, 'Slow network detected (multiple portal timeouts)');
-        } else {
-          next = buildStatus('online', latencyMs, checkedAt, null);
+  private createDefaultPorts(): NetworkMonitorPorts {
+    return {
+      probeEndpoint: (url: string, timeoutMs: number) =>
+        defaultProbeEndpoint(url, timeoutMs, () => this.ports.now()),
+      now: () => Date.now(),
+      countPendingDocumentJobs: () => {
+        try {
+          return countPendingDocumentJobs();
+        } catch {
+          return 0;
         }
       }
+    };
+  }
+
+  private prunePassiveTimeouts(nowMs: number): void {
+    this.passiveTimeouts = this.passiveTimeouts.filter(ev => nowMs - ev.at <= PASSIVE_WINDOW_MS);
+  }
+
+  private hasMultiHostPassiveTimeouts(nowMs: number): boolean {
+    this.prunePassiveTimeouts(nowMs);
+    if (this.passiveTimeouts.length < PASSIVE_DEGRADED_MIN_TIMEOUTS) return false;
+    const hosts = new Set(this.passiveTimeouts.map(ev => ev.host));
+    return hosts.size >= PASSIVE_DEGRADED_MIN_HOSTS;
+  }
+
+  private withCurrentCounts(base: NetworkStatus): NetworkStatus {
+    return {
+      ...base,
+      deferredHeavyTasks: {
+        deepScanPending: this.deepScanPending,
+        pendingDocumentJobs: this.ports.countPendingDocumentJobs()
+      }
+    };
+  }
+
+  private buildStatus(
+    state: NetworkState,
+    latencyMs: number | null,
+    checkedAt: string | null,
+    reason: string | null
+  ): NetworkStatus {
+    return {
+      state,
+      latencyMs,
+      checkedAt,
+      reason,
+      heavyTasksPaused: state !== 'online',
+      deferredHeavyTasks: {
+        deepScanPending: this.deepScanPending,
+        pendingDocumentJobs: this.ports.countPendingDocumentJobs()
+      }
+    };
+  }
+
+  configurePorts(overrides: Partial<NetworkMonitorPorts>): () => void {
+    const previous: NetworkMonitorPorts = { ...this.ports };
+    this.ports = {
+      ...this.ports,
+      ...filterDefinedPorts(overrides)
+    };
+    return () => {
+      this.ports = previous;
+    };
+  }
+
+  getPorts(): Readonly<NetworkMonitorPorts> {
+    return { ...this.ports };
+  }
+
+  reset(): void {
+    this.cachedStatus = null;
+    this.lastCheckedMs = null;
+    this.inFlightProbe = null;
+    this.deepScanPending = false;
+    this.passiveTimeouts = [];
+    this.ports = {
+      ...this.createDefaultPorts(),
+      ...filterDefinedPorts(this.initialPorts)
+    };
+  }
+
+  /**
+   * Probes network reachability & latency against dual lightweight endpoints (45s TTL cache).
+   */
+  async checkHealth(options: { force?: boolean } = {}): Promise<NetworkStatus> {
+    const nowMs = this.ports.now();
+    if (
+      !options.force &&
+      this.cachedStatus &&
+      this.lastCheckedMs !== null &&
+      nowMs - this.lastCheckedMs < NETWORK_PROBE_CACHE_TTL_MS
+    ) {
+      return this.withCurrentCounts(this.cachedStatus);
     }
 
-    cachedStatus = next;
-    lastCheckedMs = doneAtMs;
-    return withCurrentCounts(next);
-  };
-
-  const promise = runProbe().finally(() => {
-    if (inFlightProbe === promise) {
-      inFlightProbe = null;
+    if (!options.force && this.inFlightProbe) {
+      return this.inFlightProbe;
     }
-  });
-  inFlightProbe = promise;
-  return promise;
+
+    const runProbe = async (): Promise<NetworkStatus> => {
+      const results = await Promise.all(
+        NETWORK_PROBE_ENDPOINTS.map(ep => this.ports.probeEndpoint(ep, NETWORK_PROBE_TIMEOUT_MS))
+      );
+      const doneAtMs = this.ports.now();
+      const checkedAt = new Date(doneAtMs).toISOString();
+      const okResults = results.filter(r => r.ok);
+
+      let next: NetworkStatus;
+      if (okResults.length === 0) {
+        const errDetail = results.map(r => r.error).filter(Boolean)[0];
+        next = this.buildStatus(
+          'offline',
+          null,
+          checkedAt,
+          errDetail ? `No internet connectivity detected (${errDetail})` : 'No internet connectivity detected'
+        );
+      } else if (okResults.length < results.length) {
+        const latency = typeof okResults[0].latencyMs === 'number' ? okResults[0].latencyMs : null;
+        next = this.buildStatus('degraded', latency, checkedAt, 'Unstable network (partial connectivity probe timeout)');
+      } else {
+        const latencies = okResults
+          .map(r => r.latencyMs)
+          .filter((ms): ms is number => typeof ms === 'number' && Number.isFinite(ms));
+        const latencyMs = latencies.length > 0 ? Math.min(...latencies) : 0;
+
+        if (latencyMs >= NETWORK_DEGRADED_RTT_MS) {
+          next = this.buildStatus('degraded', latencyMs, checkedAt, `Slow network detected (${latencyMs}ms latency)`);
+        } else {
+          // Explicit force re-check on a fast link clears stale passive timeout memory (no recovery deadlock)
+          if (options.force) {
+            this.passiveTimeouts = [];
+          }
+          if (this.hasMultiHostPassiveTimeouts(doneAtMs)) {
+            next = this.buildStatus('degraded', latencyMs, checkedAt, 'Slow network detected (multiple portal timeouts)');
+          } else {
+            next = this.buildStatus('online', latencyMs, checkedAt, null);
+          }
+        }
+      }
+
+      this.cachedStatus = next;
+      this.lastCheckedMs = doneAtMs;
+      return this.withCurrentCounts(next);
+    };
+
+    const promise = runProbe().finally(() => {
+      if (this.inFlightProbe === promise) {
+        this.inFlightProbe = null;
+      }
+    });
+    this.inFlightProbe = promise;
+    return promise;
+  }
+
+  getCachedStatus(): NetworkStatus {
+    if (this.cachedStatus) {
+      return this.withCurrentCounts(this.cachedStatus);
+    }
+    return this.buildStatus('online', null, null, null);
+  }
+
+  canRunHeavyTask(status?: NetworkStatus): boolean {
+    return (status ?? this.getCachedStatus()).state === 'online';
+  }
+
+  canRunLightTask(status?: NetworkStatus): boolean {
+    return (status ?? this.getCachedStatus()).state !== 'offline';
+  }
+
+  setDeepScanPending(pending: boolean): void {
+    this.deepScanPending = Boolean(pending);
+  }
+
+  isDeepScanPending(): boolean {
+    return this.deepScanPending;
+  }
+
+  /**
+   * Passive runtime feedback from portal HTML and dossier downloads.
+   * Transitions cached status immediately to 'degraded' if multiple distinct hosts time out or
+   * complete slowly inside a short sliding window.
+   */
+  reportOutcome(
+    host: string,
+    ok: boolean,
+    options: boolean | NetworkOutcomeOptions = false
+  ): void {
+    const normHost = (host || '').trim().toLowerCase();
+    if (!normHost || normHost === '127.0.0.1' || normHost === 'localhost' || normHost === '::1') return;
+
+    const opts: NetworkOutcomeOptions = typeof options === 'boolean' ? { isTimeout: options } : (options || {});
+    const isSlow =
+      ok &&
+      typeof opts.durationMs === 'number' &&
+      typeof opts.slowThresholdMs === 'number' &&
+      opts.durationMs >= opts.slowThresholdMs;
+
+    const nowMs = this.ports.now();
+    this.prunePassiveTimeouts(nowMs);
+
+    if (ok && !isSlow) {
+      this.passiveTimeouts = this.passiveTimeouts.filter(ev => ev.host !== normHost);
+      return;
+    }
+
+    if ((!ok && opts.isTimeout) || isSlow) {
+      this.passiveTimeouts.push({ host: normHost, at: nowMs });
+      if (this.hasMultiHostPassiveTimeouts(nowMs)) {
+        this.cachedStatus = this.buildStatus(
+          'degraded',
+          this.cachedStatus?.latencyMs ?? null,
+          new Date(nowMs).toISOString(),
+          isSlow
+            ? 'Slow network detected (multiple slow portal responses)'
+            : 'Slow network detected (multiple portal timeouts)'
+        );
+        this.lastCheckedMs = nowMs;
+      }
+    }
+  }
+}
+
+export const defaultNetworkMonitor = new NetworkMonitor();
+
+export async function checkNetworkHealth(options: { force?: boolean } = {}): Promise<NetworkStatus> {
+  return defaultNetworkMonitor.checkHealth(options);
 }
 
 export function getCachedNetworkStatus(): NetworkStatus {
-  if (cachedStatus) {
-    return withCurrentCounts(cachedStatus);
-  }
-  return buildStatus('online', null, null, null);
+  return defaultNetworkMonitor.getCachedStatus();
 }
 
 export function canRunHeavyNetworkTask(status?: NetworkStatus): boolean {
-  return (status ?? getCachedNetworkStatus()).state === 'online';
+  return defaultNetworkMonitor.canRunHeavyTask(status);
 }
 
 export function canRunLightNetworkTask(status?: NetworkStatus): boolean {
-  return (status ?? getCachedNetworkStatus()).state !== 'offline';
+  return defaultNetworkMonitor.canRunLightTask(status);
 }
 
 export function setDeepScanPending(pending: boolean): void {
-  deepScanPending = Boolean(pending);
+  defaultNetworkMonitor.setDeepScanPending(pending);
 }
 
 export function isDeepScanPending(): boolean {
-  return deepScanPending;
-}
-
-export interface NetworkOutcomeOptions {
-  isTimeout?: boolean;
-  durationMs?: number;
-  slowThresholdMs?: number;
+  return defaultNetworkMonitor.isDeepScanPending();
 }
 
 /**
@@ -254,61 +397,14 @@ export function isTransientNetworkError(err: unknown): boolean {
   return /\b(ETIMEDOUT|ESOCKETTIMEDOUT|ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|AbortError)\b|timed out|timeout|socket hang up|truncated|aborted by remote host|stream aborted|fetch failed|connection closed/i.test(info);
 }
 
-/**
- * Passive runtime feedback from portal HTML and dossier downloads.
- * Transitions cached status immediately to 'degraded' if multiple distinct hosts time out or
- * complete slowly inside a short sliding window.
- */
 export function reportNetworkOutcome(
   host: string,
   ok: boolean,
   options: boolean | NetworkOutcomeOptions = false
 ): void {
-  const normHost = (host || '').trim().toLowerCase();
-  if (!normHost || normHost === '127.0.0.1' || normHost === 'localhost' || normHost === '::1') return;
-
-  const opts: NetworkOutcomeOptions = typeof options === 'boolean' ? { isTimeout: options } : (options || {});
-  const isSlow =
-    ok &&
-    typeof opts.durationMs === 'number' &&
-    typeof opts.slowThresholdMs === 'number' &&
-    opts.durationMs >= opts.slowThresholdMs;
-
-  const nowMs = networkMonitorDeps.now();
-  prunePassiveTimeouts(nowMs);
-
-  if (ok && !isSlow) {
-    passiveTimeouts = passiveTimeouts.filter(ev => ev.host !== normHost);
-    return;
-  }
-
-  if ((!ok && opts.isTimeout) || isSlow) {
-    passiveTimeouts.push({ host: normHost, at: nowMs });
-    if (hasMultiHostPassiveTimeouts(nowMs)) {
-      cachedStatus = buildStatus(
-        'degraded',
-        cachedStatus?.latencyMs ?? null,
-        new Date(nowMs).toISOString(),
-        isSlow ? 'Slow network detected (multiple slow portal responses)' : 'Slow network detected (multiple portal timeouts)'
-      );
-      lastCheckedMs = nowMs;
-    }
-  }
+  defaultNetworkMonitor.reportOutcome(host, ok, options);
 }
 
 export function resetNetworkMonitorForTests(): void {
-  cachedStatus = null;
-  lastCheckedMs = null;
-  inFlightProbe = null;
-  deepScanPending = false;
-  passiveTimeouts = [];
-  networkMonitorDeps.probeEndpoint = (url: string, timeoutMs: number) => defaultProbeEndpoint(url, timeoutMs);
-  networkMonitorDeps.now = () => Date.now();
-  networkMonitorDeps.countPendingDocumentJobs = () => {
-    try {
-      return countPendingDocumentJobs();
-    } catch {
-      return 0;
-    }
-  };
+  defaultNetworkMonitor.reset();
 }

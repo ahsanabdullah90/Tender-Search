@@ -1,4 +1,5 @@
 export * from './connection.js';
+export * from './migrations.js';
 export * from './schema.js';
 export * from './repositories/tendersRepo.js';
 export * from './repositories/tenderLifecycleRepo.js';

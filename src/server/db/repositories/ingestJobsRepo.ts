@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import type Database from 'better-sqlite3';
 import { db, safeJsonParse } from '../connection.js';
 import {
   safeDecodeURIComponent,
@@ -64,13 +65,17 @@ export function documentJobPriority(labelOrUrl: string): number {
  * state, is left untouched. The tender must already exist (foreign key). Returns how many new
  * jobs were created.
  */
-export function enqueueDocumentJobs(tenderId: string, jobs: EnqueueJobInput[]): number {
-  const insert = db.prepare(`
+export function enqueueDocumentJobs(
+  tenderId: string,
+  jobs: EnqueueJobInput[],
+  database: Database.Database = db
+): number {
+  const insert = database.prepare(`
     INSERT OR IGNORE INTO document_ingest_jobs (id, tender_id, url, label, priority, max_attempts)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
   let created = 0;
-  const tx = db.transaction(() => {
+  const tx = database.transaction(() => {
     for (const job of jobs) {
       if (!job.url) continue;
       const priority =
@@ -248,8 +253,8 @@ function collectRowDocumentUrls(directUrl?: string | null, attachmentUrlsRaw?: s
  * tenders that have a direct document URL, stored attachment_urls, or a supported dedicated detail
  * page URL, no cached dossiers yet, and doc_fetch_status = 'none'. Returns how many tenders had jobs queued.
  */
-export function backfillExistingTenderDocumentJobs(): number {
-  const rows = db.prepare(`
+export function backfillExistingTenderDocumentJobs(database: Database.Database = db): number {
+  const rows = database.prepare(`
     SELECT id, portal_id, direct_url, attachment_urls FROM tenders
     WHERE pipeline_status = 'New Opportunity'
       AND COALESCE(doc_fetch_status, 'none') = 'none'
@@ -265,9 +270,9 @@ export function backfillExistingTenderDocumentJobs(): number {
         ? [{ url: row.direct_url!, label: DETAIL_DISCOVER_LABEL, priority: JOB_PRIORITY.primary }]
         : [];
     if (jobsToQueue.length === 0) continue;
-    const added = enqueueDocumentJobs(row.id, jobsToQueue);
+    const added = enqueueDocumentJobs(row.id, jobsToQueue, database);
     if (added > 0) {
-      refreshTenderDocFetchStatus(row.id);
+      refreshTenderDocFetchStatus(row.id, database);
       tendersQueued++;
     }
   }
@@ -450,8 +455,8 @@ export interface JobSummary {
   total: number;
 }
 
-export function getJobSummaryForTender(tenderId: string): JobSummary {
-  const rows = db.prepare(`
+export function getJobSummaryForTender(tenderId: string, database: Database.Database = db): JobSummary {
+  const rows = database.prepare(`
     SELECT status, COUNT(*) AS n FROM document_ingest_jobs WHERE tender_id = ? GROUP BY status
   `).all(tenderId) as { status: IngestJobStatus; n: number }[];
   const summary: JobSummary = { pending: 0, processing: 0, done: 0, failed: 0, total: 0 };
@@ -488,8 +493,8 @@ export function deriveDocFetchStatus(summary: JobSummary): DocFetchStatus {
 }
 
 /** Recomputes and stores a tender's doc_fetch_status from its jobs. Returns the new status. */
-export function refreshTenderDocFetchStatus(tenderId: string): DocFetchStatus {
-  const status = deriveDocFetchStatus(getJobSummaryForTender(tenderId));
-  db.prepare('UPDATE tenders SET doc_fetch_status = ? WHERE id = ?').run(status, tenderId);
+export function refreshTenderDocFetchStatus(tenderId: string, database: Database.Database = db): DocFetchStatus {
+  const status = deriveDocFetchStatus(getJobSummaryForTender(tenderId, database));
+  database.prepare('UPDATE tenders SET doc_fetch_status = ? WHERE id = ?').run(status, tenderId);
   return status;
 }

@@ -37,13 +37,14 @@ import {
   sanitizeScrapedItems,
   buildAspNetPostBackBody,
   scrapePortal,
-  crawlerDeps,
-  currentScanStatus,
+  configureCrawlerPorts,
+  resetCrawlerPorts,
+  scanState,
   classifyScraperError,
   runWithConcurrency
 } from '../../src/server/scrapers/crawlerEngine.js';
 import {
-  networkMonitorDeps,
+  defaultNetworkMonitor,
   resetNetworkMonitorForTests,
   isDeepScanPending,
   checkNetworkHealth
@@ -61,30 +62,21 @@ const __dirname = path.dirname(__filename);
 const FIXTURES_DIR = path.resolve(__dirname, '..', 'fixtures', 'portals');
 
 describe('Crawler Engine & Scraper Pipeline', () => {
-  const originalFetch = crawlerDeps.fetchHtml;
-  const originalPostForm = crawlerDeps.postForm;
-  const originalSleep = crawlerDeps.sleep;
-  const originalDownload = crawlerDeps.downloadAndCacheDossier;
-  const originalFetchBuffer = crawlerDeps.fetchFileBuffer;
-
   beforeEach(() => {
     initDatabase();
-    currentScanStatus.isScanning = false;
+    scanState.reset();
+    resetCrawlerPorts();
     db.prepare('DELETE FROM corrigendum_logs').run();
     db.prepare('DELETE FROM pipeline_audit_logs').run();
     db.prepare('DELETE FROM tenders').run();
     db.prepare('DELETE FROM deleted_tenders').run();
 
-    crawlerDeps.sleep = vi.fn().mockResolvedValue(undefined);
+    configureCrawlerPorts({ sleep: vi.fn().mockResolvedValue(undefined) });
   });
 
   afterEach(() => {
-    crawlerDeps.fetchHtml = originalFetch;
-    crawlerDeps.postForm = originalPostForm;
-    crawlerDeps.sleep = originalSleep;
-    crawlerDeps.downloadAndCacheDossier = originalDownload;
-    crawlerDeps.fetchFileBuffer = originalFetchBuffer;
-    currentScanStatus.isScanning = false;
+    resetCrawlerPorts();
+    scanState.reset();
     resetNetworkMonitorForTests();
     vi.restoreAllMocks();
   });
@@ -539,7 +531,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
   describe('startCrawlerScan Orchestration (B2, B5)', () => {
     it('executes scan, saves items, and resets consecutive zero yields on online portal', async () => {
       const punjabHtml = fs.readFileSync(path.join(FIXTURES_DIR, 'punjab_eproc', 'page.html'), 'utf8');
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(punjabHtml);
+      configureCrawlerPorts({ fetchHtml: vi.fn().mockResolvedValue(punjabHtml) });
 
       // Pre-set consecutive zero yields to test reset
       updatePortalHealth('punjab_eproc', {
@@ -559,7 +551,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
     it('increments consecutive zeros and sets error message on empty results (Bug B5)', async () => {
       const emptyHtml = '<html><body><div>No active records available today.</div></body></html>';
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(emptyHtml);
+      configureCrawlerPorts({ fetchHtml: vi.fn().mockResolvedValue(emptyHtml) });
 
       updatePortalHealth('punjab_eproc', { consecutive_zero_yields: 0 });
 
@@ -584,7 +576,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
 
     it('writes last_success_at on any scan completing without network error (HLT-3, HLT-5)', async () => {
       const emptyHtml = '<html><body><div>No active records available today.</div></body></html>';
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(emptyHtml);
+      configureCrawlerPorts({ fetchHtml: vi.fn().mockResolvedValue(emptyHtml) });
 
       updatePortalHealth('punjab_eproc', {
         status: 'online',
@@ -597,7 +589,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     });
 
     it('handles scrape network error and updates portal health to error', async () => {
-      crawlerDeps.fetchHtml = vi.fn().mockRejectedValue(new Error('ETIMEDOUT: Connection dropped by gateway'));
+      configureCrawlerPorts({ fetchHtml: vi.fn().mockRejectedValue(new Error('ETIMEDOUT: Connection dropped by gateway')) });
 
       await startCrawlerScan('punjab_eproc', true);
 
@@ -952,20 +944,21 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         </body></html>
       `;
 
-      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
-        if (url === 'https://bppra.gob.pk/active-tenders/') {
-          throw new Error('HTTP 500 from portal server');
-        }
-        if (url === 'https://bpptwo.vdc.services:5451' || url === 'https://bppra.gob.pk') {
-          return homepageHtml;
-        }
-        if (url === 'https://bpptwo.vdc.services:5451/Tenders') {
-          return bppraTendersTableHtml;
-        }
-        throw new Error(`Unexpected URL: ${url}`);
+      configureCrawlerPorts({
+        fetchHtml: vi.fn().mockImplementation(async (url: string) => {
+          if (url === 'https://bppra.gob.pk/active-tenders/') {
+            throw new Error('HTTP 500 from portal server');
+          }
+          if (url === 'https://bpptwo.vdc.services:5451' || url === 'https://bppra.gob.pk') {
+            return homepageHtml;
+          }
+          if (url === 'https://bpptwo.vdc.services:5451/Tenders') {
+            return bppraTendersTableHtml;
+          }
+          throw new Error(`Unexpected URL: ${url}`);
+        }),
+        downloadAndCacheDossier: vi.fn().mockResolvedValue(null)
       });
-
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockResolvedValue(null);
 
       await startCrawlerScan('bppra', true);
 
@@ -990,7 +983,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         </body></html>
       `;
 
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(customDomHtml);
+      configureCrawlerPorts({ fetchHtml: vi.fn().mockResolvedValue(customDomHtml) });
 
       const spyAiList = vi.spyOn(ocrSvc, 'extractTenderListFromHtmlWithAI').mockResolvedValueOnce([
         {
@@ -1174,7 +1167,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         </body></html>
       `;
 
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(homepageWithUnrelatedPdfs);
+      configureCrawlerPorts({ fetchHtml: vi.fn().mockResolvedValue(homepageWithUnrelatedPdfs) });
 
       const analyzed = await analyzeTenderById('t-generic-url-guard', { forceRefresh: true });
       expect(analyzed).not.toBeNull();
@@ -1229,7 +1222,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     it('never runs healPortalConnection on a 0-item HTTP 200 scan and surfaces manual URL check warning', async () => {
       const emptyPageHtml = '<html><body><div>Welcome to portal</div></body></html>';
       const fetchSpy = vi.fn().mockResolvedValue(emptyPageHtml);
-      crawlerDeps.fetchHtml = fetchSpy;
+      configureCrawlerPorts({ fetchHtml: fetchSpy });
 
       await startCrawlerScan('peef', true);
 
@@ -1372,18 +1365,20 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         is_active: 1
       }];
 
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, _label) => {
-        const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
-        fs.mkdirSync(tenderDir, { recursive: true });
-        fs.writeFileSync(path.resolve(tenderDir, 'Cloud-Procurement.pdf'), 'fake-pdf-content');
-        return {
-          label: 'Cloud Procurement',
-          localPath: `/api/dossiers/${tenderId}/Cloud-Procurement.pdf`,
-          originalUrl: url,
-          mimeType: 'application/pdf',
-          sha256: 'cloud123sha',
-          sizeBytes: 1024
-        };
+      configureCrawlerPorts({
+        downloadAndCacheDossier: vi.fn().mockImplementation(async (tenderId, url, _label) => {
+          const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+          fs.mkdirSync(tenderDir, { recursive: true });
+          fs.writeFileSync(path.resolve(tenderDir, 'Cloud-Procurement.pdf'), 'fake-pdf-content');
+          return {
+            label: 'Cloud Procurement',
+            localPath: `/api/dossiers/${tenderId}/Cloud-Procurement.pdf`,
+            originalUrl: url,
+            mimeType: 'application/pdf',
+            sha256: 'cloud123sha',
+            sizeBytes: 1024
+          };
+        })
       });
 
       const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
@@ -1430,18 +1425,20 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         is_active: 1
       }];
 
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId, url, _label) => {
-        const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
-        fs.mkdirSync(tenderDir, { recursive: true });
-        fs.writeFileSync(path.resolve(tenderDir, 'RFP-for-Purchase-of-Stationery.pdf'), 'fake-pdf-content');
-        return {
-          label: 'Stationery RFP',
-          localPath: `/api/dossiers/${tenderId}/RFP-for-Purchase-of-Stationery.pdf`,
-          originalUrl: url,
-          mimeType: 'application/pdf',
-          sha256: 'stationerysha',
-          sizeBytes: 2048
-        };
+      configureCrawlerPorts({
+        downloadAndCacheDossier: vi.fn().mockImplementation(async (tenderId, url, _label) => {
+          const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+          fs.mkdirSync(tenderDir, { recursive: true });
+          fs.writeFileSync(path.resolve(tenderDir, 'RFP-for-Purchase-of-Stationery.pdf'), 'fake-pdf-content');
+          return {
+            label: 'Stationery RFP',
+            localPath: `/api/dossiers/${tenderId}/RFP-for-Purchase-of-Stationery.pdf`,
+            originalUrl: url,
+            mimeType: 'application/pdf',
+            sha256: 'stationerysha',
+            sizeBytes: 2048
+          };
+        })
       });
 
       // Extracted deadline is Oct 22, 2026 (past deadline relative to simulated/current Nov 10, 2026)
@@ -1478,7 +1475,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         VALUES (?, ?, 'Tender Under Fetch Review', 'Org', 'fde', 'Federal Directorate of Education', 'https://fde.gov.pk/download/rfp-science.pdf', 'New Opportunity', NULL)
       `).run(testId, testId);
 
-      crawlerDeps.fetchFileBuffer = vi.fn().mockResolvedValue(Buffer.from('dummy-pdf-content'));
+      configureCrawlerPorts({ fetchFileBuffer: vi.fn().mockResolvedValue(Buffer.from('dummy-pdf-content')) });
 
       const spyOcr = vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
         referenceNo: 'FDE-LAB-2025',
@@ -1565,18 +1562,20 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       title: null
     } as any);
     const mockDownloadWritingPdf = () => {
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId: string, url: string) => {
-        const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
-        fs.mkdirSync(tenderDir, { recursive: true });
-        fs.writeFileSync(path.resolve(tenderDir, 'notice.pdf'), 'fake-pdf');
-        return {
-          label: 'Notice',
-          localPath: `/api/dossiers/${tenderId}/notice.pdf`,
-          originalUrl: url,
-          mimeType: 'application/pdf',
-          sha256: `sha-${tenderId}`,
-          sizeBytes: 8
-        };
+      configureCrawlerPorts({
+        downloadAndCacheDossier: vi.fn().mockImplementation(async (tenderId: string, url: string) => {
+          const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
+          fs.mkdirSync(tenderDir, { recursive: true });
+          fs.writeFileSync(path.resolve(tenderDir, 'notice.pdf'), 'fake-pdf');
+          return {
+            label: 'Notice',
+            localPath: `/api/dossiers/${tenderId}/notice.pdf`,
+            originalUrl: url,
+            mimeType: 'application/pdf',
+            sha256: `sha-${tenderId}`,
+            sizeBytes: 8
+          };
+        })
       });
     };
     const insertTender = (id: string, extra: { closing_date?: string | null; status?: string; bookmarked?: number; directUrl?: string; dossiers?: any[] } = {}) => {
@@ -1761,7 +1760,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     it('fetch-documents does not expire a tender with a future deadline because an attachment is older', async () => {
       const future = new Date(Date.now() + 12 * DAY).toISOString();
       insertTender('tender-audit-fetch-1', { closing_date: future });
-      crawlerDeps.fetchFileBuffer = vi.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake'));
+      configureCrawlerPorts({ fetchFileBuffer: vi.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake')) });
       vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce(
         ocrResult(new Date(Date.now() - 30 * DAY).toISOString())
       );
@@ -1794,10 +1793,14 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       // Suppose an extra pending job was also queued
       enqueueDocumentJobs(saved.id, [{ url: bidDocUrl }]);
 
-      const fetchBufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockImplementation(async (url: string) =>
+      const fetchBufSpy = vi.fn().mockImplementation(async (url: string) =>
         Buffer.from(`%PDF-1.4 content for ${url}`)
       );
-      const fetchHtmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml').mockResolvedValue('<html><body></body></html>');
+      const fetchHtmlSpy = vi.fn().mockResolvedValue('<html><body></body></html>');
+      const restoreFetchPorts = configureCrawlerPorts({
+        fetchFileBuffer: fetchBufSpy,
+        fetchHtml: fetchHtmlSpy
+      });
       try {
         const firstRes = await fetchDocumentsForTender(saved.id, { forceRefresh: false });
         expect(firstRes.newlyFetched).toBe(2);
@@ -1815,8 +1818,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         expect(secondRes.dossiers).toHaveLength(2);
         expect(fetchBufSpy).not.toHaveBeenCalled();
       } finally {
-        fetchBufSpy.mockRestore();
-        fetchHtmlSpy.mockRestore();
+        restoreFetchPorts();
       }
     });
 
@@ -1973,9 +1975,11 @@ describe('Crawler Engine & Scraper Pipeline', () => {
         </html>
       `;
 
-      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
-        if (url.includes('it-rfp')) return detailHtml;
-        return listingHtml;
+      configureCrawlerPorts({
+        fetchHtml: vi.fn().mockImplementation(async (url: string) => {
+          if (url.includes('it-rfp')) return detailHtml;
+          return listingHtml;
+        })
       });
 
       const res = await scrapePortal(fdeDef);
@@ -1988,9 +1992,6 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     });
 
     it('F1: pagination loops pages with jitter, stops on empty page, and records pages_scanned in portal_health', async () => {
-      const origSleep = crawlerDeps.sleep;
-      crawlerDeps.sleep = vi.fn().mockResolvedValue(undefined);
-
       const punjabDef = {
         ...PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!,
         pagination: {
@@ -2021,15 +2022,18 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       `;
 
       let fetchedUrls: string[] = [];
-      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
-        fetchedUrls.push(url);
-        if (url.includes('page=2')) return page2Html;
-        if (url.includes('page=3')) return page3Html;
-        return page1Html;
+      const restorePagePorts = configureCrawlerPorts({
+        sleep: vi.fn().mockResolvedValue(undefined),
+        fetchHtml: vi.fn().mockImplementation(async (url: string) => {
+          fetchedUrls.push(url);
+          if (url.includes('page=2')) return page2Html;
+          if (url.includes('page=3')) return page3Html;
+          return page1Html;
+        })
       });
 
       const res = await scrapePortal(punjabDef);
-      crawlerDeps.sleep = origSleep;
+      restorePagePorts();
       expect(res.items).toHaveLength(4);
       // Fetched page 1, page 2, and stopped at page 3 (empty page)
       expect(fetchedUrls.length).toBe(3);
@@ -2133,13 +2137,16 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(postBody).toContain('__VIEWSTATE=VS_PAGE_1');
 
       // Full scrapePortal postback pagination check
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(page1Html);
-      crawlerDeps.postForm = vi.fn().mockResolvedValue({ html: page2Html, finalUrl: punjabDef.tendersUrl, cookies: 'ASP.NET_SessionId=abc' });
+      const postFormMock = vi.fn().mockResolvedValue({ html: page2Html, finalUrl: punjabDef.tendersUrl, cookies: 'ASP.NET_SessionId=abc' });
+      configureCrawlerPorts({
+        fetchHtml: vi.fn().mockResolvedValue(page1Html),
+        postForm: postFormMock
+      });
 
       const scraped = await scrapePortal(punjabDef);
       expect(scraped.items).toHaveLength(3);
       expect(scraped.pagesScanned).toBe(2);
-      expect(crawlerDeps.postForm).toHaveBeenCalledTimes(1);
+      expect(postFormMock).toHaveBeenCalledTimes(1);
     });
 
     it('hardens Punjab eProc RadGrid parsing: Addendum flags, Auction/Disposal skipping, city locations, and generic title disambiguation', () => {
@@ -2298,12 +2305,14 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       `).run();
 
       const fetched: string[] = [];
-      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
-        fetched.push(url);
-        if (url.includes('page=2')) return makePage([3, 4]);
-        if (url.includes('page=3')) return makePage([5, 6]);
-        if (url.includes('page=4')) return makePage([7, 8]);
-        return makePage([1, 2]);
+      configureCrawlerPorts({
+        fetchHtml: vi.fn().mockImplementation(async (url: string) => {
+          fetched.push(url);
+          if (url.includes('page=2')) return makePage([3, 4]);
+          if (url.includes('page=3')) return makePage([5, 6]);
+          if (url.includes('page=4')) return makePage([7, 8]);
+          return makePage([1, 2]);
+        })
       });
 
       // Quick scan stops at page=2 because page 2 has 100% known unchanged items (does NOT fetch page 3)
@@ -2342,16 +2351,18 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       // Keep only 2 HTTP portals enabled for a fast deterministic concurrent scan
       db.prepare(`UPDATE portal_health SET access_mode = 'offline_broken' WHERE portal_id NOT IN ('punjab_eproc', 'epms_ppra')`).run();
 
-      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
-        if (url.includes('epms.ppra.gov.pk')) {
-          throw new Error('Request timed out after 15000ms (ETIMEDOUT)');
-        }
-        return `
-          <table>
-            <tr><th>Title</th><th>Closing</th></tr>
-            <tr><td><a href="https://eproc.punjab.gov.pk/ok/1">Government School Solar Systems</a></td><td>20-12-2026</td></tr>
-          </table>
-        `;
+      configureCrawlerPorts({
+        fetchHtml: vi.fn().mockImplementation(async (url: string) => {
+          if (url.includes('epms.ppra.gov.pk')) {
+            throw new Error('Request timed out after 15000ms (ETIMEDOUT)');
+          }
+          return `
+            <table>
+              <tr><th>Title</th><th>Closing</th></tr>
+              <tr><td><a href="https://eproc.punjab.gov.pk/ok/1">Government School Solar Systems</a></td><td>20-12-2026</td></tr>
+            </table>
+          `;
+        })
       });
 
       const status = await startCrawlerScan(undefined, true);
@@ -2374,9 +2385,11 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       db.prepare(`DELETE FROM app_settings WHERE key IN ('last_full_scan_at', 'last_deep_scan_at')`).run();
 
       // 1. Offline: aborts immediately without scanning portals or touching portal_health
-      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' });
+      defaultNetworkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' })
+      });
       const fetchSpy = vi.fn();
-      crawlerDeps.fetchHtml = fetchSpy;
+      configureCrawlerPorts({ fetchHtml: fetchSpy });
 
       const offlineStatus = await startCrawlerScan(undefined, true, { depth: 'deep' });
       expect(offlineStatus.isScanning).toBe(false);
@@ -2385,27 +2398,35 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
 
       // 2. Degraded: holds full deep scan, allows quick scan and single-portal scan with extended timeout
-      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 2200 });
+      defaultNetworkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 2200 })
+      });
       await checkNetworkHealth({ force: true });
       const heldDeep = await startCrawlerScan(undefined, true, { depth: 'deep' });
       expect(heldDeep.isScanning).toBe(false);
       expect(heldDeep.pausedReason).toContain('deep scan held');
       expect(isDeepScanPending()).toBe(true);
 
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(`
-        <table>
-          <tr><th>Title</th><th>Closing</th></tr>
-          <tr><td><a href="https://eproc.punjab.gov.pk/ok/degraded">Solar Inverter Installation</a></td><td>20-12-2026</td></tr>
-        </table>
-      `);
+      configureCrawlerPorts({
+        fetchHtml: vi.fn().mockResolvedValue(`
+          <table>
+            <tr><th>Title</th><th>Closing</th></tr>
+            <tr><td><a href="https://eproc.punjab.gov.pk/ok/degraded">Solar Inverter Installation</a></td><td>20-12-2026</td></tr>
+          </table>
+        `)
+      });
       const quickDegraded = await startCrawlerScan('punjab_eproc', true, { depth: 'quick' });
       expect(quickDegraded.isScanning).toBe(false);
       expect(quickDegraded.completedPortals).toBe(1);
 
       // 3. Online but all active portals fail with TIMEOUT: refuses to stamp last_full_scan_at
-      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 30 });
+      defaultNetworkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 30 })
+      });
       await checkNetworkHealth({ force: true });
-      crawlerDeps.fetchHtml = vi.fn().mockRejectedValue(new Error('Request timed out (ETIMEDOUT)'));
+      configureCrawlerPorts({
+        fetchHtml: vi.fn().mockRejectedValue(new Error('Request timed out (ETIMEDOUT)'))
+      });
       const allTimeoutStatus = await startCrawlerScan(undefined, true, { depth: 'quick' });
       expect(allTimeoutStatus.pausedReason).toContain('All portals timed out');
       const fullScanRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'last_full_scan_at'`).get();
@@ -2415,10 +2436,11 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     it('Workstream E: runs Phase 1 statutory portals completely before Phase 2 agencies and prevents cross-portal duplicates on undated agency listings', async () => {
       db.prepare(`UPDATE portal_health SET access_mode = 'public', status = 'online' WHERE portal_id IN ('punjab_eproc', 'psdf')`).run();
       db.prepare(`UPDATE portal_health SET access_mode = 'offline_broken' WHERE portal_id NOT IN ('punjab_eproc', 'psdf')`).run();
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockResolvedValue(null);
 
       const events: string[] = [];
-      crawlerDeps.fetchHtml = vi.fn().mockImplementation(async (url: string) => {
+      configureCrawlerPorts({
+        downloadAndCacheDossier: vi.fn().mockResolvedValue(null),
+        fetchHtml: vi.fn().mockImplementation(async (url: string) => {
         if (url.includes('eproc.punjab.gov.pk')) {
           events.push('start:punjab_eproc');
           await new Promise(resolve => setTimeout(resolve, 25));
@@ -2451,7 +2473,8 @@ describe('Crawler Engine & Scraper Pipeline', () => {
             </div>
           `;
         }
-        return '<html><body></body></html>';
+          return '<html><body></body></html>';
+        })
       });
 
       const status = await startCrawlerScan(undefined, true, { depth: 'quick' });

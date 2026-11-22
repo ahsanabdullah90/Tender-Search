@@ -4,40 +4,45 @@ import { updateDigestSettings } from '../../src/server/db/repositories/systemRep
 import {
   initStartupScheduler,
   stopStartupScheduler,
-  schedulerDeps,
+  configureSchedulerPorts,
+  resetSchedulerPorts,
+  getSchedulerPorts,
   maybeDispatchDailyDigest,
   getPktDateKey,
   recheckEarlierDeadlineReviewTenders
 } from '../../src/server/runtime/scheduler.js';
 import {
-  networkMonitorDeps,
+  defaultNetworkMonitor,
   resetNetworkMonitorForTests,
   setDeepScanPending,
   isDeepScanPending,
   checkNetworkHealth
 } from '../../src/server/services/networkMonitor.js';
+import { scanState } from '../../src/server/scrapers/crawlerEngine.js';
 
 describe('scheduler and startup watchdog', () => {
-  let originalScan: any;
-  let originalBackup: any;
-  let originalReclassify: any;
+  let scanMock: any;
+  let backupMock: any;
+  let reclassifyMock: any;
 
   beforeEach(() => {
     initDatabase();
-    originalScan = schedulerDeps.startCrawlerScan;
-    originalBackup = schedulerDeps.backupDatabase;
-    originalReclassify = schedulerDeps.reclassifyExistingDossiersFromText;
-    schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({ isScanning: false });
-    schedulerDeps.backupDatabase = vi.fn().mockResolvedValue({ success: true, skipped: true });
-    schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
+    scanMock = vi.fn().mockResolvedValue({ isScanning: false });
+    backupMock = vi.fn().mockResolvedValue({ success: true, skipped: true });
+    reclassifyMock = vi.fn().mockResolvedValue({ filesReclassified: 0 });
+    configureSchedulerPorts({
+      startCrawlerScan: scanMock,
+      backupDatabase: backupMock,
+      reclassifyExistingDossiersFromText: reclassifyMock
+    });
   });
 
   afterEach(() => {
     stopStartupScheduler();
-    schedulerDeps.startCrawlerScan = originalScan;
-    schedulerDeps.backupDatabase = originalBackup;
-    schedulerDeps.reclassifyExistingDossiersFromText = originalReclassify;
+    resetSchedulerPorts();
+    scanState.reset();
     resetNetworkMonitorForTests();
+    vi.restoreAllMocks();
   });
 
   it('resets stuck scanning portals to error on startup (Bug B3)', () => {
@@ -73,7 +78,7 @@ describe('scheduler and startup watchdog', () => {
     });
 
     initStartupScheduler();
-    expect(schedulerDeps.startCrawlerScan).toHaveBeenCalled();
+    expect(scanMock).toHaveBeenCalled();
   });
 
   it('does not trigger catch-up scan when last scan was recent (< 12 hours)', () => {
@@ -86,7 +91,7 @@ describe('scheduler and startup watchdog', () => {
     initStartupScheduler();
     // The only call could be from problem portals in daily health advisement, but not from catch-up
     // Let's verify startCrawlerScan was called with portalId for health advisement, not without arguments
-    const noArgCalls = (schedulerDeps.startCrawlerScan as any).mock.calls.filter((c: any[]) => c.length === 0);
+    const noArgCalls = scanMock.mock.calls.filter((c: any[]) => c.length === 0);
     expect(noArgCalls.length).toBe(0);
   });
 
@@ -100,7 +105,9 @@ describe('scheduler and startup watchdog', () => {
 
   it('runs daily portal health advisement and handles portal unreachable error', async () => {
     updatePortalHealth('kppra', { access_mode: 'offline_broken' });
-    schedulerDeps.startCrawlerScan = vi.fn().mockRejectedValue(new Error('Domain lookup timed out'));
+    configureSchedulerPorts({
+      startCrawlerScan: vi.fn().mockRejectedValue(new Error('Domain lookup timed out'))
+    });
 
     initStartupScheduler();
     // Wait microtask for async runDailyPortalHealthAdvisement
@@ -117,7 +124,7 @@ describe('scheduler and startup watchdog', () => {
 
       // Advance by 30 mins (one interval tick)
       vi.advanceTimersByTime(30 * 60 * 1000);
-      expect(schedulerDeps.backupDatabase).toHaveBeenCalled();
+      expect(backupMock).toHaveBeenCalled();
 
       // Advance by 25 hours
       vi.advanceTimersByTime(25 * 60 * 60 * 1000);
@@ -127,15 +134,19 @@ describe('scheduler and startup watchdog', () => {
   });
 
   it('catches backup errors during startup', async () => {
-    schedulerDeps.backupDatabase = vi.fn().mockRejectedValue(new Error('Backup failed'));
+    configureSchedulerPorts({
+      backupDatabase: vi.fn().mockRejectedValue(new Error('Backup failed'))
+    });
     expect(() => initStartupScheduler()).not.toThrow();
   });
 
-  it('invokes default schedulerDeps delegate methods', async () => {
-    expect(typeof originalScan).toBe('function');
-    expect(typeof originalBackup).toBe('function');
-    // Call default wrappers
-    const res = await originalBackup();
+  it('invokes default scheduler port delegate methods', async () => {
+    resetSchedulerPorts();
+    const defaultPorts = getSchedulerPorts();
+    expect(typeof defaultPorts.startCrawlerScan).toBe('function');
+    expect(typeof defaultPorts.backupDatabase).toBe('function');
+    // Call default wrapper
+    const res = await defaultPorts.backupDatabase();
     expect(res).toBeDefined();
   });
 
@@ -175,28 +186,30 @@ describe('scheduler and startup watchdog', () => {
       setAppSetting('last_full_scan_at', fifteenHoursAgo);
 
       initStartupScheduler();
-      expect(schedulerDeps.startCrawlerScan).toHaveBeenCalled();
+      expect(scanMock).toHaveBeenCalled();
 
       // Now set last_full_scan_at to 2 hours ago
       stopStartupScheduler();
-      (schedulerDeps.startCrawlerScan as any).mockClear();
+      scanMock.mockClear();
       setAppSetting('last_full_scan_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
 
       initStartupScheduler();
-      const noArgCalls = (schedulerDeps.startCrawlerScan as any).mock.calls.filter((c: any[]) => c.length === 0);
+      const noArgCalls = scanMock.mock.calls.filter((c: any[]) => c.length === 0);
       expect(noArgCalls.length).toBe(0);
     });
 
     it('B7: daily health check runs after catch-up scan promise resolves', async () => {
       let scanResolved = false;
 
-      schedulerDeps.startCrawlerScan = vi.fn().mockImplementation(() => {
-        return new Promise<any>(resolve => {
-          setTimeout(() => {
-            scanResolved = true;
-            resolve({ isScanning: false });
-          }, 30);
-        });
+      configureSchedulerPorts({
+        startCrawlerScan: vi.fn().mockImplementation(() => {
+          return new Promise<any>(resolve => {
+            setTimeout(() => {
+              scanResolved = true;
+              resolve({ isScanning: false });
+            }, 30);
+          });
+        })
       });
 
       // Set last full scan to 15 hours ago to trigger catch-up
@@ -215,9 +228,8 @@ describe('scheduler and startup watchdog', () => {
 
   describe('Plans B & C: Daily Digest Deduplication & Two-Speed Catch-Up Depth', () => {
     it('dispatches daily digest webhook at most once per PKT calendar day when urgent alerts exist', async () => {
-      const origSend = schedulerDeps.sendDigestWebhook;
       const sendMock = vi.fn().mockResolvedValue(undefined);
-      schedulerDeps.sendDigestWebhook = sendMock;
+      const restoreSend = configureSchedulerPorts({ sendDigestWebhook: sendMock });
 
       try {
         const soon = new Date(Date.now() + 8 * 3600000).toISOString();
@@ -239,7 +251,7 @@ describe('scheduler and startup watchdog', () => {
         expect(sendMock).toHaveBeenCalledTimes(1);
         expect(getPktDateKey(nowMs)).toBe('2026-11-14');
       } finally {
-        schedulerDeps.sendDigestWebhook = origSend;
+        restoreSend();
       }
     });
 
@@ -248,57 +260,63 @@ describe('scheduler and startup watchdog', () => {
       setAppSetting('last_deep_scan_at', null);
 
       initStartupScheduler();
-      expect(schedulerDeps.startCrawlerScan).toHaveBeenCalledWith(undefined, false, { depth: 'deep' });
+      expect(scanMock).toHaveBeenCalledWith(undefined, false, { depth: 'deep' });
     });
 
     it('Refinement #4b: 2-minute worker interval auto-resumes deferred deep scan on network recovery and skips digest when offline', async () => {
       vi.useFakeTimers();
       try {
         setAppSetting('last_full_scan_at', new Date().toISOString());
-        networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 30 });
+        defaultNetworkMonitor.configurePorts({
+          probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 30 })
+        });
         setDeepScanPending(true);
 
         initStartupScheduler();
-        (schedulerDeps.startCrawlerScan as any).mockClear();
+        scanMock.mockClear();
 
         await vi.advanceTimersByTimeAsync(2 * 60 * 1000 + 50);
-        expect(schedulerDeps.startCrawlerScan).toHaveBeenCalledWith(undefined, false, { depth: 'deep' });
+        expect(scanMock).toHaveBeenCalledWith(undefined, false, { depth: 'deep' });
         expect(isDeepScanPending()).toBe(false);
       } finally {
         vi.useRealTimers();
       }
 
-      const origSend = schedulerDeps.sendDigestWebhook;
-      schedulerDeps.sendDigestWebhook = vi.fn().mockResolvedValue(undefined);
+      const sendMock = vi.fn().mockResolvedValue(undefined);
+      const restoreSend = configureSchedulerPorts({ sendDigestWebhook: sendMock });
       try {
-        networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' });
+        defaultNetworkMonitor.configurePorts({
+          probeEndpoint: vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' })
+        });
         await checkNetworkHealth({ force: true });
         updateDigestSettings({ enabled: true, webhookUrl: 'https://hooks.example.test/pkt', withinHours: 48 });
         const res = await maybeDispatchDailyDigest();
         expect(res).toEqual({ sent: false, reason: 'offline' });
-        expect(schedulerDeps.sendDigestWebhook).not.toHaveBeenCalled();
+        expect(sendMock).not.toHaveBeenCalled();
       } finally {
-        schedulerDeps.sendDigestWebhook = origSend;
+        restoreSend();
       }
     });
 
-    it('wires crawlerDeps.onScanFinished to schedulerDeps.drainDocumentQueue and cleans up on stopStartupScheduler', async () => {
-      const { crawlerDeps } = await import('../../src/server/scrapers/crawlerEngine.js');
-      const origDrain = schedulerDeps.drainDocumentQueue;
+    it('subscribes to scanState.onScanFinished when started and cleanly unsubscribes on stopStartupScheduler', async () => {
       const drainMock = vi.fn().mockResolvedValue({ claimed: 0, completed: 0, failed: 0, deferred: 0, expired: 0 });
-      schedulerDeps.drainDocumentQueue = drainMock;
+      const onScanFinishedSpy = vi.spyOn(scanState, 'onScanFinished');
 
       try {
         setAppSetting('last_full_scan_at', new Date().toISOString());
-        initStartupScheduler();
-        expect(typeof crawlerDeps.onScanFinished).toBe('function');
-        crawlerDeps.onScanFinished?.();
+        initStartupScheduler({ drainDocumentQueue: drainMock });
+        expect(onScanFinishedSpy).toHaveBeenCalledTimes(1);
+
+        scanState.beginScan({ depth: 'quick', totalPortals: 0 });
+        scanState.finishScan({ documentsDeferred: 0, visionDeferred: 0, timestamp: new Date().toISOString() });
         expect(drainMock).toHaveBeenCalledTimes(1);
 
         stopStartupScheduler();
-        expect(crawlerDeps.onScanFinished).toBeNull();
+        scanState.beginScan({ depth: 'quick', totalPortals: 0 });
+        scanState.finishScan({ documentsDeferred: 0, visionDeferred: 0, timestamp: new Date().toISOString() });
+        expect(drainMock).toHaveBeenCalledTimes(1);
       } finally {
-        schedulerDeps.drainDocumentQueue = origDrain;
+        onScanFinishedSpy.mockRestore();
       }
     });
 

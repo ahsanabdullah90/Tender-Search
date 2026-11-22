@@ -17,7 +17,7 @@ import {
 import { deriveDossierLabel } from '../../src/server/services/dossierManager.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { db, initDatabase, getAllTenders, setAppSetting } from '../../src/server/db/index.js';
-import { processAndSaveTender, fetchDocumentsForTender, crawlerDeps } from '../../src/server/scrapers/crawlerEngine.js';
+import { processAndSaveTender, fetchDocumentsForTender, configureCrawlerPorts, getCrawlerPorts } from '../../src/server/scrapers/crawlerEngine.js';
 
 describe('Sindh SPPRA EPADS API module', () => {
   const originalFetch = global.fetch;
@@ -194,13 +194,16 @@ describe('Sindh SPPRA EPADS API module', () => {
     const nitUrl = buildSppraDownloadUrl(768090, 'guid-nit', 'Tender Notice');
     const sbdUrl = buildSppraDownloadUrl(8970327, 'guid-sbd', 'Standard Bidding Document');
 
-    const origDownload = crawlerDeps.downloadAndCacheDossier;
-    crawlerDeps.downloadAndCacheDossier = vi.fn().mockResolvedValue(null);
-    const fetchHtmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml');
-    const fetchBufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockImplementation(async (u: string) => {
+    const fetchHtmlSpy = vi.fn(getCrawlerPorts().fetchHtml);
+    const fetchBufSpy = vi.fn().mockImplementation(async (u: string) => {
       const b = Buffer.from(`%PDF-1.4 synthetic SPPRA PDF for ${u}`);
       (b as any).contentType = 'application/pdf';
       return b;
+    });
+    const restoreCrawlerPorts = configureCrawlerPorts({
+      downloadAndCacheDossier: vi.fn().mockResolvedValue(null),
+      fetchHtml: fetchHtmlSpy,
+      fetchFileBuffer: fetchBufSpy
     });
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -248,9 +251,7 @@ describe('Sindh SPPRA EPADS API module', () => {
       expect(res.newlyFetched).toBe(2);
       expect(res.dossiers.map(d => d.originalUrl)).toEqual([nitUrl, sbdUrl]);
     } finally {
-      crawlerDeps.downloadAndCacheDossier = origDownload;
-      fetchHtmlSpy.mockRestore();
-      fetchBufSpy.mockRestore();
+      restoreCrawlerPorts();
     }
   });
 

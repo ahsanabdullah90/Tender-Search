@@ -19,14 +19,15 @@ import {
 } from '../../src/server/db/index.js';
 import {
   processAndSaveTender,
-  crawlerDeps,
-  currentScanStatus,
+  configureCrawlerPorts,
+  resetCrawlerPorts,
+  scanState,
   orderDocumentCandidates,
   addProgressListener,
   removeProgressListener
 } from '../../src/server/scrapers/crawlerEngine.js';
 import { processDocumentQueue, drainDocumentQueue } from '../../src/server/runtime/ingestWorker.js';
-import { networkMonitorDeps, resetNetworkMonitorForTests, checkNetworkHealth } from '../../src/server/services/networkMonitor.js';
+import { defaultNetworkMonitor, resetNetworkMonitorForTests, checkNetworkHealth } from '../../src/server/services/networkMonitor.js';
 import { beginScanBudget, endScanBudget } from '../../src/server/services/ingestBudget.js';
 import { findSubmissionDeadlines } from '../../src/server/services/documentExtractor.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
@@ -49,34 +50,35 @@ const tracks = [
 
 /** Mock downloader: serves a buffer per URL (or fails), writing it into the tender's dossier folder. */
 function serveDocuments(files: Record<string, Buffer | Error>) {
-  crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId: string, url: string, label?: string) => {
-    const body = files[url];
-    if (!body) return null;
-    if (body instanceof Error) throw body;
-    const name = path.basename(new URL(url).pathname);
-    const dir = path.resolve(DOSSIERS_DIR, tenderId);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.resolve(dir, name), body);
-    const mimeType = /\.jpe?g$/i.test(name) ? 'image/jpeg' : 'application/pdf';
-    return { label: label || name, localPath: `/api/dossiers/${tenderId}/${name}`, originalUrl: url, mimeType, sha256: `sha-${name}`, sizeBytes: body.length };
+  configureCrawlerPorts({
+    downloadAndCacheDossier: vi.fn().mockImplementation(async (tenderId: string, url: string, label?: string) => {
+      const body = files[url];
+      if (!body) return null;
+      if (body instanceof Error) throw body;
+      const name = path.basename(new URL(url).pathname);
+      const dir = path.resolve(DOSSIERS_DIR, tenderId);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.resolve(dir, name), body);
+      const mimeType = /\.jpe?g$/i.test(name) ? 'image/jpeg' : 'application/pdf';
+      return { label: label || name, localPath: `/api/dossiers/${tenderId}/${name}`, originalUrl: url, mimeType, sha256: `sha-${name}`, sizeBytes: body.length };
+    })
   });
 }
 
 describe('Phase 3: ingest flow, scan budget and background document worker', () => {
-  const originalDownload = crawlerDeps.downloadAndCacheDossier;
-
   beforeEach(() => {
     initDatabase();
     for (const t of ['document_ingest_jobs', 'corrigendum_logs', 'pipeline_audit_logs', 'tenders', 'deleted_tenders']) db.prepare(`DELETE FROM ${t}`).run();
     db.prepare(`DELETE FROM app_settings WHERE key LIKE 'ingest_%'`).run();
     setAppSetting('gemini_api_key', '');
-    currentScanStatus.isScanning = false;
+    scanState.reset();
+    resetCrawlerPorts();
   });
 
   afterEach(() => {
-    crawlerDeps.downloadAndCacheDossier = originalDownload;
+    resetCrawlerPorts();
     endScanBudget();
-    currentScanStatus.isScanning = false;
+    scanState.reset();
     resetNetworkMonitorForTests();
     vi.restoreAllMocks();
   });
@@ -186,7 +188,7 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       const budget = beginScanBudget();
       const url = 'https://x.pk/uploads/2026/11/Notice-Laptops.pdf';
       const download = vi.fn();
-      crawlerDeps.downloadAndCacheDossier = download;
+      configureCrawlerPorts({ downloadAndCacheDossier: download });
       await processAndSaveTender({ title: 'Supply of Laptops', organization: 'PSEB', directUrl: url }, portal(), tracks);
       expect(download).not.toHaveBeenCalled();
       expect(budget.documentsDeferred).toBe(1);
@@ -268,7 +270,7 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
     });
 
     it('skips while a scan is running', async () => {
-      currentScanStatus.isScanning = true;
+      scanState.setScanningForTest(true);
       expect((await processDocumentQueue(5)).skipped).toBe('scan_running');
     });
 
@@ -314,7 +316,7 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       db.prepare(`UPDATE document_ingest_jobs SET status = 'failed', attempts = 3 WHERE tender_id = ?`).run(id);
       db.prepare(`UPDATE tenders SET doc_fetch_status = 'failed' WHERE id = ?`).run(id);
 
-      currentScanStatus.isScanning = true; // keep the kicked worker from running during the assertion
+      scanState.setScanningForTest(true); // keep the kicked worker from running during the assertion
       const res = await request(app).post(`/api/tenders/${id}/retry-documents`);
       expect(res.status).toBe(200);
       expect(res.body.requeued).toBe(1);
@@ -398,23 +400,25 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
     it('P2-4: stages tender during upfront fetch and deletes staging row when B6 rejects', async () => {
       const url = 'https://x.pk/uploads/2026/10/expired-staging.pdf';
       let observedStatusDuringFetch: string | undefined;
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId: string) => {
-        const row = db.prepare('SELECT ingestion_status FROM tenders WHERE id = ?').get(tenderId) as { ingestion_status: string } | undefined;
-        observedStatusDuringFetch = row?.ingestion_status;
-        // Also verify Inbox getAllTenders() hides the staging row while fetch is in flight
-        expect(getAllTenders()).toHaveLength(0);
-        const dir = path.resolve(DOSSIERS_DIR, tenderId);
-        fs.mkdirSync(dir, { recursive: true });
-        const buf = noticePdf(-5);
-        fs.writeFileSync(path.join(dir, 'expired.pdf'), buf);
-        return {
-          label: 'Notice',
-          localPath: `/api/dossiers/${tenderId}/expired.pdf`,
-          originalUrl: url,
-          mimeType: 'application/pdf',
-          sha256: 'abc',
-          sizeBytes: buf.length
-        };
+      configureCrawlerPorts({
+        downloadAndCacheDossier: vi.fn().mockImplementation(async (tenderId: string) => {
+          const row = db.prepare('SELECT ingestion_status FROM tenders WHERE id = ?').get(tenderId) as { ingestion_status: string } | undefined;
+          observedStatusDuringFetch = row?.ingestion_status;
+          // Also verify Inbox getAllTenders() hides the staging row while fetch is in flight
+          expect(getAllTenders()).toHaveLength(0);
+          const dir = path.resolve(DOSSIERS_DIR, tenderId);
+          fs.mkdirSync(dir, { recursive: true });
+          const buf = noticePdf(-5);
+          fs.writeFileSync(path.join(dir, 'expired.pdf'), buf);
+          return {
+            label: 'Notice',
+            localPath: `/api/dossiers/${tenderId}/expired.pdf`,
+            originalUrl: url,
+            mimeType: 'application/pdf',
+            sha256: 'abc',
+            sizeBytes: buf.length
+          };
+        })
       });
 
       const res = await processAndSaveTender(
@@ -698,7 +702,9 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
 
     it('holds processDocumentQueue when degraded/offline, refunds attempts on transient errors, and defers upfront PDFs on degraded scans', async () => {
       // 1. Degraded network pauses background queue without claiming jobs or burning attempts
-      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 2100 });
+      defaultNetworkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 2100 })
+      });
       await processAndSaveTender({
         title: 'Solar Microgrid Equipment Procurement',
         organization: 'Energy Dept',
@@ -723,16 +729,20 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(getJobsForTender(deferredTender!.id)).toHaveLength(1);
 
       // 3. When online again, transient download error calls deferJob (attempts refunded to 0), whereas HTTP 404 calls failJob
-      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 40 });
+      defaultNetworkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 40 })
+      });
       await checkNetworkHealth({ force: true });
       const transientUrl = 'https://x.pk/uploads/solar-rfp.pdf';
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (_tid: string, url: string, _lbl?: string, opts?: any) => {
-        if (url === transientUrl) {
-          opts?.onError?.(new Error('connect ETIMEDOUT 1.2.3.4:443'), { isTransientNetwork: true });
+      configureCrawlerPorts({
+        downloadAndCacheDossier: vi.fn().mockImplementation(async (_tid: string, url: string, _lbl?: string, opts?: any) => {
+          if (url === transientUrl) {
+            opts?.onError?.(new Error('connect ETIMEDOUT 1.2.3.4:443'), { isTransientNetwork: true });
+            return null;
+          }
+          opts?.onError?.(new Error('HTTP 404 loading file'), { isTransientNetwork: false });
           return null;
-        }
-        opts?.onError?.(new Error('HTTP 404 loading file'), { isTransientNetwork: false });
-        return null;
+        })
       });
 
       const workerReport = await processDocumentQueue(5);
@@ -799,23 +809,31 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
       expect(queued[0].label).toBe(DETAIL_DISCOVER_LABEL);
 
       // 1. Transient error on detail HTML defers without burning attempts
-      const htmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml').mockRejectedValueOnce(new Error('Connection timed out'));
-      const deferredReport = await processDocumentQueue(5);
-      expect(deferredReport.deferred).toBe(1);
-      expect(getJobsForTender(saved.id)[0].attempts).toBe(0);
+      const htmlSpy = vi.fn().mockRejectedValueOnce(new Error('Connection timed out'));
+      const bufSpy = vi.fn().mockResolvedValueOnce(noticePdf(10));
+      const restoreDetailPorts = configureCrawlerPorts({
+        fetchHtml: htmlSpy,
+        fetchFileBuffer: bufSpy
+      });
+      try {
+        const deferredReport = await processDocumentQueue(5);
+        expect(deferredReport.deferred).toBe(1);
+        expect(getJobsForTender(saved.id)[0].attempts).toBe(0);
 
-      // Reset retry window and succeed on next run
-      db.prepare(`UPDATE document_ingest_jobs SET next_retry_at = datetime('now', '-1 minute') WHERE tender_id = ?`).run(saved.id);
-      htmlSpy.mockResolvedValueOnce(`<html><body><a href="/pdf?file=dGVuZGVyL3NvbGFyLWJpZC5wZGY=">Bidding Doc</a></body></html>`);
-      const bufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockResolvedValueOnce(noticePdf(10));
+        // Reset retry window and succeed on next run
+        db.prepare(`UPDATE document_ingest_jobs SET next_retry_at = datetime('now', '-1 minute') WHERE tender_id = ?`).run(saved.id);
+        htmlSpy.mockResolvedValueOnce(`<html><body><a href="/pdf?file=dGVuZGVyL3NvbGFyLWJpZC5wZGY=">Bidding Doc</a></body></html>`);
 
-      const okReport = await processDocumentQueue(5);
-      expect(okReport.completed).toBe(1);
-      const after = getTenderById(saved.id)!;
-      expect(after.doc_fetch_status).toBe('complete');
-      expect(after.cached_dossiers).toHaveLength(1);
-      expect(after.attachment_urls).toContain(pdfUrl);
-      expect(bufSpy).toHaveBeenCalledWith(pdfUrl);
+        const okReport = await processDocumentQueue(5);
+        expect(okReport.completed).toBe(1);
+        const after = getTenderById(saved.id)!;
+        expect(after.doc_fetch_status).toBe('complete');
+        expect(after.cached_dossiers).toHaveLength(1);
+        expect(after.attachment_urls).toContain(pdfUrl);
+        expect(bufSpy).toHaveBeenCalledWith(pdfUrl);
+      } finally {
+        restoreDetailPorts();
+      }
     });
 
     it('processes distinct tenders concurrently while keeping per-tender job order sequential (corrigendum before RFP)', async () => {
@@ -839,14 +857,16 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
         attachmentUrls: [otherUrl]
       }, portal(), tracks);
 
-      crawlerDeps.downloadAndCacheDossier = vi.fn().mockImplementation(async (tenderId: string, url: string) => {
-        if (url === corrUrl || url === rfpUrl) orderByTender.push(url);
-        const dir = path.resolve(DOSSIERS_DIR, tenderId);
-        fs.mkdirSync(dir, { recursive: true });
-        const name = path.basename(url);
-        const buf = noticePdf(6);
-        fs.writeFileSync(path.join(dir, name), buf);
-        return { label: name, localPath: `/api/dossiers/${tenderId}/${name}`, originalUrl: url, mimeType: 'application/pdf', sha256: `sha-${name}`, sizeBytes: buf.length };
+      configureCrawlerPorts({
+        downloadAndCacheDossier: vi.fn().mockImplementation(async (tenderId: string, url: string) => {
+          if (url === corrUrl || url === rfpUrl) orderByTender.push(url);
+          const dir = path.resolve(DOSSIERS_DIR, tenderId);
+          fs.mkdirSync(dir, { recursive: true });
+          const name = path.basename(url);
+          const buf = noticePdf(6);
+          fs.writeFileSync(path.join(dir, name), buf);
+          return { label: name, localPath: `/api/dossiers/${tenderId}/${name}`, originalUrl: url, mimeType: 'application/pdf', sha256: `sha-${name}`, sizeBytes: buf.length };
+        })
       });
 
       const report = await processDocumentQueue(10, 3);
@@ -879,15 +899,15 @@ describe('Phase 3: ingest flow, scan budget and background document worker', () 
         const drained = await drainDocumentQueue({ maxBatches: 5, batchSize: 2, concurrency: 2 });
         expect(drained.completed).toBe(3);
         expect(events).toContain('documents_updated');
-        expect(currentScanStatus.docQueue?.isFetching).toBe(false);
-        expect(currentScanStatus.docQueue?.readyPending).toBe(0);
+        expect(scanState.getDocQueue()?.isFetching).toBe(false);
+        expect(scanState.getDocQueue()?.readyPending).toBe(0);
 
         // OPS-4: refuses to start draining while a scan is active
-        currentScanStatus.isScanning = true;
+        scanState.setScanningForTest(true);
         const skipped = await drainDocumentQueue();
         expect(skipped.skipped).toBe('scan_running');
       } finally {
-        currentScanStatus.isScanning = false;
+        scanState.setScanningForTest(false);
         removeProgressListener(listener);
       }
     });

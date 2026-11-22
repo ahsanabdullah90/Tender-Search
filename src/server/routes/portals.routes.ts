@@ -1,5 +1,14 @@
 import { Router } from 'express';
 import {
+  asyncHandler,
+  getValidatedBody,
+  sendError,
+  v,
+  validateBody,
+  type InferSchema,
+  type Schema
+} from './routeUtils.js';
+import {
   getPortalHealthList,
   getPortalById,
   createPortal,
@@ -8,50 +17,84 @@ import {
   savePortalCredentials,
   getPortalAuthCredentials
 } from '../db/index.js';
+import { getDefaultRuntimeContext, type RuntimeContext } from '../runtime/context.js';
 import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
 import { authenticatePortal } from '../scrapers/portalAuth.js';
 import { healPortalConnection, getActivePortalsList } from '../scrapers/crawlerEngine.js';
-import { launchLocalBrowserHITL, verifyAndResumePortal } from '../scrapers/playwrightEngine.js';
-import { validateExternalHttpUrl } from '../services/urlSafety.js';
 import { sanitizeOriginUrl } from '../../shared/documentUtils.js';
+import type { PortalHealth } from '../../shared/types.js';
 
-export const portalsRouter = Router();
+const optionalExternalUrlOrBlank: Schema<string | undefined> = (input, field = 'url') => {
+  if (input === undefined || input === null) {
+    return { ok: true, value: undefined };
+  }
+  if (typeof input === 'string' && !input.trim()) {
+    return { ok: true, value: undefined };
+  }
+  return v.externalHttpUrl()(input, field);
+};
 
-portalsRouter.get('/', (_req, res) => {
-  const portals = getPortalHealthList();
-  res.json(portals);
+const createPortalSchema = v.object(
+  {
+    portal_id: v.optional(v.string({ trim: true })),
+    portal_name: v.nonEmptyString('Portal name is required.'),
+    tenders_url: optionalExternalUrlOrBlank,
+    base_url: optionalExternalUrlOrBlank,
+    login_url: optionalExternalUrlOrBlank,
+    category: v.optional(v.string({ trim: true })),
+    tier: v.optional(v.oneOf(['http', 'playwright'] as const)),
+    access_mode: v.optional(v.string({ trim: true }))
+  },
+  {
+    refine: val =>
+      !val.tenders_url && !val.base_url ? 'Portal website or tenders URL is required.' : null
+  }
+);
+
+const updatePortalSchema = v.object({
+  portal_name: v.optional(v.nonEmptyString('Portal name must not be empty.')),
+  base_url: v.optional(v.externalHttpUrl()),
+  tenders_url: v.optional(v.externalHttpUrl()),
+  tier: v.optional(v.oneOf(['http', 'playwright'] as const)),
+  access_mode: v.optional(v.string({ trim: true })),
+  verified_status: v.optional(v.string({ trim: true })),
+  status: v.optional(
+    v.oneOf(['online', 'scanning', 'hitl_required', 'selector_broken', 'error'] as const)
+  ),
+  last_error_message: v.nullish(v.string())
 });
 
-portalsRouter.post('/', (req, res) => {
-  const { portal_name, tenders_url, base_url, category, tier, access_mode, login_url, portal_id } = req.body || {};
-  if (!portal_name || typeof portal_name !== 'string' || !portal_name.trim()) {
-    return res.status(400).json({ success: false, message: 'Portal name is required.' });
-  }
+const healPortalSchema = v.object({
+  baseUrl: v.optional(v.externalHttpUrl())
+});
 
-  const effectiveUrl = (tenders_url || base_url || '').trim();
-  if (!effectiveUrl) {
-    return res.status(400).json({ success: false, message: 'Portal website or tenders URL is required.' });
-  }
+const portalCredentialsSchema = v.object({
+  username: v.optional(v.string({ trim: true })),
+  password: v.optional(v.string()),
+  loginUrl: optionalExternalUrlOrBlank
+});
 
-  for (const candidate of [effectiveUrl, base_url, login_url]) {
-    if (typeof candidate === 'string' && candidate.trim()) {
-      const check = validateExternalHttpUrl(candidate);
-      if (!check.valid) {
-        return res.status(400).json({ success: false, message: check.reason });
-      }
-    }
-  }
+export function createPortalsRouter(ctx: RuntimeContext = getDefaultRuntimeContext()): Router {
+  const router = Router();
 
-  try {
+  router.get('/', (_req, res) => {
+    const portals = getPortalHealthList();
+    res.json(portals);
+  });
+
+  router.post('/', validateBody(createPortalSchema), asyncHandler(async (req, res) => {
+    const body = getValidatedBody<InferSchema<typeof createPortalSchema>>(res, req);
+    const effectiveUrl = (body.tenders_url || body.base_url)!;
+
     const portal = createPortal({
-      portal_id,
-      portal_name: portal_name.trim(),
+      portal_id: body.portal_id || undefined,
+      portal_name: body.portal_name,
       tenders_url: effectiveUrl,
-      base_url: (base_url || effectiveUrl).trim(),
-      category,
-      tier,
-      access_mode,
-      login_url
+      base_url: body.base_url || effectiveUrl,
+      category: body.category || undefined,
+      tier: body.tier,
+      access_mode: body.access_mode || undefined,
+      login_url: body.login_url
     });
 
     res.status(201).json({
@@ -59,119 +102,104 @@ portalsRouter.post('/', (req, res) => {
       portal,
       message: `Added portal "${portal.portal_name}" successfully.`
     });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err?.message || 'Failed to create portal.' });
-  }
-});
+  }));
 
-portalsRouter.delete('/:portalId', (req, res) => {
-  const { portalId } = req.params;
-  const existing = getPortalById(portalId);
-  if (!existing) {
-    return res.status(404).json({ success: false, message: 'Portal not found.' });
-  }
-
-  const success = deletePortal(portalId);
-  if (!success) {
-    return res.status(500).json({ success: false, message: 'Failed to delete portal.' });
-  }
-
-  res.json({
-    success: true,
-    portal_id: portalId,
-    message: `Deleted portal "${existing.portal_name}" successfully.`
-  });
-});
-
-portalsRouter.put('/:portalId', (req, res) => {
-  const { portalId } = req.params;
-  const updates: any = {};
-  for (const key of ['portal_name', 'base_url', 'tenders_url', 'tier', 'access_mode', 'verified_status', 'status', 'last_error_message']) {
-    if (req.body[key] !== undefined) {
-      updates[key] = req.body[key];
+  router.delete('/:portalId', (req, res) => {
+    const { portalId } = req.params;
+    const existing = getPortalById(portalId);
+    if (!existing) {
+      return sendError(res, 404, 'Portal not found.', 'NOT_FOUND');
     }
-  }
 
-  // Enforce external HTTP(S) URL safety and strict origin normalization on base_url (SEC-5, Rule 6)
-  for (const field of ['base_url', 'tenders_url'] as const) {
-    if (typeof updates[field] === 'string' && updates[field].trim()) {
-      const check = validateExternalHttpUrl(updates[field]);
-      if (!check.valid) {
-        return res.status(400).json({ success: false, message: check.reason });
+    const success = deletePortal(portalId);
+    if (!success) {
+      return sendError(res, 500, 'Failed to delete portal.', 'INTERNAL_ERROR');
+    }
+
+    res.json({
+      success: true,
+      portal_id: portalId,
+      message: `Deleted portal "${existing.portal_name}" successfully.`
+    });
+  });
+
+  router.put('/:portalId', validateBody(updatePortalSchema), (req, res) => {
+    const { portalId } = req.params;
+    const body = getValidatedBody<InferSchema<typeof updatePortalSchema>>(res, req);
+    const updates: Partial<PortalHealth> = {
+      ...(body.portal_name !== undefined ? { portal_name: body.portal_name } : {}),
+      ...(body.base_url !== undefined ? { base_url: sanitizeOriginUrl(body.base_url, body.base_url) } : {}),
+      ...(body.tenders_url !== undefined ? { tenders_url: body.tenders_url } : {}),
+      ...(body.tier !== undefined ? { tier: body.tier } : {}),
+      ...(body.access_mode !== undefined ? { access_mode: body.access_mode } : {}),
+      ...(body.verified_status !== undefined ? { verified_status: body.verified_status } : {}),
+      ...(body.status !== undefined ? { status: body.status } : {}),
+      ...(body.last_error_message !== undefined ? { last_error_message: body.last_error_message } : {})
+    };
+
+    // If operator updated tenders_url, derive clean base_url origin and clear stale offline/error states
+    if (updates.tenders_url) {
+      const parsedOrigin = sanitizeOriginUrl(updates.tenders_url);
+      if (parsedOrigin && (!updates.base_url || updates.base_url === updates.tenders_url)) {
+        updates.base_url = parsedOrigin;
+      }
+      if (updates.status === undefined) {
+        updates.status = 'online';
+      }
+      if (updates.last_error_message === undefined) {
+        updates.last_error_message = null;
+      }
+      if (updates.access_mode === undefined) {
+        const existing = getPortalById(portalId);
+        if (existing && existing.access_mode === 'offline_broken') {
+          updates.access_mode = 'public';
+        }
       }
     }
-  }
 
-  if (typeof updates.base_url === 'string' && updates.base_url.trim()) {
-    updates.base_url = sanitizeOriginUrl(updates.base_url, updates.base_url.trim());
-  }
-
-  // If operator updated tenders_url, derive clean base_url origin and clear stale offline/error states
-  if (typeof updates.tenders_url === 'string' && updates.tenders_url.trim()) {
-    const parsedOrigin = sanitizeOriginUrl(updates.tenders_url);
-    if (parsedOrigin && (!updates.base_url || updates.base_url === updates.tenders_url)) {
-      updates.base_url = parsedOrigin;
-    }
-    if (updates.status === undefined) {
-      updates.status = 'online';
-    }
-    if (updates.last_error_message === undefined) {
-      updates.last_error_message = null;
-    }
-    if (updates.access_mode === undefined) {
-      const existing = getPortalById(portalId);
-      if (existing && existing.access_mode === 'offline_broken') {
-        updates.access_mode = 'public';
-      }
-    }
-  }
-
-  updatePortalHealth(portalId, updates);
-  res.json({ success: true, message: 'Portal updated successfully' });
-});
-
-portalsRouter.post('/:portalId/reset-default', (req, res) => {
-  const { portalId } = req.params;
-  const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portalId);
-  if (!canonicalDef) {
-    return res.status(404).json({ success: false, message: 'Default definition not found for this portal' });
-  }
-
-  updatePortalHealth(portalId, {
-    base_url: canonicalDef.baseUrl,
-    tenders_url: canonicalDef.tendersUrl,
-    login_url: canonicalDef.loginUrl ?? undefined,
-    access_mode: canonicalDef.accessMode,
-    tier: canonicalDef.tier,
-    verified_status: canonicalDef.verifiedStatus,
-    status: canonicalDef.accessMode === 'login_required' ? 'hitl_required' : 'online',
-    last_error_message: null,
-    consecutive_zero_yields: 0
+    updatePortalHealth(portalId, updates);
+    res.json({ success: true, message: 'Portal updated successfully' });
   });
 
-  res.json({
-    success: true,
-    portal_name: canonicalDef.name,
-    base_url: canonicalDef.baseUrl,
-    tenders_url: canonicalDef.tendersUrl,
-    message: `Reset ${canonicalDef.name} to official default URL`
-  });
-});
+  router.post('/:portalId/reset-default', (req, res) => {
+    const { portalId } = req.params;
+    const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === portalId);
+    if (!canonicalDef) {
+      return sendError(res, 404, 'Default definition not found for this portal', 'NOT_FOUND');
+    }
 
-portalsRouter.post('/:portalId/heal', async (req, res) => {
-  try {
+    updatePortalHealth(portalId, {
+      base_url: canonicalDef.baseUrl,
+      tenders_url: canonicalDef.tendersUrl,
+      login_url: canonicalDef.loginUrl ?? undefined,
+      access_mode: canonicalDef.accessMode,
+      tier: canonicalDef.tier,
+      verified_status: canonicalDef.verifiedStatus,
+      status: canonicalDef.accessMode === 'login_required' ? 'hitl_required' : 'online',
+      last_error_message: null,
+      consecutive_zero_yields: 0
+    });
+
+    res.json({
+      success: true,
+      portal_name: canonicalDef.name,
+      base_url: canonicalDef.baseUrl,
+      tenders_url: canonicalDef.tendersUrl,
+      message: `Reset ${canonicalDef.name} to official default URL`
+    });
+  });
+
+  router.post('/:portalId/heal', validateBody(healPortalSchema), asyncHandler(async (req, res) => {
     const { portalId } = req.params;
     const portals = getActivePortalsList(portalId);
     if (portals.length === 0) {
-      return res.status(404).json({ success: false, message: 'Portal not found' });
+      return sendError(res, 404, 'Portal not found', 'NOT_FOUND');
     }
+
+    const { baseUrl } = getValidatedBody<InferSchema<typeof healPortalSchema>>(res, req);
     const targetPortal = { ...portals[0] };
-    if (typeof req.body?.baseUrl === 'string' && req.body.baseUrl.trim()) {
-      const check = validateExternalHttpUrl(req.body.baseUrl);
-      if (!check.valid) {
-        return res.status(400).json({ success: false, message: check.reason });
-      }
-      targetPortal.baseUrl = req.body.baseUrl.trim();
+    if (baseUrl) {
+      targetPortal.baseUrl = baseUrl;
     }
 
     const healed = await healPortalConnection(targetPortal);
@@ -189,46 +217,38 @@ portalsRouter.post('/:portalId/heal', async (req, res) => {
       itemsFound: healed.result.items.length,
       message: `Discovered tender page (${healed.result.items.length} listings found)`
     });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err.message || 'Auto-discovery failed' });
-  }
-});
+  }));
 
-portalsRouter.post('/:portalId/hitl-launch', async (req, res) => {
-  try {
-    const result = await launchLocalBrowserHITL(req.params.portalId);
+  router.post('/:portalId/hitl-launch', asyncHandler(async (req, res) => {
+    const result = await ctx.playwright.launchLocalBrowserHITL(req.params.portalId);
     res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+  }));
 
-portalsRouter.post('/:portalId/hitl-verify', (req, res) => {
-  verifyAndResumePortal(req.params.portalId);
-  res.json({ success: true });
-});
-
-portalsRouter.get('/:portalId/credentials', (req, res) => {
-  const creds = getPortalAuthCredentials(req.params.portalId);
-  if (!creds) {
-    return res.status(404).json({ success: false, message: 'Portal not found' });
-  }
-  res.json({
-    username: creds.username || '',
-    loginUrl: creds.loginUrl || '',
-    hasPassword: Boolean(creds.password)
+  router.post('/:portalId/hitl-verify', (req, res) => {
+    ctx.playwright.verifyPortalHITL(req.params.portalId);
+    res.json({ success: true });
   });
-});
 
-portalsRouter.post('/:portalId/credentials', async (req, res) => {
-  try {
-    const { username, password, loginUrl } = req.body || {};
-    if (typeof loginUrl === 'string' && loginUrl.trim()) {
-      const check = validateExternalHttpUrl(loginUrl.trim());
-      if (!check.valid) {
-        return res.status(400).json({ success: false, message: check.reason });
-      }
+  router.get('/:portalId/credentials', (req, res) => {
+    const creds = getPortalAuthCredentials(req.params.portalId);
+    if (!creds) {
+      return sendError(res, 404, 'Portal not found', 'NOT_FOUND');
     }
+    res.json({
+      username: creds.username || '',
+      loginUrl: creds.loginUrl || '',
+      hasPassword: Boolean(creds.password)
+    });
+  });
+
+  router.post('/:portalId/credentials', validateBody(portalCredentialsSchema), asyncHandler(async (req, res) => {
+    const existing = getPortalById(req.params.portalId);
+    if (!existing) {
+      return sendError(res, 404, 'Portal not found', 'NOT_FOUND');
+    }
+
+    const { username, password, loginUrl } =
+      getValidatedBody<InferSchema<typeof portalCredentialsSchema>>(res, req);
     savePortalCredentials(req.params.portalId, { username, password, loginUrl });
 
     if (username && password) {
@@ -237,7 +257,9 @@ portalsRouter.post('/:portalId/credentials', async (req, res) => {
     }
 
     res.json({ success: true, message: 'Portal credentials saved successfully.' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+  }));
+
+  return router;
+}
+
+export const portalsRouter = createPortalsRouter();

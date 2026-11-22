@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 import { db, safeJsonParse } from '../connection.js';
 import { Tender, BidBrief } from '../../../shared/types.js';
 import { normalizeReferenceNo } from '../../domain/referenceNo.js';
@@ -533,13 +534,13 @@ export function syncReferenceNorm(id: string): void {
  * (date fragments such as "Jun-2026", "FY-2026-27"; docs/15 F3). Returns how many references were
  * cleared.
  */
-export function backfillReferenceNorms(): { normalized: number; cleared: number } {
-  const rows = db.prepare('SELECT id, reference_no FROM tenders WHERE reference_no IS NOT NULL').all() as { id: string; reference_no: string }[];
+export function backfillReferenceNorms(database: Database.Database = db): { normalized: number; cleared: number } {
+  const rows = database.prepare('SELECT id, reference_no FROM tenders WHERE reference_no IS NOT NULL').all() as { id: string; reference_no: string }[];
   let normalized = 0;
   let cleared = 0;
-  const setNorm = db.prepare('UPDATE tenders SET reference_norm = ? WHERE id = ?');
-  const clear = db.prepare('UPDATE tenders SET reference_no = NULL, reference_norm = NULL WHERE id = ?');
-  db.transaction(() => {
+  const setNorm = database.prepare('UPDATE tenders SET reference_norm = ? WHERE id = ?');
+  const clear = database.prepare('UPDATE tenders SET reference_no = NULL, reference_norm = NULL WHERE id = ?');
+  database.transaction(() => {
     for (const r of rows) {
       const norm = normalizeReferenceNo(r.reference_no);
       if (norm) { setNorm.run(norm, r.id); normalized++; } else { clear.run(r.id); cleared++; }
@@ -747,11 +748,11 @@ export function appendSecondarySource(id: string, source: SecondarySourceInput):
 }
 
 /** One-time cleanup: removes "Also listed on" entries that name the tender's own portal (B1). */
-export function removeSelfSecondarySources(): number {
-  const rows = db.prepare(`SELECT id, portal_name, secondary_sources FROM tenders WHERE secondary_sources IS NOT NULL AND secondary_sources != '[]'`).all() as { id: string; portal_name: string; secondary_sources: string }[];
+export function removeSelfSecondarySources(database: Database.Database = db): number {
+  const rows = database.prepare(`SELECT id, portal_name, secondary_sources FROM tenders WHERE secondary_sources IS NOT NULL AND secondary_sources != '[]'`).all() as { id: string; portal_name: string; secondary_sources: string }[];
   let changed = 0;
-  const update = db.prepare('UPDATE tenders SET secondary_sources = ? WHERE id = ?');
-  db.transaction(() => {
+  const update = database.prepare('UPDATE tenders SET secondary_sources = ? WHERE id = ?');
+  database.transaction(() => {
     for (const r of rows) {
       const sources = safeJsonParse<SecondarySourceInput[]>(r.secondary_sources, []);
       const kept = sources.filter(s => s.portalName !== r.portal_name);

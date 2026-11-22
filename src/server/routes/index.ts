@@ -1,20 +1,28 @@
 import { Router } from 'express';
-import { tendersRouter } from './tenders.routes.js';
-import { portalsRouter } from './portals.routes.js';
-import { tracksRouter, kpisRouter, corrigendaRouter } from './tracks.routes.js';
-import { scanRouter } from './scan.routes.js';
-import { systemRouter } from './system.routes.js';
+import { getDefaultRuntimeContext, type RuntimeContext } from '../runtime/context.js';
+import { sendError } from './httpErrors.js';
+import { createTendersRouter } from './tenders.routes.js';
+import { createPortalsRouter } from './portals.routes.js';
+import { createTracksRouter, kpisRouter, corrigendaRouter } from './tracks.routes.js';
+import { createScanRouter } from './scan.routes.js';
+import { createSystemRouter } from './system.routes.js';
 
-export const apiRouter = Router();
+export function createApiRouter(ctx: RuntimeContext = getDefaultRuntimeContext()): Router {
+  const router = Router();
 
-apiRouter.use('/tenders', tendersRouter);
-apiRouter.use('/portals', portalsRouter);
-apiRouter.use('/tracks', tracksRouter);
-apiRouter.use('/kpis', kpisRouter);
-apiRouter.use('/corrigenda', corrigendaRouter);
-apiRouter.use('/scan', scanRouter);
-apiRouter.use('/', systemRouter);
+  router.use('/tenders', createTendersRouter(ctx));
+  router.use('/portals', createPortalsRouter(ctx));
+  router.use('/tracks', createTracksRouter());
+  router.use('/kpis', kpisRouter);
+  router.use('/corrigenda', corrigendaRouter);
+  router.use('/scan', createScanRouter(ctx));
+  router.use('/', createSystemRouter(ctx));
 
-apiRouter.use((_req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
-});
+  router.use((_req, res) => {
+    sendError(res, 404, 'Endpoint not found', 'NOT_FOUND');
+  });
+
+  return router;
+}
+
+export const apiRouter = createApiRouter();

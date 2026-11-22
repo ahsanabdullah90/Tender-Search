@@ -7,7 +7,7 @@ import { tryConsumeDailyAiText, getDailyAiTextUsage } from '../../src/server/ser
 import { setAppSetting, getAppSetting } from '../../src/server/db/repositories/systemRepo.js';
 import { findDedupCandidates } from '../../src/server/db/repositories/tendersRepo.js';
 import { processDocumentQueue } from '../../src/server/runtime/ingestWorker.js';
-import { currentScanStatus } from '../../src/server/scrapers/crawlerEngine.js';
+import { scanState } from '../../src/server/scrapers/crawlerEngine.js';
 import { hasProcurementSignals } from '../../src/server/scrapers/portalParsers.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { isValidHealedTendersUrl } from '../../src/server/scrapers/healer.js';
@@ -135,13 +135,13 @@ describe('System Governance, Security & Operational Invariants', () => {
 
   describe('OPS-2 & OPS-4: Scheduling invariants', () => {
     it('OPS-4: background document worker skips processing while a crawl scan is active', async () => {
-      currentScanStatus.isScanning = true;
+      scanState.setScanningForTest(true);
       try {
         const report = await processDocumentQueue(5);
         expect(report.skipped).toBe('scan_running');
         expect(report.claimed).toBe(0);
       } finally {
-        currentScanStatus.isScanning = false;
+        scanState.setScanningForTest(false);
       }
     });
 

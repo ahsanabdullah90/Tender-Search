@@ -32,7 +32,8 @@ import { cleanRowSummary } from './parserHelpers.js';
 import { extractHtmlDetailTargets } from './adapters/guards.js';
 import { runDetailEnrichment } from './adapters/registry.js';
 import { orderDocumentCandidates } from './ingestPipeline.js';
-import { crawlerDeps } from './crawlerDeps.js';
+import { getCrawlerPorts, type CrawlerPorts } from './crawlerDeps.js';
+import { scanState, type ScanStateStore } from './scanState.js';
 
 export { readCachedDossier };
 
@@ -60,14 +61,16 @@ async function downloadAndAttachCandidateUrl(
     maxDossiers?: number;
     checkCachedUrls?: boolean;
     warnPrefix?: string;
+    ports?: CrawlerPorts;
   } = {}
 ): Promise<boolean> {
   const maxDossiers = options.maxDossiers ?? 5;
   if (!url || dossiers.length >= maxDossiers) return false;
   if (options.checkCachedUrls && cachedUrls.has(url)) return false;
   const tag = options.warnPrefix || 'FetchDocs';
+  const activePorts = options.ports ?? getCrawlerPorts();
   try {
-    const buf = await crawlerDeps.fetchFileBuffer(url);
+    const buf = await activePorts.fetchFileBuffer(url);
     const ct = (buf as any)?.contentType;
     if (isHtmlContent(buf, ct)) {
       console.warn(`[${tag}] Rejected HTML content from ${url} for ${tender.id}`);
@@ -122,11 +125,10 @@ export interface FetchDocumentsResult {
 }
 
 const inFlightDocFetches = new Map<string, Promise<FetchDocumentsResult>>();
-const activeDocFetchCounts = new Map<string, number>();
 
 /** Returns tender IDs currently undergoing an active on-demand/detail document fetch. */
 export function getInFlightDocFetchTenderIds(): string[] {
-  return Array.from(activeDocFetchCounts.keys());
+  return scanState.getInFlightDocFetchTenderIds();
 }
 
 /**
@@ -139,9 +141,14 @@ export function getInFlightDocFetchTenderIds(): string[] {
  */
 export async function fetchDocumentsForTender(
   tenderId: string,
-  options: { forceRefresh?: boolean; throwOnDetailError?: boolean } = {}
+  options: {
+    forceRefresh?: boolean;
+    throwOnDetailError?: boolean;
+    scanState?: ScanStateStore;
+    ports?: CrawlerPorts;
+  } = {}
 ): Promise<FetchDocumentsResult> {
-  if (!options.forceRefresh && !options.throwOnDetailError) {
+  if (!options.forceRefresh && !options.throwOnDetailError && !options.scanState && !options.ports) {
     const existingFlight = inFlightDocFetches.get(tenderId);
     if (existingFlight) return existingFlight;
     const runPromise = runFetchDocumentsForTender(tenderId, options).finally(() => {
@@ -157,8 +164,15 @@ export async function fetchDocumentsForTender(
 
 async function runFetchDocumentsForTender(
   tenderId: string,
-  options: { forceRefresh?: boolean; throwOnDetailError?: boolean } = {}
+  options: {
+    forceRefresh?: boolean;
+    throwOnDetailError?: boolean;
+    scanState?: ScanStateStore;
+    ports?: CrawlerPorts;
+  } = {}
 ): Promise<FetchDocumentsResult> {
+  const activeScanState = options.scanState ?? scanState;
+  const activePorts = options.ports ?? getCrawlerPorts();
   const tender = getTenderById(tenderId);
   if (!tender) {
     throw new Error(`Tender not found: ${tenderId}`);
@@ -186,10 +200,7 @@ async function runFetchDocumentsForTender(
     };
   }
 
-  activeDocFetchCounts.set(tenderId, (activeDocFetchCounts.get(tenderId) || 0) + 1);
-  try {
-    crawlerDeps.onDocFetchChange?.();
-  } catch {}
+  activeScanState.beginDocFetch(tenderId);
   try {
 
   const isDirectFile = isDirectDocumentUrl(tender.direct_url);
@@ -199,7 +210,8 @@ async function runFetchDocumentsForTender(
       defaultLabel: isDirectFile && u === tender.direct_url ? 'Tender Document' : 'Bidding Document',
       maxDossiers: 5,
       checkCachedUrls: true,
-      warnPrefix: 'FetchDocs'
+      warnPrefix: 'FetchDocs',
+      ports: activePorts
     });
     if (added) newlyFetched++;
     return added;
@@ -225,7 +237,7 @@ async function runFetchDocumentsForTender(
       portal: portalDef,
       existingDossierCount: dossiers.length,
       forceRefresh: Boolean(options.forceRefresh),
-      fetchHtml: (url: string) => crawlerDeps.fetchHtml(url)
+      fetchHtml: (url: string) => activePorts.fetchHtml(url)
     });
 
     if (enrichment?.handled) {
@@ -252,7 +264,7 @@ async function runFetchDocumentsForTender(
       !isDirectFile &&
       (dossiers.length === 0 || Boolean(options.forceRefresh))
     ) {
-      const html = await crawlerDeps.fetchHtml(tender.direct_url);
+      const html = await activePorts.fetchHtml(tender.direct_url);
       detailPageChecked = true;
       const extracted = extractHtmlDetailTargets(html, tender, portalDef);
       if (extracted.found) {
@@ -342,15 +354,7 @@ async function runFetchDocumentsForTender(
     expired: false
   };
   } finally {
-    const remaining = (activeDocFetchCounts.get(tenderId) || 1) - 1;
-    if (remaining <= 0) {
-      activeDocFetchCounts.delete(tenderId);
-    } else {
-      activeDocFetchCounts.set(tenderId, remaining);
-    }
-    try {
-      crawlerDeps.onDocFetchChange?.();
-    } catch {}
+    activeScanState.endDocFetch(tenderId);
   }
 }
 
@@ -358,7 +362,11 @@ async function runFetchDocumentsForTender(
  * On-demand detail-page fetcher + Gemini AI analyzer for a single tender.
  * When forceRefresh is true, re-fetches the live portal page and updates attachments/summary.
  */
-export async function analyzeTenderById(tenderId: string, options: { forceRefresh?: boolean } = {}): Promise<Tender | null> {
+export async function analyzeTenderById(
+  tenderId: string,
+  options: { forceRefresh?: boolean; ports?: CrawlerPorts } = {}
+): Promise<Tender | null> {
+  const activePorts = options.ports ?? getCrawlerPorts();
   const tender = getTenderById(tenderId);
   if (!tender) return null;
 
@@ -374,7 +382,8 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
       await downloadAndAttachCandidateUrl(tender, portalCode, tender.direct_url, 0, dossiers, cachedUrls, {
         defaultLabel: isImageUrl(tender.direct_url) ? 'Tender Notice Image' : 'Tender Document',
         maxDossiers: Number.MAX_SAFE_INTEGER,
-        warnPrefix: 'Analyze'
+        warnPrefix: 'Analyze',
+        ports: activePorts
       });
     } else {
       const portalDef = resolvePortalDefForTender(tender);
@@ -385,7 +394,7 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
           portal: portalDef,
           existingDossierCount: dossiers.length,
           forceRefresh: Boolean(options.forceRefresh),
-          fetchHtml: (url: string) => crawlerDeps.fetchHtml(url)
+          fetchHtml: (url: string) => activePorts.fetchHtml(url)
         });
 
         if (enrichment?.handled) {
@@ -402,18 +411,20 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
           for (let idx = 0; idx < discoveredUrls.slice(0, 3).length; idx++) {
             await downloadAndAttachCandidateUrl(tender, portalCode, discoveredUrls[idx], idx, dossiers, cachedUrls, {
               maxDossiers: Number.MAX_SAFE_INTEGER,
-              warnPrefix: 'Analyze'
+              warnPrefix: 'Analyze',
+              ports: activePorts
             });
           }
         } else {
-          const html = await crawlerDeps.fetchHtml(tender.direct_url);
+          const html = await activePorts.fetchHtml(tender.direct_url);
           const extracted = extractHtmlDetailTargets(html, tender, portalDef);
           if (extracted.found) {
             detailText = extracted.detailText;
             for (let idx = 0; idx < extracted.discoveredUrls.slice(0, 3).length; idx++) {
               await downloadAndAttachCandidateUrl(tender, portalCode, extracted.discoveredUrls[idx], idx, dossiers, cachedUrls, {
                 maxDossiers: Number.MAX_SAFE_INTEGER,
-                warnPrefix: 'Analyze'
+                warnPrefix: 'Analyze',
+                ports: activePorts
               });
             }
           } else {

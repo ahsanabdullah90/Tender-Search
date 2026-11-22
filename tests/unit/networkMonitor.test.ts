@@ -9,7 +9,7 @@ import {
   reportNetworkOutcome,
   isTransientNetworkError,
   resetNetworkMonitorForTests,
-  networkMonitorDeps,
+  defaultNetworkMonitor,
   NETWORK_PROBE_CACHE_TTL_MS,
   NETWORK_DEGRADED_RTT_MS,
   PASSIVE_SLOW_HTML_MS
@@ -21,8 +21,10 @@ describe('networkMonitor', () => {
   });
 
   it('classifies fast dual-endpoint responses as online and allows both heavy and light tasks', async () => {
-    networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 120 });
-    networkMonitorDeps.countPendingDocumentJobs = () => 4;
+    defaultNetworkMonitor.configurePorts({
+      probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 120 }),
+      countPendingDocumentJobs: () => 4
+    });
 
     const status = await checkNetworkHealth({ force: true });
     expect(status.state).toBe('online');
@@ -35,7 +37,9 @@ describe('networkMonitor', () => {
   });
 
   it('classifies slow RTT (>= 1500ms) as degraded, pauses heavy tasks, and allows light tasks', async () => {
-    networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: NETWORK_DEGRADED_RTT_MS + 250 });
+    defaultNetworkMonitor.configurePorts({
+      probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: NETWORK_DEGRADED_RTT_MS + 250 })
+    });
 
     const status = await checkNetworkHealth({ force: true });
     expect(status.state).toBe('degraded');
@@ -47,9 +51,11 @@ describe('networkMonitor', () => {
 
   it('classifies partial connectivity (1 of 2 probes failed) as degraded', async () => {
     let call = 0;
-    networkMonitorDeps.probeEndpoint = vi.fn().mockImplementation(async () => {
-      call++;
-      return call === 1 ? { ok: true, latencyMs: 90 } : { ok: false, latencyMs: null, error: 'Probe timed out' };
+    defaultNetworkMonitor.configurePorts({
+      probeEndpoint: vi.fn().mockImplementation(async () => {
+        call++;
+        return call === 1 ? { ok: true, latencyMs: 90 } : { ok: false, latencyMs: null, error: 'Probe timed out' };
+      })
     });
 
     const status = await checkNetworkHealth({ force: true });
@@ -61,7 +67,9 @@ describe('networkMonitor', () => {
   });
 
   it('classifies total probe failure as offline and pauses both heavy and light tasks', async () => {
-    networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' });
+    defaultNetworkMonitor.configurePorts({
+      probeEndpoint: vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' })
+    });
 
     const status = await checkNetworkHealth({ force: true });
     expect(status.state).toBe('offline');
@@ -74,9 +82,11 @@ describe('networkMonitor', () => {
 
   it('respects 45s TTL cache, supports { force: true }, and deduplicates concurrent probes', async () => {
     let currentTime = 1_000_000;
-    networkMonitorDeps.now = () => currentTime;
     const probeSpy = vi.fn().mockResolvedValue({ ok: true, latencyMs: 45 });
-    networkMonitorDeps.probeEndpoint = probeSpy;
+    defaultNetworkMonitor.configurePorts({
+      now: () => currentTime,
+      probeEndpoint: probeSpy
+    });
 
     // Concurrent calls share one dual-endpoint probe batch (2 calls, not 4)
     const [a, b] = await Promise.all([checkNetworkHealth(), checkNetworkHealth()]);
@@ -100,8 +110,10 @@ describe('networkMonitor', () => {
   });
 
   it('transitions to degraded via passive outcome tracking only across >= 2 distinct hosts', () => {
-    let nowMs = 5_000_000;
-    networkMonitorDeps.now = () => nowMs;
+    const nowMs = 5_000_000;
+    defaultNetworkMonitor.configurePorts({
+      now: () => nowMs
+    });
 
     // 3 timeouts on a SINGLE slow portal do NOT degrade the whole network
     reportNetworkOutcome('punjab_eproc', false, true);
@@ -122,7 +134,9 @@ describe('networkMonitor', () => {
   });
 
   it('tracks deepScanPending and pendingDocumentJobs counts on cached status', () => {
-    networkMonitorDeps.countPendingDocumentJobs = () => 17;
+    defaultNetworkMonitor.configurePorts({
+      countPendingDocumentJobs: () => 17
+    });
     setDeepScanPending(true);
     expect(isDeepScanPending()).toBe(true);
 
@@ -137,7 +151,9 @@ describe('networkMonitor', () => {
   });
 
   it('Refinement #1 & #4a: trips degraded on slow completions across >= 2 hosts and recovers immediately on forced fast probe', async () => {
-    networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 35 });
+    defaultNetworkMonitor.configurePorts({
+      probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 35 })
+    });
 
     // Local POP probe is fast, but 3 slow .gov.pk HTML fetches (>= 12s) occur across 2 hosts
     reportNetworkOutcome('epms.ppra.gov.pk', true, { durationMs: PASSIVE_SLOW_HTML_MS + 500, slowThresholdMs: PASSIVE_SLOW_HTML_MS });

@@ -40,7 +40,7 @@ import {
 import { matchTracks, applyDocumentScopeToTracks } from './trackMatcher.js';
 import { embedTextToBlobAsync, buildTenderEmbeddingText } from '../services/embeddingService.js';
 import { purgeTenderFiles, readCachedDossier, shouldUpgradeDocType, renameDossierToCanonical } from '../services/dossierStore.js';
-import { canRunHeavyNetworkTask } from '../services/networkMonitor.js';
+import { canRunHeavyNetworkTask, type NetworkMonitor } from '../services/networkMonitor.js';
 import { deriveDossierLabel } from '../services/dossierManager.js';
 import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import {
@@ -52,7 +52,7 @@ import {
   noteDeferredDocuments,
   tryConsumeScanVision
 } from '../services/ingestBudget.js';
-import { crawlerDeps } from './crawlerDeps.js';
+import { getCrawlerPorts, type CrawlerPorts } from './crawlerDeps.js';
 
 export { UPFRONT_MAX_DOCS };
 export const MAX_DOCUMENTS_PER_TENDER = 5;
@@ -143,8 +143,10 @@ export async function fetchAndReadDocumentsUpfront(
   tenderId: string,
   item: RawScrapedItem,
   urls: string[],
-  portalId?: string
+  portalId?: string,
+  ports?: CrawlerPorts
 ): Promise<{ dossiers: CachedDossier[]; extractions: UpfrontExtraction[]; failedUrls: string[]; visionPendingUrls: string[] }> {
+  const activePorts = ports ?? getCrawlerPorts();
   const budgetEnd = Date.now() + INGEST_DEFAULTS.perTenderBudgetMs;
   const maxBytes = getActiveScanBudget()?.maxFileBytes ?? maxFileBytes();
   const dossiers: CachedDossier[] = [];
@@ -158,7 +160,7 @@ export async function fetchAndReadDocumentsUpfront(
     const controller = new AbortController();
     try {
       const doc = await withTimeout(
-        crawlerDeps.downloadAndCacheDossier(tenderId, url, label, {
+        activePorts.downloadAndCacheDossier(tenderId, url, label, {
           signal: controller.signal,
           maxBytes,
           tenderMeta: { portalId: portalId || null, referenceNo: item.referenceNo || null, title: item.title }
@@ -455,7 +457,8 @@ export function holdForDocumentScope(tenderId: string, item: RawScrapedItem, por
 export async function processAndSaveTender(
   item: RawScrapedItem,
   portal: PortalDefinition,
-  activeTracks: any[]
+  activeTracks: any[],
+  options?: { ports?: CrawlerPorts; networkMonitor?: NetworkMonitor }
 ): Promise<ProcessTenderResult> {
   // Hybrid Keyword + Semantic Matching across tracks
   const { matchedTracks, matchedKeywords, matchScore, semanticScore } = matchTracks(item, activeTracks);
@@ -548,7 +551,10 @@ export async function processAndSaveTender(
   // has no deadline yet. Dated tenders insert straight away so scans stay fast and their
   // documents are fetched immediately afterward by the prioritized background worker.
   const needsUpfront = !item.closingDate && candidates.length > 0;
-  const runUpfront = needsUpfront && hasUpfrontTime() && canRunHeavyNetworkTask();
+  const networkAllowsHeavy = options?.networkMonitor
+    ? options.networkMonitor.canRunHeavyTask()
+    : canRunHeavyNetworkTask();
+  const runUpfront = needsUpfront && hasUpfrontTime() && networkAllowsHeavy;
   if (runUpfront) {
     // Stage the new tender so Inbox/Pipeline/analytics queries ignore it via NOT_STAGING_SQL
     // until verification passes (P2-4). Only ever done for a row that did not exist (step 1).
@@ -579,7 +585,7 @@ export async function processAndSaveTender(
   }
 
   const upfront = runUpfront
-    ? await fetchAndReadDocumentsUpfront(tenderId, item, candidates.slice(0, UPFRONT_MAX_DOCS), portal.id)
+    ? await fetchAndReadDocumentsUpfront(tenderId, item, candidates.slice(0, UPFRONT_MAX_DOCS), portal.id, options?.ports)
     : { dossiers: [] as CachedDossier[], extractions: [] as UpfrontExtraction[], failedUrls: [] as string[], visionPendingUrls: [] as string[] };
   const fetchedUrls = new Set(upfront.dossiers.map(d => d.originalUrl));
   const toQueue = candidates.filter(u => !fetchedUrls.has(u) || upfront.visionPendingUrls.includes(u));

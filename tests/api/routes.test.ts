@@ -3,9 +3,10 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import { createApp } from '../../server.js';
-import { crawlerDeps, currentScanStatus } from '../../src/server/scrapers/crawlerEngine.js';
-import { scanRouteDeps } from '../../src/server/routes/scan.routes.js';
-import { schedulerDeps, stopStartupScheduler } from '../../src/server/runtime/scheduler.js';
+import { configureCrawlerPorts, resetCrawlerPorts, scanState } from '../../src/server/scrapers/crawlerEngine.js';
+import { configureSchedulerPorts, resetSchedulerPorts, stopStartupScheduler } from '../../src/server/runtime/scheduler.js';
+import { createRuntimeContext } from '../../src/server/runtime/context.js';
+import { defaultNetworkMonitor, resetNetworkMonitorForTests } from '../../src/server/services/networkMonitor.js';
 import {
   db,
   initDatabase,
@@ -20,6 +21,10 @@ describe('Server API Routes', () => {
 
   beforeEach(() => {
     initDatabase();
+    scanState.reset();
+    resetCrawlerPorts();
+    resetSchedulerPorts();
+    resetNetworkMonitorForTests();
     db.prepare('DELETE FROM document_ingest_jobs').run();
     db.prepare('DELETE FROM corrigendum_logs').run();
     db.prepare('DELETE FROM pipeline_audit_logs').run();
@@ -461,16 +466,13 @@ describe('Server API Routes', () => {
     });
 
     it('triggers crawler scan via start endpoint', async () => {
-      const origStart = scanRouteDeps.startCrawlerScan;
-      scanRouteDeps.startCrawlerScan = vi.fn().mockResolvedValue({ ...currentScanStatus, isScanning: true });
-      try {
-        const res = await request(app).post('/api/scan/start');
-        expect(res.status).toBe(200);
-        expect(typeof res.body.isScanning).toBe('boolean');
-        expect(scanRouteDeps.startCrawlerScan).toHaveBeenCalledTimes(1);
-      } finally {
-        scanRouteDeps.startCrawlerScan = origStart;
-      }
+      const startSpy = vi.fn().mockResolvedValue({ ...scanState.getSnapshot(), isScanning: true });
+      const isolatedApp = createApp(createRuntimeContext({ startCrawlerScan: startSpy }));
+      const res = await request(isolatedApp).post('/api/scan/start');
+      expect(res.status).toBe(200);
+      expect(typeof res.body.isScanning).toBe('boolean');
+      expect(res.body.isScanning).toBe(true);
+      expect(startSpy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -675,27 +677,30 @@ describe('Server API Routes', () => {
     });
 
     it('refreshes tender information via POST /api/tenders/:id/refresh', async () => {
-      const origFetch = crawlerDeps.fetchHtml;
-      crawlerDeps.fetchHtml = vi.fn().mockResolvedValue(`
-        <html><body>
-          <h1>Solar Hospital Power System Tender</h1>
-          <p>Detailed Scope: Supply, installation, and commissioning of rooftop solar PV plant.</p>
-        </body></html>
-      `);
-
-      insertTestTender('t-refresh-1', {
-        title: 'Initial Tender for Refresh',
-        direct_url: 'https://example.com/tenders/101',
-        description: ''
+      const restorePorts = configureCrawlerPorts({
+        fetchHtml: vi.fn().mockResolvedValue(`
+          <html><body>
+            <h1>Solar Hospital Power System Tender</h1>
+            <p>Detailed Scope: Supply, installation, and commissioning of rooftop solar PV plant.</p>
+          </body></html>
+        `)
       });
 
-      const res = await request(app).post('/api/tenders/t-refresh-1/refresh');
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.tender.id).toBe('t-refresh-1');
-      expect(res.body.message).toContain('Tender information refreshed');
+      try {
+        insertTestTender('t-refresh-1', {
+          title: 'Initial Tender for Refresh',
+          direct_url: 'https://example.com/tenders/101',
+          description: ''
+        });
 
-      crawlerDeps.fetchHtml = origFetch;
+        const res = await request(app).post('/api/tenders/t-refresh-1/refresh');
+        expect(res.status).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(res.body.tender.id).toBe('t-refresh-1');
+        expect(res.body.message).toContain('Tender information refreshed');
+      } finally {
+        restorePorts();
+      }
     });
 
     it('returns helpful 400 when AI analyze or extract-file is called without API key configured', async () => {
@@ -720,27 +725,30 @@ describe('Server API Routes', () => {
   describe('Auto-expire responses & expired-tender visibility (Phase 0)', () => {
     it('fetch-documents reports expired:true (not a fake Deleted tender) when the document deadline has passed', async () => {
       const ocrSvc = await import('../../src/server/services/ocrService.js');
-      const origBuf = crawlerDeps.fetchFileBuffer;
-      crawlerDeps.fetchFileBuffer = vi.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake'));
-      vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
-        referenceNo: 'OLD-1', organization: '', title: '',
-        closingDateISO: '2025-10-30T11:00:00+05:00', closingDateFormatted: '30 Oct 2025',
-        summaryScope: 'Expired notice', estimatedValue: null, isCorrigendum: false
+      const restorePorts = configureCrawlerPorts({
+        fetchFileBuffer: vi.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake'))
       });
-      insertTestTender('t-expire-docs', {
-        reference_no: 'OLD-1',
-        closing_date: null,
-        direct_url: 'https://example.com/download/old-notice.pdf'
-      });
+      try {
+        vi.spyOn(ocrSvc, 'extractTenderFromImage').mockResolvedValueOnce({
+          referenceNo: 'OLD-1', organization: '', title: '',
+          closingDateISO: '2025-10-30T11:00:00+05:00', closingDateFormatted: '30 Oct 2025',
+          summaryScope: 'Expired notice', estimatedValue: null, isCorrigendum: false
+        });
+        insertTestTender('t-expire-docs', {
+          reference_no: 'OLD-1',
+          closing_date: null,
+          direct_url: 'https://example.com/download/old-notice.pdf'
+        });
 
-      const res = await request(app).post('/api/tenders/t-expire-docs/fetch-documents');
-      expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({ success: true, expired: true, id: 't-expire-docs' });
-      expect(res.body.tender).toBeUndefined();
-      expect(getTenderById('t-expire-docs')).toBeNull();
-
-      crawlerDeps.fetchFileBuffer = origBuf;
-      vi.restoreAllMocks();
+        const res = await request(app).post('/api/tenders/t-expire-docs/fetch-documents');
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ success: true, expired: true, id: 't-expire-docs' });
+        expect(res.body.tender).toBeUndefined();
+        expect(getTenderById('t-expire-docs')).toBeNull();
+      } finally {
+        restorePorts();
+        vi.restoreAllMocks();
+      }
     });
 
     it('refresh and analyze still return 404 for a tender that never existed', async () => {
@@ -812,18 +820,16 @@ describe('Server API Routes', () => {
 
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
-      const origScan = schedulerDeps.startCrawlerScan;
-      const origDrain = schedulerDeps.drainDocumentQueue;
-      const origReclass = schedulerDeps.reclassifyExistingDossiersFromText;
-      schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({} as any);
-      schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
-      schedulerDeps.drainDocumentQueue = vi.fn().mockResolvedValue({
-        processed: 0,
-        succeeded: 0,
-        deferred: 0,
-        failed: 0,
-        batches: 0,
-        readyRemaining: 0
+      const restoreScheduler = configureSchedulerPorts({
+        startCrawlerScan: vi.fn().mockResolvedValue({} as any),
+        reclassifyExistingDossiersFromText: vi.fn().mockResolvedValue({ filesReclassified: 0 }),
+        drainDocumentQueue: vi.fn().mockResolvedValue({
+          claimed: 0,
+          completed: 0,
+          failed: 0,
+          deferred: 0,
+          expired: 0
+        })
       });
       process.env.NODE_ENV = 'production';
       process.env.PORT = '0';
@@ -849,9 +855,8 @@ describe('Server API Routes', () => {
         });
       } finally {
         stopStartupScheduler();
-        schedulerDeps.startCrawlerScan = origScan;
-        schedulerDeps.drainDocumentQueue = origDrain;
-        schedulerDeps.reclassifyExistingDossiersFromText = origReclass;
+        restoreScheduler();
+        resetSchedulerPorts();
         if (srv) {
           await new Promise<void>((resolve) => srv.close(() => resolve()));
         }
@@ -867,18 +872,16 @@ describe('Server API Routes', () => {
       const { startServer } = await import('../../server.js');
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
-      const origScan = schedulerDeps.startCrawlerScan;
-      const origDrain = schedulerDeps.drainDocumentQueue;
-      const origReclass = schedulerDeps.reclassifyExistingDossiersFromText;
-      schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({} as any);
-      schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
-      schedulerDeps.drainDocumentQueue = vi.fn().mockResolvedValue({
-        processed: 0,
-        succeeded: 0,
-        deferred: 0,
-        failed: 0,
-        batches: 0,
-        readyRemaining: 0
+      const restoreScheduler = configureSchedulerPorts({
+        startCrawlerScan: vi.fn().mockResolvedValue({} as any),
+        reclassifyExistingDossiersFromText: vi.fn().mockResolvedValue({ filesReclassified: 0 }),
+        drainDocumentQueue: vi.fn().mockResolvedValue({
+          claimed: 0,
+          completed: 0,
+          failed: 0,
+          deferred: 0,
+          expired: 0
+        })
       });
       process.env.NODE_ENV = 'development';
       process.env.PORT = '0';
@@ -890,9 +893,8 @@ describe('Server API Routes', () => {
         expect(srv.listening).toBe(true);
       } finally {
         stopStartupScheduler();
-        schedulerDeps.startCrawlerScan = origScan;
-        schedulerDeps.drainDocumentQueue = origDrain;
-        schedulerDeps.reclassifyExistingDossiersFromText = origReclass;
+        restoreScheduler();
+        resetSchedulerPorts();
         if (srv) {
           await new Promise<void>((resolve) => srv.close(() => resolve()));
         }
@@ -906,18 +908,16 @@ describe('Server API Routes', () => {
       const dbModule = await import('../../src/server/db/index.js');
       const prevEnv = process.env.NODE_ENV;
       const prevPort = process.env.PORT;
-      const origScan = schedulerDeps.startCrawlerScan;
-      const origDrain = schedulerDeps.drainDocumentQueue;
-      const origReclass = schedulerDeps.reclassifyExistingDossiersFromText;
-      schedulerDeps.startCrawlerScan = vi.fn().mockResolvedValue({} as any);
-      schedulerDeps.reclassifyExistingDossiersFromText = vi.fn().mockResolvedValue({ filesReclassified: 0 });
-      schedulerDeps.drainDocumentQueue = vi.fn().mockResolvedValue({
-        processed: 0,
-        succeeded: 0,
-        deferred: 0,
-        failed: 0,
-        batches: 0,
-        readyRemaining: 0
+      const restoreScheduler = configureSchedulerPorts({
+        startCrawlerScan: vi.fn().mockResolvedValue({} as any),
+        reclassifyExistingDossiersFromText: vi.fn().mockResolvedValue({ filesReclassified: 0 }),
+        drainDocumentQueue: vi.fn().mockResolvedValue({
+          claimed: 0,
+          completed: 0,
+          failed: 0,
+          deferred: 0,
+          expired: 0
+        })
       });
       process.env.NODE_ENV = 'production';
       process.env.PORT = '0';
@@ -948,9 +948,8 @@ describe('Server API Routes', () => {
         expect(exitSpy).toHaveBeenCalledWith(0);
       } finally {
         stopStartupScheduler();
-        schedulerDeps.startCrawlerScan = origScan;
-        schedulerDeps.drainDocumentQueue = origDrain;
-        schedulerDeps.reclassifyExistingDossiersFromText = origReclass;
+        restoreScheduler();
+        resetSchedulerPorts();
         if (handler) process.removeListener('SIGINT', handler);
         closeSpy.mockRestore();
         exitSpy.mockRestore();
@@ -989,8 +988,6 @@ describe('Server API Routes', () => {
     });
 
     it('POST /api/scan/start accepts optional depth parameter', async () => {
-      const { scanRouteDeps } = await import('../../src/server/routes/scan.routes.js');
-      const origStart = scanRouteDeps.startCrawlerScan;
       const startSpy = vi.fn().mockResolvedValue({
         isScanning: true,
         currentPortal: null,
@@ -1003,19 +1000,15 @@ describe('Server API Routes', () => {
         corrigendaFound: 0,
         lastScanTimestamp: null
       });
-      scanRouteDeps.startCrawlerScan = startSpy;
+      const isolatedApp = createApp(createRuntimeContext({ startCrawlerScan: startSpy }));
 
-      try {
-        const res = await request(app)
-          .post('/api/scan/start')
-          .send({ portalId: 'epms_ppra', depth: 'deep' });
+      const res = await request(isolatedApp)
+        .post('/api/scan/start')
+        .send({ portalId: 'epms_ppra', depth: 'deep' });
 
-        expect(res.status).toBe(200);
-        expect(res.body.scanDepth).toBe('deep');
-        expect(startSpy).toHaveBeenCalledWith('epms_ppra', false, { depth: 'deep' });
-      } finally {
-        scanRouteDeps.startCrawlerScan = origStart;
-      }
+      expect(res.status).toBe(200);
+      expect(res.body.scanDepth).toBe('deep');
+      expect(startSpy).toHaveBeenCalledWith('epms_ppra', false, { depth: 'deep' });
     });
   });
 
@@ -1110,9 +1103,10 @@ describe('Server API Routes', () => {
 
   describe('Network Health API (/api/system/network)', () => {
     it('GET /api/system/network and POST /api/system/network/check return connectivity state and deferred task counters', async () => {
-      const { networkMonitorDeps, resetNetworkMonitorForTests } = await import('../../src/server/services/networkMonitor.js');
       resetNetworkMonitorForTests();
-      networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 1850 });
+      defaultNetworkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1850 })
+      });
 
       try {
         const getRes = await request(app).get('/api/system/network');
@@ -1124,7 +1118,9 @@ describe('Server API Routes', () => {
           pendingDocumentJobs: 0
         });
 
-        networkMonitorDeps.probeEndpoint = vi.fn().mockResolvedValue({ ok: true, latencyMs: 42 });
+        defaultNetworkMonitor.configurePorts({
+          probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 42 })
+        });
         const checkRes = await request(app).post('/api/system/network/check');
         expect(checkRes.status).toBe(200);
         expect(checkRes.body.state).toBe('online');
@@ -1140,7 +1136,194 @@ describe('Server API Routes', () => {
     it('returns JSON 404 for unknown /api endpoints', async () => {
       const res = await request(app).get('/api/does-not-exist');
       expect(res.status).toBe(404);
-      expect(res.body).toEqual({ error: 'Endpoint not found' });
+      expect(res.body).toEqual({
+        success: false,
+        error: 'Endpoint not found',
+        message: 'Endpoint not found',
+        code: 'NOT_FOUND'
+      });
+    });
+  });
+
+  describe('Uniform Validation & Error Envelopes', () => {
+    it('returns uniform VALIDATION_ERROR envelopes on invalid booleans, numbers, enums, dates, and coerced objects', async () => {
+      insertTestTender('t-val-env');
+
+      // 1. Strict boolean on PATCH /api/tenders/:id/viewed rejects string "false"
+      const badViewed = await request(app)
+        .patch('/api/tenders/t-val-env/viewed')
+        .send({ viewed: 'false' });
+      expect(badViewed.status).toBe(400);
+      expect(badViewed.body).toEqual({
+        success: false,
+        error: 'viewed must be a boolean',
+        message: 'viewed must be a boolean',
+        code: 'VALIDATION_ERROR',
+        details: [{ field: 'viewed', message: 'viewed must be a boolean' }]
+      });
+
+      // 2. Strict boolean on POST /api/tenders/clear rejects string "yes"
+      const badClear = await request(app)
+        .post('/api/tenders/clear')
+        .send({ unreviewedOnly: 'yes' });
+      expect(badClear.status).toBe(400);
+      expect(badClear.body).toEqual({
+        success: false,
+        error: 'unreviewedOnly must be a boolean',
+        message: 'unreviewedOnly must be a boolean',
+        code: 'VALIDATION_ERROR',
+        details: [{ field: 'unreviewedOnly', message: 'unreviewedOnly must be a boolean' }]
+      });
+
+      // 3. Numeric validation on POST /api/system/ingest-budgets
+      const badBudget = await request(app)
+        .post('/api/system/ingest-budgets')
+        .send({ maxFileMb: 'not-a-number' });
+      expect(badBudget.status).toBe(400);
+      expect(badBudget.body).toEqual({
+        success: false,
+        error: 'maxFileMb must be a number',
+        message: 'maxFileMb must be a number',
+        code: 'VALIDATION_ERROR',
+        details: [{ field: 'maxFileMb', message: 'maxFileMb must be a number' }]
+      });
+
+      // 4. Enum validation on POST /api/scan/start depth
+      const badDepth = await request(app)
+        .post('/api/scan/start')
+        .send({ depth: 'full' });
+      expect(badDepth.status).toBe(400);
+      expect(badDepth.body).toEqual({
+        success: false,
+        error: 'depth must be one of: quick, deep',
+        message: 'depth must be one of: quick, deep',
+        code: 'VALIDATION_ERROR',
+        details: [{ field: 'depth', message: 'depth must be one of: quick, deep' }]
+      });
+
+      // 5. Rejects object/array coercion on PATCH /api/tenders/:id
+      const badPatchTitle = await request(app)
+        .patch('/api/tenders/t-val-env')
+        .send({ title: { nested: 'object' } });
+      expect(badPatchTitle.status).toBe(400);
+      expect(badPatchTitle.body).toMatchObject({
+        success: false,
+        code: 'VALIDATION_ERROR',
+        details: [{ field: 'title', message: 'title must be a string' }]
+      });
+
+      // 6. Rejects numeric timestamp on PATCH /api/tenders/:id/result-date with exact 'Invalid date'
+      const badDateNum = await request(app)
+        .patch('/api/tenders/t-val-env/result-date')
+        .send({ date: 1700000000000 });
+      expect(badDateNum.status).toBe(400);
+      expect(badDateNum.body).toEqual({
+        success: false,
+        error: 'Invalid date',
+        message: 'Invalid date',
+        code: 'VALIDATION_ERROR',
+        details: [{ field: 'date', message: 'Invalid date' }]
+      });
+    });
+
+    it('returns 400 BAD_REQUEST uniform envelope on malformed JSON request bodies', async () => {
+      const res = await request(app)
+        .post('/api/tracks')
+        .set('Content-Type', 'application/json')
+        .send('{"name": "broken"');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        success: false,
+        error: 'Invalid JSON request body',
+        message: 'Invalid JSON request body',
+        code: 'BAD_REQUEST'
+      });
+    });
+  });
+
+  describe('RuntimeContext Isolation Across App Instances', () => {
+    it('isolates scan triggers, scan state, shutdown handlers, and network monitors across createApp instances', async () => {
+      const scanSpyA = vi.fn().mockResolvedValue({
+        isScanning: true,
+        currentPortal: 'Portal A',
+        activePortals: ['Portal A'],
+        scanDepth: 'quick',
+        progressPercent: 10,
+        completedPortals: 0,
+        totalPortals: 1,
+        newTendersFound: 0,
+        corrigendaFound: 0,
+        lastScanTimestamp: null
+      });
+      const scanSpyB = vi.fn().mockResolvedValue({
+        isScanning: true,
+        currentPortal: 'Portal B',
+        activePortals: ['Portal B'],
+        scanDepth: 'deep',
+        progressPercent: 20,
+        completedPortals: 0,
+        totalPortals: 1,
+        newTendersFound: 0,
+        corrigendaFound: 0,
+        lastScanTimestamp: null
+      });
+
+      const ctxA = createRuntimeContext({ startCrawlerScan: scanSpyA });
+      const ctxB = createRuntimeContext({ startCrawlerScan: scanSpyB });
+      const appA = createApp(ctxA);
+      const appB = createApp(ctxB);
+
+      // 1. Scan triggers are routed strictly to the owning RuntimeContext
+      const startResA = await request(appA).post('/api/scan/start').send({ portalId: 'epms_ppra', depth: 'quick' });
+      expect(startResA.status).toBe(200);
+      expect(startResA.body.currentPortal).toBe('Portal A');
+      expect(scanSpyA).toHaveBeenCalledTimes(1);
+      expect(scanSpyB).not.toHaveBeenCalled();
+
+      // 2. ScanState mutations on ctxA never leak to ctxB or default app
+      ctxA.scanState.setScanningForTest(true);
+      const statusA = await request(appA).get('/api/scan/status');
+      const statusB = await request(appB).get('/api/scan/status');
+      const statusDefault = await request(app).get('/api/scan/status');
+      expect(statusA.body.isScanning).toBe(true);
+      expect(statusB.body.isScanning).toBe(false);
+      expect(statusDefault.body.isScanning).toBe(false);
+
+      // 3. NetworkMonitor states remain isolated per app instance
+      ctxA.networkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: false, latencyMs: null, error: 'ENETUNREACH' })
+      });
+      ctxB.networkMonitor.configurePorts({
+        probeEndpoint: vi.fn().mockResolvedValue({ ok: true, latencyMs: 18 })
+      });
+      const netA = await request(appA).post('/api/system/network/check');
+      const netB = await request(appB).post('/api/system/network/check');
+      expect(netA.body.state).toBe('offline');
+      expect(netB.body.state).toBe('online');
+      expect(defaultNetworkMonitor.getCachedStatus().state).toBe('online');
+
+      // 4. Shutdown handlers remain isolated per app instance
+      const prevToken = process.env.TENDER_SHUTDOWN_TOKEN;
+      process.env.TENDER_SHUTDOWN_TOKEN = 'isolated-shutdown-token-123';
+      const shutdownA = vi.fn();
+      ctxA.setShutdownHandler(shutdownA);
+      try {
+        const resB = await request(appB)
+          .post('/api/system/shutdown')
+          .set('X-Shutdown-Token', 'isolated-shutdown-token-123');
+        expect(resB.status).toBe(503);
+
+        const resA = await request(appA)
+          .post('/api/system/shutdown')
+          .set('X-Shutdown-Token', 'isolated-shutdown-token-123');
+        expect(resA.status).toBe(200);
+        await vi.waitFor(() => expect(shutdownA).toHaveBeenCalledTimes(1), { timeout: 1000 });
+      } finally {
+        ctxA.setShutdownHandler(null);
+        if (prevToken === undefined) delete process.env.TENDER_SHUTDOWN_TOKEN;
+        else process.env.TENDER_SHUTDOWN_TOKEN = prevToken;
+      }
     });
   });
 });

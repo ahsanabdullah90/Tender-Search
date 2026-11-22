@@ -11,6 +11,39 @@ The server responds with `application/json` unless streaming files or Server-Sen
 
 ---
 
+## Error Responses & Runtime Validation
+
+- **Uniform Error Payload Envelope (`src/server/routes/httpErrors.ts`)**:
+  All structured API errors conform to `ApiErrorEnvelope`:
+  ```json
+  {
+    "success": false,
+    "error": "Status is required",
+    "message": "Status is required",
+    "code": "VALIDATION_ERROR",
+    "details": [
+      { "field": "status", "message": "Status is required" }
+    ]
+  }
+  ```
+  - `details` (`FieldValidationIssue[]`) is included when field-level validation issues exist and omitted otherwise.
+  - **`ApiErrorCode` Values**:
+    - `VALIDATION_ERROR` (`400`): Request body or query schema validation failure (`AppHttpError.validation`).
+    - `BAD_REQUEST` (`400` / `413`): Invalid request parameters, malformed JSON (`SyntaxError` / `entity.parse.failed` $\rightarrow$ `400 "Invalid JSON request body"`), or oversized request payload (`413` / `entity.too.large` $\rightarrow$ `413 "Request payload exceeds limit"`).
+    - `FORBIDDEN` (`403`): Authorization or disabled-endpoint rejection (e.g., `POST /api/system/shutdown`).
+    - `NOT_FOUND` (`404`): Missing tender, portal, log file, or unknown `/api/*` endpoint.
+    - `UNPROCESSABLE_ENTITY` (`422`): Syntactically valid input whose content cannot be extracted/processed (e.g., `/api/ai/extract-file`).
+    - `SERVICE_UNAVAILABLE` (`503`): Required runtime handler unavailable (e.g., shutdown handler unregistered).
+    - `INTERNAL_ERROR` (`500`): Unexpected runtime or I/O failure.
+- **Zero-Dependency Schema Validation & Centralized Error Middleware (`src/server/routes/validation.ts`, `routeUtils.ts`)**:
+  - Composable `v.*` builders (`v.string`, `v.nonEmptyString`, `v.boolean`, `v.queryBoolean`, `v.number`, `v.oneOf`, `v.array`, `v.externalHttpUrl`, `v.isoOrParsableDate`, `v.optional`, `v.nullable`, `v.nullish`, `v.object`, `v.anyObject`) validate plain objects, strip unknown keys, reject stringified JSON booleans (`"false"`), guard numeric coercion (`NaN`/`Infinity`/empty strings), and enforce `SEC-5` SSRF checks via `validateExternalHttpUrl`.
+  - Express middlewares `validateBody(schema)` (storing sanitized input on `res.locals.validatedBody` and `req.body`) and `validateQuery(schema)` (storing parsed query values on `res.locals.validatedQuery` without mutating `req.query`) forward failures to Express `errorHandler` via `AppHttpError.validation`, accessed inside handlers via `getValidatedBody` and `getValidatedQuery`.
+- **Intentional Non-Envelope Domain Outcomes**:
+  - **HTTP `200 OK` `{ success: false, message? }` domain results**: `PATCH`/`POST /api/tenders/:id/bookmark` (when tender ID is missing), `POST /api/portals/:portalId/heal` (when auto-discovery finds no valid tender listing page), and `POST /api/portals/:portalId/credentials` (when automated portal login authentication rejects the credentials).
+  - **Plain-text file-serving guard (`GET /api/dossiers/:tenderId/:filename`)**: Returns plain-text `400` (`Invalid dossier path`) on path-traversal rejections and `404` (`Dossier file not found on disk`) when the cached file is absent.
+
+---
+
 ## 1. Tenders & Pipeline Management
 
 ### `GET /api/tenders`

@@ -7,7 +7,7 @@ import { setAppSetting } from '../../src/server/db/repositories/systemRepo.js';
 import { saveTenderDocument } from '../../src/server/services/dossierStore.js';
 import { getTenderById } from '../../src/server/db/repositories/tendersRepo.js';
 import { enqueueDocumentJobs } from '../../src/server/db/repositories/ingestJobsRepo.js';
-import { checkNetworkHealth, networkMonitorDeps, resetNetworkMonitorForTests } from '../../src/server/services/networkMonitor.js';
+import { checkNetworkHealth, defaultNetworkMonitor, resetNetworkMonitorForTests } from '../../src/server/services/networkMonitor.js';
 
 describe('Retention Lifecycle Daemon', () => {
   const tenderPassedOld = 'tender-retention-passed-old';
@@ -358,13 +358,13 @@ describe('Retention Lifecycle Daemon', () => {
 
     try {
       // 1. Even with 0 jobs, when network is degraded, retention skips awaiting_scope purge
-      networkMonitorDeps.probeEndpoint = async () => ({ ok: true, latencyMs: 2200 });
+      defaultNetworkMonitor.configurePorts({ probeEndpoint: async () => ({ ok: true, latencyMs: 2200 }) });
       await checkNetworkHealth({ force: true });
       runRetentionCycle({ dryRun: false });
       expect(getTenderById(heldId)).not.toBeNull();
 
       // 2. When network recovers to online, an unattempted pending job (attempts = 0) still protects the tender
-      networkMonitorDeps.probeEndpoint = async () => ({ ok: true, latencyMs: 30 });
+      defaultNetworkMonitor.configurePorts({ probeEndpoint: async () => ({ ok: true, latencyMs: 30 }) });
       await checkNetworkHealth({ force: true });
       enqueueDocumentJobs(heldId, [{ url: 'https://example.com/prot.pdf', label: 'Notice' }]);
       runRetentionCycle({ dryRun: false });

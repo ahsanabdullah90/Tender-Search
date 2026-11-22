@@ -28,15 +28,20 @@ import { extractFromDocument, DocumentExtractionResult } from '../services/docum
 import { isDownloadableCandidateUrl } from '../../shared/documentUtils.js';
 import { maxFileBytes, tryConsumeDailyVision, UPFRONT_MAX_DOCS } from '../services/ingestBudget.js';
 import {
-  crawlerDeps,
-  currentScanStatus,
+  getCrawlerPorts,
+  scanState,
   fetchDocumentsForTender,
-  updateDocQueueStatus
+  type CrawlerPorts,
+  type ScanStateStore
 } from '../scrapers/crawlerEngine.js';
 import { applyDocumentScopeToTracks, matchTracks } from '../domain/trackMatcher.js';
 import { applyDocumentResultToTender } from '../services/documentApply.js';
 import { Tender } from '../../shared/types.js';
-import { checkNetworkHealth, canRunHeavyNetworkTask, isTransientNetworkError } from '../services/networkMonitor.js';
+import {
+  defaultNetworkMonitor,
+  isTransientNetworkError,
+  type NetworkMonitor
+} from '../services/networkMonitor.js';
 
 /**
  * Background document worker (docs/13-ingestion-pipeline-plan.md, §3.3).
@@ -58,21 +63,44 @@ export interface WorkerReport {
   expired: number;
 }
 
+export interface IngestWorkerContext {
+  scanState?: ScanStateStore;
+  networkMonitor?: NetworkMonitor;
+  crawlerPorts?: Partial<CrawlerPorts>;
+}
+
+function resolveCrawlerPorts(overrides?: Partial<CrawlerPorts>): CrawlerPorts {
+  const base = getCrawlerPorts();
+  if (!overrides) return base;
+  return {
+    fetchHtml: overrides.fetchHtml ?? base.fetchHtml,
+    postForm: overrides.postForm ?? base.postForm,
+    sleep: overrides.sleep ?? base.sleep,
+    downloadAndCacheDossier: overrides.downloadAndCacheDossier ?? base.downloadAndCacheDossier,
+    fetchFileBuffer: overrides.fetchFileBuffer ?? base.fetchFileBuffer
+  };
+}
+
 let running = false;
 let draining = false;
 let lastBatchVisibleChange = false;
 
 export async function processDocumentQueue(
   limit: number = 5,
-  concurrency: number = DEFAULT_DOC_WORKER_CONCURRENCY
+  concurrency: number = DEFAULT_DOC_WORKER_CONCURRENCY,
+  ctx?: IngestWorkerContext
 ): Promise<WorkerReport> {
+  const activeScanState = ctx?.scanState ?? scanState;
+  const activeNetworkMonitor = ctx?.networkMonitor ?? defaultNetworkMonitor;
+  const activeCrawlerPorts = resolveCrawlerPorts(ctx?.crawlerPorts);
+
   const report: WorkerReport = { claimed: 0, completed: 0, failed: 0, deferred: 0, expired: 0 };
   if (running) return { ...report, skipped: 'already_running' };
   // Never fetch portals in parallel with a scan.
-  if (currentScanStatus.isScanning) return { ...report, skipped: 'scan_running' };
+  if (activeScanState.isScanning()) return { ...report, skipped: 'scan_running' };
   // Hold heavy background PDF downloads until network connectivity is healthy (online).
-  const network = await checkNetworkHealth();
-  if (!canRunHeavyNetworkTask(network)) {
+  const network = await activeNetworkMonitor.checkHealth();
+  if (!activeNetworkMonitor.canRunHeavyTask(network)) {
     return { ...report, skipped: 'network_unhealthy' };
   }
 
@@ -87,11 +115,12 @@ export async function processDocumentQueue(
     if (jobs.length > 0) {
       try {
         const liveCounts = getDocumentQueueCounts();
-        updateDocQueueStatus({
+        const prevDocQueue = activeScanState.getDocQueue();
+        activeScanState.updateDocQueueStatus({
           isFetching: true,
           ...liveCounts,
-          completedInRun: currentScanStatus.docQueue?.completedInRun ?? 0,
-          lastUpdatedAt: currentScanStatus.docQueue?.lastUpdatedAt ?? null
+          completedInRun: prevDocQueue?.completedInRun ?? 0,
+          lastUpdatedAt: prevDocQueue?.lastUpdatedAt ?? null
         });
       } catch {}
     }
@@ -113,7 +142,11 @@ export async function processDocumentQueue(
           const idx = nextIdx++;
           if (idx >= tenderBuckets.length) break;
           for (const job of tenderBuckets[idx]) {
-            const { outcome, visibleChange } = await processJob(job);
+            const { outcome, visibleChange } = await processJob(job, {
+              activeScanState,
+              activeNetworkMonitor,
+              activeCrawlerPorts
+            });
             report[outcome]++;
             if (visibleChange) batchVisibleChange = true;
           }
@@ -125,13 +158,14 @@ export async function processDocumentQueue(
     if (!draining && jobs.length > 0) {
       try {
         const afterCounts = getDocumentQueueCounts();
-        const prevCompleted = currentScanStatus.docQueue?.completedInRun ?? 0;
-        updateDocQueueStatus(
+        const prevDocQueue = activeScanState.getDocQueue();
+        const prevCompleted = prevDocQueue?.completedInRun ?? 0;
+        activeScanState.updateDocQueueStatus(
           {
             isFetching: afterCounts.processing > 0,
             ...afterCounts,
             completedInRun: prevCompleted + report.completed,
-            lastUpdatedAt: batchVisibleChange ? new Date().toISOString() : (currentScanStatus.docQueue?.lastUpdatedAt ?? null)
+            lastUpdatedAt: batchVisibleChange ? new Date().toISOString() : (prevDocQueue?.lastUpdatedAt ?? null)
           },
           batchVisibleChange ? { documentsUpdated: true } : undefined
         );
@@ -147,16 +181,23 @@ export async function processDocumentQueue(
  * Drains due Inbox ('ready') document jobs continuously in fast bounded-concurrency batches
  * while leaving unmatched 'awaiting_scope' jobs to trickle gently one batch per tick.
  */
-export async function drainDocumentQueue(options?: {
-  maxBatches?: number;
-  batchSize?: number;
-  concurrency?: number;
-}): Promise<WorkerReport> {
+export async function drainDocumentQueue(
+  options?: {
+    maxBatches?: number;
+    batchSize?: number;
+    concurrency?: number;
+  },
+  ctx?: IngestWorkerContext
+): Promise<WorkerReport> {
+  const activeScanState = ctx?.scanState ?? scanState;
+  const activeNetworkMonitor = ctx?.networkMonitor ?? defaultNetworkMonitor;
+  const activeCrawlerPorts = resolveCrawlerPorts(ctx?.crawlerPorts);
+
   const totalReport: WorkerReport = { claimed: 0, completed: 0, failed: 0, deferred: 0, expired: 0 };
   if (draining) return { ...totalReport, skipped: 'already_running' };
-  if (currentScanStatus.isScanning) return { ...totalReport, skipped: 'scan_running' };
-  const initialNet = await checkNetworkHealth();
-  if (!canRunHeavyNetworkTask(initialNet)) {
+  if (activeScanState.isScanning()) return { ...totalReport, skipped: 'scan_running' };
+  const initialNet = await activeNetworkMonitor.checkHealth();
+  if (!activeNetworkMonitor.canRunHeavyTask(initialNet)) {
     return { ...totalReport, skipped: 'network_unhealthy' };
   }
 
@@ -165,24 +206,24 @@ export async function drainDocumentQueue(options?: {
   const concurrency = options?.concurrency ?? DEFAULT_DOC_WORKER_CONCURRENCY;
 
   draining = true;
-  let lastUpdatedAt: string | null = currentScanStatus.docQueue?.lastUpdatedAt ?? null;
+  let lastUpdatedAt: string | null = activeScanState.getDocQueue()?.lastUpdatedAt ?? null;
   try {
     for (let batchIdx = 0; batchIdx < maxBatches; batchIdx++) {
-      if (currentScanStatus.isScanning) break;
-      const net = await checkNetworkHealth();
-      if (!canRunHeavyNetworkTask(net)) break;
+      if (activeScanState.isScanning()) break;
+      const net = await activeNetworkMonitor.checkHealth();
+      if (!activeNetworkMonitor.canRunHeavyTask(net)) break;
 
       const countsBefore = getDocumentQueueCounts();
       if (countsBefore.totalPending === 0) break;
 
-      updateDocQueueStatus({
+      activeScanState.updateDocQueueStatus({
         isFetching: true,
         ...countsBefore,
         completedInRun: totalReport.completed,
         lastUpdatedAt
       });
 
-      const batch = await processDocumentQueue(batchSize, concurrency);
+      const batch = await processDocumentQueue(batchSize, concurrency, ctx);
       totalReport.claimed += batch.claimed;
       totalReport.completed += batch.completed;
       totalReport.failed += batch.failed;
@@ -196,7 +237,7 @@ export async function drainDocumentQueue(options?: {
       if (hadVisibleUpdate) {
         lastUpdatedAt = new Date().toISOString();
       }
-      updateDocQueueStatus(
+      activeScanState.updateDocQueueStatus(
         {
           isFetching: countsAfter.readyPending > 0,
           ...countsAfter,
@@ -208,7 +249,7 @@ export async function drainDocumentQueue(options?: {
 
       if (countsAfter.readyPending === 0) break;
       if (!process.env.VITEST) {
-        await crawlerDeps.sleep(200);
+        await activeCrawlerPorts.sleep(200);
       }
     }
   } finally {
@@ -216,7 +257,7 @@ export async function drainDocumentQueue(options?: {
     try {
       reconcileStaleTenderDocFetchStatuses();
       const finalCounts = getDocumentQueueCounts();
-      updateDocQueueStatus({
+      activeScanState.updateDocQueueStatus({
         isFetching: false,
         ...finalCounts,
         completedInRun: totalReport.completed,
@@ -238,7 +279,15 @@ function isLegacyOrEmptyJobLabel(label?: string | null): boolean {
   return !label || !label.trim() || /_Doc(\s+\d+)?$/i.test(label.trim());
 }
 
-async function processJob(job: IngestJob): Promise<ProcessJobResult> {
+async function processJob(
+  job: IngestJob,
+  deps: {
+    activeScanState: ScanStateStore;
+    activeNetworkMonitor: NetworkMonitor;
+    activeCrawlerPorts: CrawlerPorts;
+  }
+): Promise<ProcessJobResult> {
+  const { activeScanState, activeNetworkMonitor, activeCrawlerPorts } = deps;
   const tender = getTenderById(job.tender_id);
   if (!tender) {
     completeJob(job.id); // tender gone; the cascade normally removes the job first
@@ -253,7 +302,12 @@ async function processJob(job: IngestJob): Promise<ProcessJobResult> {
 
   try {
     if (job.label === DETAIL_DISCOVER_LABEL) {
-      const res = await fetchDocumentsForTender(tender.id, { forceRefresh: false, throwOnDetailError: true });
+      const res = await fetchDocumentsForTender(tender.id, {
+        forceRefresh: false,
+        throwOnDetailError: true,
+        scanState: activeScanState,
+        ports: activeCrawlerPorts
+      });
       if (res.expired) return { outcome: 'expired', visibleChange: true };
       completeJob(job.id);
       const nextStatus = refreshTenderDocFetchStatus(tender.id);
@@ -286,14 +340,14 @@ async function processJob(job: IngestJob): Promise<ProcessJobResult> {
     if (!doc) {
       let downloadErr: Error | null = null;
       let downloadTransient = false;
-      doc = await crawlerDeps.downloadAndCacheDossier(tender.id, job.url, label, {
+      doc = await activeCrawlerPorts.downloadAndCacheDossier(tender.id, job.url, label, {
         onError: (err, meta) => {
           downloadErr = err;
           downloadTransient = meta.isTransientNetwork;
         }
       });
       if (!doc) {
-        if (downloadTransient || !canRunHeavyNetworkTask()) {
+        if (downloadTransient || !activeNetworkMonitor.canRunHeavyTask()) {
           deferJob(job.id, 10, (downloadErr as Error | null)?.message || 'Deferred due to slow/offline network');
           refreshTenderDocFetchStatus(tender.id);
           return { outcome: 'deferred', visibleChange: false };
@@ -380,7 +434,7 @@ async function processJob(job: IngestJob): Promise<ProcessJobResult> {
     refreshTenderDocFetchStatus(current.id);
     return { outcome: 'completed', visibleChange: becameVisible };
   } catch (err: any) {
-    if (isTransientNetworkError(err) || !canRunHeavyNetworkTask()) {
+    if (isTransientNetworkError(err) || !activeNetworkMonitor.canRunHeavyTask()) {
       deferJob(job.id, 10, err?.message || 'Deferred due to transient network error');
       if (getTenderById(job.tender_id)) {
         refreshTenderDocFetchStatus(job.tender_id);

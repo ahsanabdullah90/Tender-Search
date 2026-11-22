@@ -1,5 +1,26 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
+export {
+  AppHttpError,
+  sendError,
+  errorHandler,
+  statusToErrorCode,
+  type ApiErrorCode,
+  type ApiErrorEnvelope,
+  type FieldValidationIssue
+} from './httpErrors.js';
+
+export {
+  v,
+  validateBody,
+  validateQuery,
+  getValidatedBody,
+  getValidatedQuery,
+  type ParseResult,
+  type Schema,
+  type InferSchema
+} from './validation.js';
+
 /**
  * Wraps an async Express 4 route handler so rejected promises forward cleanly to Express's
  * error-handling middleware instead of leaving requests hanging or causing unhandled rejections.

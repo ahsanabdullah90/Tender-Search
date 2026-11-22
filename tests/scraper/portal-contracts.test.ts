@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { db, initDatabase, getAllTenders, setAppSetting } from '../../src/server/db/index.js';
-import { parsePortalHtml, processAndSaveTender, crawlerDeps, orderDocumentCandidates, fetchDocumentsForTender, hasEmptyTenderTableState } from '../../src/server/scrapers/crawlerEngine.js';
+import { parsePortalHtml, processAndSaveTender, configureCrawlerPorts, resetCrawlerPorts, orderDocumentCandidates, fetchDocumentsForTender, hasEmptyTenderTableState } from '../../src/server/scrapers/crawlerEngine.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { getPortalFileCode } from '../../src/server/services/dossierStore.js';
 
@@ -47,18 +47,16 @@ const NOT_COVERED: Record<string, string> = {
 };
 
 describe('Portal contract tests', () => {
-  const originalDownload = crawlerDeps.downloadAndCacheDossier;
-
   beforeEach(() => {
     initDatabase();
     for (const t of ['document_ingest_jobs', 'corrigendum_logs', 'pipeline_audit_logs', 'tenders', 'deleted_tenders']) db.prepare(`DELETE FROM ${t}`).run();
     setAppSetting('gemini_api_key', '');
     // No network: every document download "fails", so documents are queued, never fetched.
-    crawlerDeps.downloadAndCacheDossier = vi.fn().mockResolvedValue(null);
+    configureCrawlerPorts({ downloadAndCacheDossier: vi.fn().mockResolvedValue(null) });
   });
 
   afterEach(() => {
-    crawlerDeps.downloadAndCacheDossier = originalDownload;
+    resetCrawlerPorts();
     vi.useRealTimers();
   });
 
@@ -162,10 +160,14 @@ describe('Portal contract tests', () => {
     const saved = getAllTenders()[0];
     expect(saved).toBeDefined();
 
-    const fetchHtmlSpy = vi.spyOn(crawlerDeps, 'fetchHtml').mockResolvedValue(detailHtml);
-    const fetchBufSpy = vi.spyOn(crawlerDeps, 'fetchFileBuffer').mockImplementation(async (url: string) =>
+    const fetchHtmlSpy = vi.fn().mockResolvedValue(detailHtml);
+    const fetchBufSpy = vi.fn().mockImplementation(async (url: string) =>
       Buffer.from(`%PDF-1.4 synthetic FDE attachment from ${url}`)
     );
+    const restorePorts = configureCrawlerPorts({
+      fetchHtml: fetchHtmlSpy,
+      fetchFileBuffer: fetchBufSpy
+    });
     try {
       const res = await fetchDocumentsForTender(saved.id);
       expect(fetchHtmlSpy).toHaveBeenCalledWith(saved.direct_url);
@@ -176,8 +178,7 @@ describe('Portal contract tests', () => {
         'https://fde.gov.pk/download/printing-and-supply-of-textbooks/?wpdmdl=13893'
       ]);
     } finally {
-      fetchHtmlSpy.mockRestore();
-      fetchBufSpy.mockRestore();
+      restorePorts();
     }
   });
 
