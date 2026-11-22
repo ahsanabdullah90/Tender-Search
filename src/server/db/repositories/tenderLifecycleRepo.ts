@@ -1,6 +1,6 @@
 import path from 'path';
 import { db, DOSSIERS_DIR } from '../connection.js';
-import { purgeTenderDirsOnDisk } from '../../services/fileUtils.js';
+import { purgeTenderDirsOnDisk } from '../../domain/fileUtils.js';
 
 /**
  * Rows in 'staging' are mid-ingest (documents still being checked) and must not be visible as

@@ -135,7 +135,7 @@ Multi-portal scans enforce **Two-Phase Scan Execution** (`isStatutoryPortal`): P
      - Same calendar day → no deadline change.
    - Newly discovered document links (excluding URLs already cached in `cached_dossiers`) are appended to `attachment_urls` and queued for download; dedicated detail pages (`epms_ppra` and `fde`) with no cached documents queue a `DETAIL_DISCOVER_LABEL` discovery job.
 
-### 2. Automatic Document Fetching & Queue Priority Tiers (`src/server/db/repositories/ingestJobsRepo.ts` & `src/server/services/ingestWorker.ts`)
+### 2. Automatic Document Fetching & Queue Priority Tiers (`src/server/db/repositories/ingestJobsRepo.ts` & `src/server/runtime/ingestWorker.ts`)
 - **Non-Blocking Scan Intake**: Only undated matched notices (`!closingDate`) block during the crawl (`staging`) to verify Rule `B6`. Dated tenders insert immediately as `ready` with their documents queued so scans never stall on large PDF batches.
 - **Strict Priority Order (`claimDueJobs`)**:
   1. **Tier 0**: Bookmarked or actively tracked `ready` tenders (`Pipeline` stages or `is_bookmarked = 1`).

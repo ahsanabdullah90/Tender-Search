@@ -22,22 +22,21 @@ import {
 } from '../db/repositories/tendersRepo.js';
 import { deleteTenders } from '../db/repositories/tenderLifecycleRepo.js';
 import { getAllDomainTracks } from '../db/repositories/tracksRepo.js';
-import { deriveDossierLabel } from './dossierManager.js';
-import { upgradeDossierDocTypeIfNeeded } from './dossierStore.js';
-import { extractFromDocument, DocumentExtractionResult } from './documentExtractor.js';
+import { deriveDossierLabel } from '../services/dossierManager.js';
+import { readCachedDossier, upgradeDossierDocTypeIfNeeded } from '../services/dossierStore.js';
+import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import { isDownloadableCandidateUrl } from '../../shared/documentUtils.js';
-import { maxFileBytes, tryConsumeDailyVision, UPFRONT_MAX_DOCS } from './ingestBudget.js';
+import { maxFileBytes, tryConsumeDailyVision, UPFRONT_MAX_DOCS } from '../services/ingestBudget.js';
 import {
   crawlerDeps,
   currentScanStatus,
-  readCachedDossier,
   fetchDocumentsForTender,
   updateDocQueueStatus
 } from '../scrapers/crawlerEngine.js';
-import { applyDocumentScopeToTracks, matchTracks } from '../scrapers/trackMatcher.js';
-import { applyDocumentResultToTender } from './documentApply.js';
+import { applyDocumentScopeToTracks, matchTracks } from '../domain/trackMatcher.js';
+import { applyDocumentResultToTender } from '../services/documentApply.js';
 import { Tender } from '../../shared/types.js';
-import { checkNetworkHealth, canRunHeavyNetworkTask, isTransientNetworkError } from './networkMonitor.js';
+import { checkNetworkHealth, canRunHeavyNetworkTask, isTransientNetworkError } from '../services/networkMonitor.js';
 
 /**
  * Background document worker (docs/13-ingestion-pipeline-plan.md, §3.3).

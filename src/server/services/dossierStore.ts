@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { DOSSIERS_DIR } from '../db/connection.js';
-import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
+import { PORTAL_DEFINITIONS } from '../domain/portalList.js';
 import {
   safeDecodeURIComponent,
   isGenericDossierLabel
@@ -12,7 +12,7 @@ import {
   getPathSizeBytes,
   inferDocType,
   purgeTenderDirsOnDisk
-} from './fileUtils.js';
+} from '../domain/fileUtils.js';
 import {
   getAppSetting,
   setAppSetting

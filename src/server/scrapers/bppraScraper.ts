@@ -1,11 +1,22 @@
 import https from 'https';
+import * as cheerio from 'cheerio';
 import { BidBrief, ScanDepth } from '../../shared/types.js';
+import { isImageUrl } from '../../shared/documentUtils.js';
 import { PortalDefinition } from './portalList.js';
+import { extractDatesFromText } from './dateParser.js';
 import { sslTolerantAgent, HUMAN_CHROME_HEADERS } from './baseScraper.js';
 import { fetchHtmlSmart } from './crawlerDeps.js';
 import { launchHeadlessChromium } from './playwrightEngine.js';
 import { resolvePaginationMaxPages, shouldEarlyStopKnownPage, KnownTenderStopEntry } from './scraperUtils.js';
-import { parsePortalHtml, RawScrapedItem, ScrapeResult } from './portalParsers.js';
+import {
+  RawScrapedItem,
+  ScrapeResult,
+  extractRefFromText,
+  collectRowAttachments,
+  resolvePortalUrl
+} from './parserHelpers.js';
+import { detectHtmlAccessBlock } from './adapters/guards.js';
+import type { HtmlParseMatchResult, PortalWithSession } from './adapters/types.js';
 
 export const BPPRA_PORTAL_ORIGIN = 'https://bpptwo.vdc.services:5451';
 export const BPPRA_REPORT_API_BASE = 'https://bpptwo.vdc.services:9446';
@@ -275,6 +286,112 @@ function dedupKey(item: RawScrapedItem): string {
   return (item.referenceNo || item.directUrl || item.title).toLowerCase().trim();
 }
 
+/**
+ * Parses BPPRA ePPS multi-row tables (`tr.tender-row-main` + sibling `tr.tender-row-dates`).
+ */
+export function parseBppraHtml($: cheerio.CheerioAPI, portal: PortalDefinition): HtmlParseMatchResult {
+  // 3b. Structured BPPRA ePPS Multi-Row Table (tr.tender-row-main + sibling tr.tender-row-dates)
+  if ($('tr.tender-row-main').length === 0) {
+    return { matched: false, items: [] };
+  }
+
+  const items: RawScrapedItem[] = [];
+  $('tr.tender-row-main').each((_, el) => {
+    const footerEl = $(el).find('.td-title-footer');
+    const hasClosedBadge =
+      footerEl.find('[title="Closed"], [title="Cancelled"], [title="Canceled"], [title="Awarded"]').length > 0 ||
+      footerEl.find('.badge').toArray().some(b => /\b(Closed|Cancelled|Canceled|Awarded)\b/i.test($(b).text()));
+    if (hasClosedBadge) return;
+
+    const titleLink = $(el).find('.td-title-link').first();
+    const rawTitleBlock = (titleLink.text() || $(el).find('.td-title-cell').first().text()).replace(/\s+/g, ' ').trim();
+    if (!rawTitleBlock || rawTitleBlock.length <= 5) return;
+
+    const boldRef = titleLink.find('b').first().text().replace(/\s+/g, ' ').trim();
+    const refFromBlock = /^TSE-\d+$/i.test(boldRef) ? boldRef : extractRefFromText(rawTitleBlock);
+    let cleanTitle = rawTitleBlock;
+    if (refFromBlock) {
+      cleanTitle = cleanTitle.replace(refFromBlock, '').trim();
+    }
+    cleanTitle = cleanTitle.replace(/\s+/g, ' ').trim();
+    if (cleanTitle.length <= 5) cleanTitle = rawTitleBlock;
+
+    // Extract agency/department, district location, UNSPSC category, and budget from main row cells
+    const agencyText = $(el).find('td:nth-child(3)').text().replace(/\s+/g, ' ').trim();
+    const districtMatch = agencyText.match(/District:\s*([A-Za-z0-9\s,&/-]+?)(?=\s*$|\s+Department:)/i);
+    const rawDistrict = districtMatch?.[1]?.trim().replace(/[.,;:]+$/, '');
+    const location = rawDistrict
+      ? (/balochistan/i.test(rawDistrict) ? rawDistrict : `${rawDistrict}, Balochistan`)
+      : 'Balochistan, Pakistan';
+    const unspscText = $(el).find('td:nth-child(4)').text().replace(/\s+/g, ' ').trim();
+    const budgetText = (
+      $(el).find('td:nth-child(5)').text() ||
+      footerEl.text()
+    ).replace(/Estimated\s*budget\s*:\s*/i, '').replace(/\bOpen\b/gi, '').replace(/\s+/g, ' ').trim();
+
+    const isCorrigendum =
+      footerEl.find('[title="Corrigendum"]').length > 0 ||
+      /\bCorrigendum\s*\(/i.test(footerEl.text());
+
+    // Extract dates from sibling .tender-row-dates rows belonging to this rowspan group
+    let siblingDatesText = '';
+    let nextTr = $(el).next('tr');
+    let steps = 0;
+    while (nextTr.length > 0 && !nextTr.hasClass('tender-row-main') && steps < 3) {
+      siblingDatesText += ' ' + (nextTr.html() || nextTr.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      nextTr = nextTr.next('tr');
+      steps++;
+    }
+
+    const { publishDate, closingDate } = extractDatesFromText(siblingDatesText || $(el).text());
+
+    // Collect document links (.td-doc-link and standard file attachments)
+    const attachmentUrls = collectRowAttachments($, el, portal);
+    $(el).find('a.td-doc-link[href], .td-doc-links a[href]').each((__, aEl) => {
+      const href = $(aEl).attr('href');
+      if (href) {
+        const absUrl = resolvePortalUrl(href, portal);
+        if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
+      }
+    });
+
+    const titleHref = titleLink.attr('href');
+    const tenderDetailUrl = (titleHref && !titleHref.startsWith('#') && !titleHref.startsWith('javascript:'))
+      ? resolvePortalUrl(titleHref, portal)
+      : null;
+    const reportUrl =
+      attachmentUrls.find(u => /\/Reports\/.+(?:BiddingDocument|PQNDocument|RFPDocument).*?[?&]id=\d+/i.test(u)) ||
+      attachmentUrls.find(u => /\/Reports\/.+[?&]id=\d+/i.test(u));
+    const nonImageDoc = attachmentUrls.find(u => !isImageUrl(u));
+    const directUrl = tenderDetailUrl || reportUrl || nonImageDoc || portal.tendersUrl;
+    const summaryParts = [agencyText, unspscText].filter(Boolean);
+
+    items.push({
+      referenceNo: refFromBlock,
+      title: cleanTitle,
+      organization: agencyText || portal.name,
+      location,
+      directUrl,
+      publishDate: publishDate || undefined,
+      closingDate,
+      estimatedValue: budgetText || undefined,
+      description: summaryParts.join(' | ').slice(0, 350),
+      isCorrigendum: isCorrigendum || undefined,
+      attachmentUrls
+    });
+  });
+
+  return { matched: true, items, stopOnEmpty: false, sanitize: false };
+}
+
+function parseBppraPageHtml(html: string, portal: PortalWithSession): ScrapeResult {
+  const $ = cheerio.load(html);
+  const blocked = detectHtmlAccessBlock($, html, portal);
+  if (blocked) return blocked;
+  const res = parseBppraHtml($, portal);
+  return { items: res.items, hitlRequired: false };
+}
+
 function mergeParsedItems(
   target: RawScrapedItem[],
   seen: Set<string>,
@@ -370,7 +487,7 @@ async function fetchBppraBlazorPages(
 
     // Page 1
     const page1Html = await page.content();
-    const page1Parsed = parsePortalHtml(page1Html, portal);
+    const page1Parsed = parseBppraPageHtml(page1Html, portal);
     pagesScanned++;
     mergeParsedItems(collected, seen, page1Parsed.items);
 
@@ -385,7 +502,7 @@ async function fetchBppraBlazorPages(
       await page.waitForTimeout(400);
 
       const pageHtml = await page.content();
-      const parsed = parsePortalHtml(pageHtml, portal);
+      const parsed = parseBppraPageHtml(pageHtml, portal);
       pagesScanned++;
       if (parsed.items.length === 0) break;
 
@@ -432,7 +549,7 @@ export async function scrapeBppraPortal(
   } catch (pwErr: any) {
     console.warn(`[BPPRA] Playwright pagination fallback to HTTP SSR (${pwErr?.message || pwErr})`);
     const fetched = await fetchHtmlSmart(portal.tendersUrl, portal.sessionCookies, timeoutMs);
-    const parsed = parsePortalHtml(fetched.html, portal);
+    const parsed = parseBppraPageHtml(fetched.html, portal);
     pagesScanned = 1;
     mergeParsedItems(items, seen, parsed.items);
   }
@@ -445,7 +562,7 @@ export async function scrapeBppraPortal(
       const fetched = await fetchHtmlSmart(tabUrl, portal.sessionCookies, timeoutMs);
       if (!fetched.html) continue;
       const tabPortal: PortalDefinition = { ...portal, tendersUrl: tabUrl };
-      const parsed = parsePortalHtml(fetched.html, tabPortal);
+      const parsed = parseBppraPageHtml(fetched.html, tabPortal);
       if (parsed.items.length > 0) {
         pagesScanned++;
         mergeParsedItems(items, seen, parsed.items);

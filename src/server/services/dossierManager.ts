@@ -21,10 +21,11 @@ import {
   sslTolerantAgent,
   legacySslTolerantAgent,
   isTlsFallbackError,
-  isStrictTlsHandshakeError
-} from '../scrapers/baseScraper.js';
-import { isLegacyTlsHost, markLegacyTlsHost } from '../scrapers/htmlFetcher.js';
-import { isSppraDownloadUrl, parseSppraDownloadUrl, downloadSppraFileBuffer } from '../scrapers/sppraApi.js';
+  isStrictTlsHandshakeError,
+  isLegacyTlsHost,
+  markLegacyTlsHost
+} from '../domain/tlsTransport.js';
+import { isSppraDownloadUrl, parseSppraDownloadUrl, downloadSppraFileBuffer } from './sppraClient.js';
 import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from './networkMonitor.js';
 
 export { detectExtensionAndMime };

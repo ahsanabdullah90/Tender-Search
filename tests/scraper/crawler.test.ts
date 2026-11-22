@@ -1718,7 +1718,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(inserted.doc_fetch_status).toBe('pending');
       expect(ocrSpy).not.toHaveBeenCalled();
 
-      const { processDocumentQueue } = await import('../../src/server/services/ingestWorker.js');
+      const { processDocumentQueue } = await import('../../src/server/runtime/ingestWorker.js');
       const report = await processDocumentQueue(5);
       expect(report.claimed).toBe(1);
       expect(ocrSpy).toHaveBeenCalled();
@@ -1746,7 +1746,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(queued.doc_fetch_status).toBe('pending');
 
       // The background worker reads it; the older, past date must not delete the tender
-      const { processDocumentQueue } = await import('../../src/server/services/ingestWorker.js');
+      const { processDocumentQueue } = await import('../../src/server/runtime/ingestWorker.js');
       const report = await processDocumentQueue(5);
       expect(report.claimed).toBe(1);
       expect(ocrSpy).toHaveBeenCalled();

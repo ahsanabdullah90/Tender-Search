@@ -1,10 +1,10 @@
 import { getPktDateKey } from '../../shared/pktDate.js';
 import type { DocType } from '../../shared/types.js';
-import { inferDocType, isPdfBuffer, isDocxBuffer } from './fileUtils.js';
+import { inferDocType, isPdfBuffer, isDocxBuffer } from '../domain/fileUtils.js';
 import { extractTenderFromImage, summarizeTenderTextWithAI, OcrExtractedData } from './ocrService.js';
 import { extractTextWithLocalOcr, isLocalOcrEnabled } from './localOcrService.js';
 import { getGeminiApiKey } from '../db/repositories/systemRepo.js';
-import { DATE_CANDIDATE_PATTERN, parseDateString, normalizeExtractedDate, formatClosingDate } from '../scrapers/dateParser.js';
+import { DATE_CANDIDATE_PATTERN, parseDateString, normalizeExtractedDate, formatClosingDate } from '../domain/dateParser.js';
 import { isValidReferenceNo } from './deduplicator.js';
 import { tryConsumeDailyAiText, tryConsumeDailyVision } from './ingestBudget.js';
 

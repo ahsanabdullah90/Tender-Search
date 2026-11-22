@@ -8,8 +8,8 @@ import {
 import { deleteTenders } from '../db/repositories/tenderLifecycleRepo.js';
 import { getAllDomainTracks } from '../db/repositories/tracksRepo.js';
 import { DocumentExtractionResult } from './documentExtractor.js';
-import { resolveCanonicalDeadline, formatClosingDate, DeadlineSourceKind, DeadlineConfidence } from '../scrapers/dateParser.js';
-import { applyDocumentScopeToTracks } from '../scrapers/trackMatcher.js';
+import { resolveCanonicalDeadline, formatClosingDate, DeadlineSourceKind, DeadlineConfidence } from '../domain/dateParser.js';
+import { applyDocumentScopeToTracks } from '../domain/trackMatcher.js';
 import { Tender } from '../../shared/types.js';
 
 /**

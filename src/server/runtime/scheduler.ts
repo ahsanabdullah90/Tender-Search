@@ -15,11 +15,11 @@ import {
 import { getAppSetting, setAppSetting, getAlertsDigest, getDigestSettings } from '../db/repositories/systemRepo.js';
 import { ScanDepth, DigestSummary } from '../../shared/types.js';
 import { startCrawlerScan, getActivePortalsList, currentScanStatus, crawlerDeps } from '../scrapers/crawlerEngine.js';
-import { formatClosingDate } from '../scrapers/dateParser.js';
-import { findSubmissionDeadlines } from './documentExtractor.js';
-import { migrateDossierFilenames, reclassifyExistingDossiersFromText } from './dossierStore.js';
-import { runRetentionCycle } from './retention.js';
-import { backfillModelEmbeddings } from './embeddingBackfill.js';
+import { formatClosingDate } from '../domain/dateParser.js';
+import { findSubmissionDeadlines } from '../services/documentExtractor.js';
+import { migrateDossierFilenames, reclassifyExistingDossiersFromText } from '../services/dossierStore.js';
+import { runRetentionCycle } from '../services/retention.js';
+import { backfillModelEmbeddings } from '../services/embeddingBackfill.js';
 import { drainDocumentQueue } from './ingestWorker.js';
 import {
   checkNetworkHealth,
@@ -28,7 +28,7 @@ import {
   canRunLightNetworkTask,
   isDeepScanPending,
   setDeepScanPending
-} from './networkMonitor.js';
+} from '../services/networkMonitor.js';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 let retentionInterval: NodeJS.Timeout | null = null;

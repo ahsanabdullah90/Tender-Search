@@ -1,6 +1,6 @@
 import { db } from './connection.js';
 import { sanitizeOriginUrl } from '../../shared/documentUtils.js';
-import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
+import { PORTAL_DEFINITIONS } from '../domain/portalList.js';
 import { backfillExistingTenderDocumentJobs } from './repositories/ingestJobsRepo.js';
 import { backfillReferenceNorms, removeSelfSecondarySources } from './repositories/tendersRepo.js';
 

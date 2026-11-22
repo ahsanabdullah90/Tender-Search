@@ -7,7 +7,7 @@ import {
   reScoreTendersAgainstTracks,
   closeDatabase
 } from './src/server/db/index.js';
-import { initStartupScheduler, stopStartupScheduler } from './src/server/services/scheduler.js';
+import { initStartupScheduler, stopStartupScheduler } from './src/server/runtime/scheduler.js';
 import { initEmbeddingModel } from './src/server/services/embeddingService.js';
 import { backfillModelEmbeddings } from './src/server/services/embeddingBackfill.js';
 import { apiRouter } from './src/server/routes/index.js';

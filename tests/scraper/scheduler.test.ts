@@ -8,7 +8,7 @@ import {
   maybeDispatchDailyDigest,
   getPktDateKey,
   recheckEarlierDeadlineReviewTenders
-} from '../../src/server/services/scheduler.js';
+} from '../../src/server/runtime/scheduler.js';
 import {
   networkMonitorDeps,
   resetNetworkMonitorForTests,

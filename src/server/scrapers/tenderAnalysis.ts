@@ -1,4 +1,3 @@
-import * as cheerio from 'cheerio';
 import {
   getTenderById,
   updateTenderFields,
@@ -29,9 +28,9 @@ import { applyDocumentResultToTender } from '../services/documentApply.js';
 import { summarizeTenderTextWithAI } from '../services/ocrService.js';
 import { tryConsumeDailyAiText } from '../services/ingestBudget.js';
 import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
-import { isGenericListingUrl, collectRowAttachments, parseEpmsDetailHtml, cleanRowSummary } from './portalParsers.js';
-import { extractSppraPublishedDocId, fetchSppraPublishedDocuments } from './sppraApi.js';
-import { extractBppraBidId, fetchBppraDetailMetadata } from './bppraScraper.js';
+import { cleanRowSummary } from './parserHelpers.js';
+import { extractHtmlDetailTargets } from './adapters/guards.js';
+import { runDetailEnrichment } from './adapters/registry.js';
 import { orderDocumentCandidates } from './ingestPipeline.js';
 import { crawlerDeps } from './crawlerDeps.js';
 
@@ -47,21 +46,6 @@ function resolvePortalDefForTender(tender: Tender): PortalDefinition {
       tendersUrl: tender.direct_url
     } as PortalDefinition)
   );
-}
-
-function findListingRowContainer($: cheerio.CheerioAPI, tender: Tender): cheerio.Cheerio<any> | null {
-  let matchingContainer: cheerio.Cheerio<any> | null = null;
-  $('tr, .job-post-item, .tender-card, .card, article').each((_, el) => {
-    const text = $(el).text();
-    if (
-      (tender.reference_no && text.includes(tender.reference_no)) ||
-      (tender.title && text.toLowerCase().includes(tender.title.toLowerCase().slice(0, 30)))
-    ) {
-      matchingContainer = $(el);
-      return false;
-    }
-  });
-  return matchingContainer;
 }
 
 async function downloadAndAttachCandidateUrl(
@@ -128,31 +112,6 @@ export function isReadableDocumentMime(mimeType?: string | null): boolean {
       mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     )
   );
-}
-
-/**
- * Applies structured deterministic metadata parsed from an EPMS PPRA detail page
- * (`epms.ppra.gov.pk/public/tenders/tender-details/...`) onto the tender record
- * without consuming Gemini API quota.
- */
-function applyEpmsDetailMetadata(tender: Tender, html: string, forceRefresh: boolean = false): void {
-  if (!tender.direct_url?.includes('epms.ppra.gov.pk')) return;
-  const meta = parseEpmsDetailHtml(html);
-  if (!meta) return;
-
-  const updates: Partial<Tender> = {};
-  if (meta.bidBrief && (forceRefresh || !tender.bid_brief)) {
-    updates.bid_brief = meta.bidBrief;
-  }
-  if (meta.description && (forceRefresh || !tender.description || meta.description.length > tender.description.length + 20)) {
-    updates.description = meta.description;
-  }
-  if (meta.location && (!tender.location || tender.location === 'Pakistan')) {
-    updates.location = meta.location;
-  }
-  if (Object.keys(updates).length > 0) {
-    updateTenderFields(tender.id, updates);
-  }
 }
 
 export interface FetchDocumentsResult {
@@ -256,20 +215,30 @@ async function runFetchDocumentsForTender(
     await downloadAndAttachUrl(knownUrls[idx], idx);
   }
 
-  // Step B: Inspect detail source (SPPRA API, BPPRA :9446 API, or HTML detail page) when needed.
+  // Step B: Inspect detail source (adapter enrichment or HTML detail page) when needed.
   let detailPageChecked = false;
-  const spPublishedDocId = tender.portal_id === 'sppra' ? extractSppraPublishedDocId(tender.direct_url) : null;
-  const bppraBidId = tender.portal_id === 'bppra'
-    ? (
-        extractBppraBidId(tender.direct_url) ??
-        (tender.attachment_urls || []).map(u => extractBppraBidId(u)).find((id): id is number => id !== null) ??
-        null
-      )
-    : null;
-  if (spPublishedDocId && (dossiers.length < 2 || Boolean(options.forceRefresh))) {
-    try {
-      const discoveredUrls = await fetchSppraPublishedDocuments(spPublishedDocId);
-      detailPageChecked = true;
+  const portalDef = resolvePortalDefForTender(tender);
+
+  try {
+    const enrichment = await runDetailEnrichment({
+      tender,
+      portal: portalDef,
+      existingDossierCount: dossiers.length,
+      forceRefresh: Boolean(options.forceRefresh),
+      fetchHtml: (url: string) => crawlerDeps.fetchHtml(url)
+    });
+
+    if (enrichment?.handled) {
+      if (enrichment.checked !== false) {
+        detailPageChecked = true;
+      }
+      if (enrichment.fieldUpdates && Object.keys(enrichment.fieldUpdates).length > 0) {
+        updateTenderFields(tender.id, enrichment.fieldUpdates);
+      }
+      if (enrichment.extractedText) {
+        appendTenderExtractedText(tender.id, enrichment.extractedText);
+      }
+      const discoveredUrls = enrichment.discoveredUrls || [];
       if (discoveredUrls.length > 0) {
         mergeTenderAttachmentUrls(tender.id, discoveredUrls);
       }
@@ -277,86 +246,29 @@ async function runFetchDocumentsForTender(
         if (dossiers.length >= 5) break;
         await downloadAndAttachUrl(discoveredUrls[idx], dossiers.length + idx);
       }
-    } catch (err: any) {
-      console.warn(`[FetchDocs] Could not fetch SPPRA published docs for ${tender.id} (pdid=${spPublishedDocId}):`, err.message);
-      if (options.throwOnDetailError && dossiers.length === 0) {
-        throw err;
-      }
-    }
-  } else if (bppraBidId && (Boolean(options.forceRefresh) || !tender.bid_brief || dossiers.length === 0)) {
-    try {
-      const meta = await fetchBppraDetailMetadata(bppraBidId);
-      detailPageChecked = true;
-      if (meta) {
-        const metaUpdates: Parameters<typeof updateTenderFields>[1] = {};
-        if (options.forceRefresh || !tender.bid_brief) {
-          metaUpdates.bid_brief = meta.bidBrief;
-        }
-        if (meta.isCorrigendum && !tender.has_corrigendum) {
-          metaUpdates.has_corrigendum = 1;
-        }
-        if (Object.keys(metaUpdates).length > 0) {
-          updateTenderFields(tender.id, metaUpdates);
-        }
-        if (meta.extractedText) {
-          appendTenderExtractedText(tender.id, meta.extractedText);
-        }
-        if (meta.boqPdfUrl) {
-          mergeTenderAttachmentUrls(tender.id, [meta.boqPdfUrl]);
-          await downloadAndAttachUrl(meta.boqPdfUrl, dossiers.length);
-        }
-      }
-    } catch (err: any) {
-      console.warn(`[FetchDocs] Could not fetch BPPRA NIT metadata for ${tender.id} (bidId=${bppraBidId}):`, err.message);
-      if (options.throwOnDetailError && dossiers.length === 0) {
-        throw err;
-      }
-    }
-  } else if (
-    tender.portal_id !== 'sppra' &&
-    tender.portal_id !== 'bppra' &&
-    tender.direct_url &&
-    tender.direct_url.startsWith('http') &&
-    !isDirectFile &&
-    (dossiers.length === 0 || Boolean(options.forceRefresh) || tender.direct_url.includes('epms.ppra.gov.pk'))
-  ) {
-    const portalDef = resolvePortalDefForTender(tender);
-    const isListing = isGenericListingUrl(tender.direct_url, portalDef);
-
-    try {
+    } else if (
+      tender.direct_url &&
+      tender.direct_url.startsWith('http') &&
+      !isDirectFile &&
+      (dossiers.length === 0 || Boolean(options.forceRefresh))
+    ) {
       const html = await crawlerDeps.fetchHtml(tender.direct_url);
       detailPageChecked = true;
-      applyEpmsDetailMetadata(tender, html, Boolean(options.forceRefresh));
-      const $ = cheerio.load(html);
-      $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
-
-      let targetEl: any = $('body').get(0);
-      let skipListingAttachmentScrape = false;
-
-      if (isListing) {
-        const matchingContainer = findListingRowContainer($, tender);
-        if (matchingContainer) {
-          targetEl = (matchingContainer as any).get(0);
-        } else {
-          skipListingAttachmentScrape = true;
+      const extracted = extractHtmlDetailTargets(html, tender, portalDef);
+      if (extracted.found) {
+        if (extracted.discoveredUrls.length > 0) {
+          mergeTenderAttachmentUrls(tender.id, extracted.discoveredUrls);
         }
-      }
-
-      if (!skipListingAttachmentScrape) {
-        const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
-        if (discoveredUrls.length > 0) {
-          mergeTenderAttachmentUrls(tender.id, discoveredUrls);
-        }
-        for (let idx = 0; idx < discoveredUrls.slice(0, 5).length; idx++) {
+        for (let idx = 0; idx < extracted.discoveredUrls.slice(0, 5).length; idx++) {
           if (dossiers.length >= 5) break;
-          await downloadAndAttachUrl(discoveredUrls[idx], dossiers.length + idx);
+          await downloadAndAttachUrl(extracted.discoveredUrls[idx], dossiers.length + idx);
         }
       }
-    } catch (err: any) {
-      console.warn(`[FetchDocs] Could not fetch detail page for ${tender.id}:`, err.message);
-      if (options.throwOnDetailError && dossiers.length === 0) {
-        throw err;
-      }
+    }
+  } catch (err: any) {
+    console.warn(`[FetchDocs] Could not fetch detail source for ${tender.id}:`, err.message);
+    if (options.throwOnDetailError && dossiers.length === 0) {
+      throw err;
     }
   }
 
@@ -466,21 +378,27 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
       });
     } else {
       const portalDef = resolvePortalDefForTender(tender);
-      const isListing = isGenericListingUrl(tender.direct_url, portalDef);
 
       try {
-        const html = await crawlerDeps.fetchHtml(tender.direct_url);
-        applyEpmsDetailMetadata(tender, html, Boolean(options.forceRefresh));
-        const $ = cheerio.load(html);
-        $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
+        const enrichment = await runDetailEnrichment({
+          tender,
+          portal: portalDef,
+          existingDossierCount: dossiers.length,
+          forceRefresh: Boolean(options.forceRefresh),
+          fetchHtml: (url: string) => crawlerDeps.fetchHtml(url)
+        });
 
-        const targetEl: any = isListing ? (findListingRowContainer($, tender)?.get(0) ?? null) : $('body').get(0);
-        if (targetEl) {
-          detailText = (isListing ? $(targetEl) : $('main, article, .content, .card, .package-details, body').first())
-            .text()
-            .replace(/\s+/g, ' ')
-            .trim();
-          const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
+        if (enrichment?.handled) {
+          if (enrichment.fieldUpdates && Object.keys(enrichment.fieldUpdates).length > 0) {
+            updateTenderFields(tender.id, enrichment.fieldUpdates);
+          }
+          if (enrichment.extractedText) {
+            appendTenderExtractedText(tender.id, enrichment.extractedText);
+          }
+          if (enrichment.detailText) {
+            detailText = enrichment.detailText;
+          }
+          const discoveredUrls = enrichment.discoveredUrls || [];
           for (let idx = 0; idx < discoveredUrls.slice(0, 3).length; idx++) {
             await downloadAndAttachCandidateUrl(tender, portalCode, discoveredUrls[idx], idx, dossiers, cachedUrls, {
               maxDossiers: Number.MAX_SAFE_INTEGER,
@@ -488,7 +406,19 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
             });
           }
         } else {
-          console.warn(`[Analyze] Tender ${tender.id} has listing URL ${tender.direct_url} and was not found in page rows. Skipping body PDF scraping.`);
+          const html = await crawlerDeps.fetchHtml(tender.direct_url);
+          const extracted = extractHtmlDetailTargets(html, tender, portalDef);
+          if (extracted.found) {
+            detailText = extracted.detailText;
+            for (let idx = 0; idx < extracted.discoveredUrls.slice(0, 3).length; idx++) {
+              await downloadAndAttachCandidateUrl(tender, portalCode, extracted.discoveredUrls[idx], idx, dossiers, cachedUrls, {
+                maxDossiers: Number.MAX_SAFE_INTEGER,
+                warnPrefix: 'Analyze'
+              });
+            }
+          } else {
+            console.warn(`[Analyze] Tender ${tender.id} has listing URL ${tender.direct_url} and was not found in page rows. Skipping body PDF scraping.`);
+          }
         }
       } catch (err: any) {
         console.warn(`[Analyze] Could not fetch detail page for ${tender.id}:`, err.message);
@@ -561,8 +491,9 @@ export async function analyzeTenderById(tenderId: string, options: { forceRefres
     }
   }
 
-  if (detailText && !tender.description) {
+  const latestTender = getTenderById(tender.id);
+  if (detailText && !(latestTender?.description ?? tender.description)) {
     return updateTenderFields(tender.id, { description: cleanRowSummary(detailText, tender.title) });
   }
-  return getTenderById(tender.id);
+  return latestTender;
 }

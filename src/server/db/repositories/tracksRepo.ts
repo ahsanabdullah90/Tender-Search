@@ -1,6 +1,6 @@
 import { db, safeJsonParse } from '../connection.js';
 import { DomainTrack, CorrigendumLog } from '../../../shared/types.js';
-import { matchTracks, applyDocumentScopeToTracks } from '../../scrapers/trackMatcher.js';
+import { matchTracks, applyDocumentScopeToTracks } from '../../domain/trackMatcher.js';
 import {
   buildTrackEmbeddingText,
   buildTenderEmbeddingText,
@@ -8,7 +8,7 @@ import {
   serializeEmbedding,
   EMBEDDING_BLOB_BYTES,
   MINILM_BLOB_HEADER_HEX
-} from '../../services/embeddingService.js';
+} from '../../domain/embeddingService.js';
 
 export interface TrackEmbeddingBackfillRow {
   id: string;

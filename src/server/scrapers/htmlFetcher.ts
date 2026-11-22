@@ -1,35 +1,27 @@
 import http from 'http';
 import https from 'https';
-import { HUMAN_CHROME_HEADERS, sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError, isStrictTlsHandshakeError } from './baseScraper.js';
+import { HUMAN_CHROME_HEADERS } from './baseScraper.js';
+import {
+  sslTolerantAgent,
+  legacySslTolerantAgent,
+  isTlsFallbackError,
+  isStrictTlsHandshakeError,
+  markLegacyTlsHost,
+  isLegacyTlsHost
+} from '../domain/tlsTransport.js';
 import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_HTML_MS } from '../services/networkMonitor.js';
+
+export {
+  LEGACY_TLS_TTL_MS,
+  resetLegacyTlsHostsForTests,
+  markLegacyTlsHost,
+  isLegacyTlsHost
+} from '../domain/tlsTransport.js';
 
 export interface HtmlFetchResult {
   html: string;
   finalUrl: string;
   cookies?: string;
-}
-
-export const LEGACY_TLS_TTL_MS = 30 * 60 * 1000;
-const legacyTlsHosts = new Map<string, number>();
-
-export function resetLegacyTlsHostsForTests(): void {
-  legacyTlsHosts.clear();
-}
-
-export function markLegacyTlsHost(hostname: string): void {
-  if (!hostname) return;
-  legacyTlsHosts.set(hostname.toLowerCase(), Date.now());
-}
-
-export function isLegacyTlsHost(hostname: string): boolean {
-  const key = hostname.toLowerCase();
-  const cachedAt = legacyTlsHosts.get(key);
-  if (cachedAt === undefined) return false;
-  if (Date.now() - cachedAt > LEGACY_TLS_TTL_MS) {
-    legacyTlsHosts.delete(key);
-    return false;
-  }
-  return true;
 }
 
 function mergeCookies(existing?: string, setCookieHeaders?: string[]): string | undefined {

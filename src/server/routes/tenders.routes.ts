@@ -18,7 +18,7 @@ import {
   refreshTenderDocFetchStatus,
   getGeminiApiKey
 } from '../db/index.js';
-import { drainDocumentQueue } from '../services/ingestWorker.js';
+import { drainDocumentQueue } from '../runtime/ingestWorker.js';
 import { TENDER_STATUSES } from '../../shared/types.js';
 import { analyzeTenderById, fetchDocumentsForTender, matchTracks, parseDateString, formatClosingDate } from '../scrapers/crawlerEngine.js';
 import { saveManualDossier } from '../services/dossierManager.js';

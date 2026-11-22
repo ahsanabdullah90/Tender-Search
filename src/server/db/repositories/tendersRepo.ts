@@ -1,6 +1,6 @@
 import { db, safeJsonParse } from '../connection.js';
 import { Tender, BidBrief } from '../../../shared/types.js';
-import { normalizeReferenceNo } from '../../services/referenceNo.js';
+import { normalizeReferenceNo } from '../../domain/referenceNo.js';
 import {
   ACTIVE_UNEXPIRED_SQL,
   NOT_STAGING_SQL,
@@ -13,7 +13,7 @@ import {
   serializeEmbedding,
   EMBEDDING_BLOB_BYTES,
   MINILM_BLOB_HEADER_HEX
-} from '../../services/embeddingService.js';
+} from '../../domain/embeddingService.js';
 
 export function setTenderIngestionStatus(id: string, status: IngestionStatus): boolean {
   return db.prepare('UPDATE tenders SET ingestion_status = ? WHERE id = ?').run(status, id).changes > 0;

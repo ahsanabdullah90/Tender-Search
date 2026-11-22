@@ -115,6 +115,9 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Pluggable `PortalAdapter` Registry & Unidirectional Server Architecture (November 22, 2026)**:
+  - **Milestone #1 (`src/server/scrapers/adapters/`)**: Replaced scattered portal branching across `crawlerEngine.ts`, `portalParsers.ts`, and `tenderAnalysis.ts` with a pluggable `PortalAdapter` registry (`registry.ts`, `types.ts`, `guards.ts`, `genericAdapter.ts`, `epmsPpraAdapter.ts`, `punjabEprocAdapter.ts`, `sppraAdapter.ts`, `kppraAdapter.ts`, `bppraAdapter.ts`, `gbppraAdapter.ts`, `ajkPpraAdapter.ts`, `agencyAdapters.ts`), preserving full fallthrough guarantees, exact `bppra`/`sppra`/`kppra` transport behavior, and all backward-compatible facade exports (`tests/scraper/portal-adapters.test.ts`).
+  - **Milestone #2 (`src/server/domain/`, `src/server/runtime/`, `GOV-4`)**: Extracted pure domain modules (`paths.ts`, `portalList.ts`, `dateParser.ts`, `referenceNo.ts`, `fileUtils.ts`, `tlsTransport.ts`, `detailDiscovery.ts`, `embeddingService.ts`, `trackMatcher.ts`) into `src/server/domain/` with downward re-export shims at legacy paths, moved SPPRA DMS transport to `src/server/services/sppraClient.ts` so `dossierManager.ts` has zero `scrapers/` dependencies, moved `ingestWorker.ts` & `scheduler.ts` into `src/server/runtime/`, and enforced strict unidirectional layering (`shared -> domain -> db -> services -> scrapers -> runtime -> routes`) permanently via `GOV-4` in `tests/unit/system-governance.test.ts`.
 - **Full-Repository Codebase Audit & 5-Phase Structural Refactoring (November 22, 2026)**:
   - **Phase 1 (Bug, Concurrency & Error-Handling Hardening)**: Tightened error propagation, race guards, and timeout/cleanup safety across scrapers and services.
   - **Phase 2 (Legacy & Dead-Code Pruning)**: Removed obsolete code paths, stale helpers, and dead branches while keeping runtime behavior intact.
@@ -193,7 +196,7 @@
 - **`awaiting_scope` Lifecycle, Rescoring & Document Queue Hardening (Maintenance Update, November 16, 2026)**:
   - Added `isDownloadableCandidateUrl` filtering in `src/server/scrapers/ingestPipeline.ts` and `src/server/db/repositories/ingestJobsRepo.ts` so non-downloadable `.html`/`.aspx`/`.php`/`.jsp` viewer links do not displace real PDFs or generate guaranteed-fail `document_ingest_jobs`.
   - Updated `reScoreTendersAgainstTracks` in `src/server/db/repositories/tracksRepo.ts` to re-evaluate stored `extracted_text` via `applyDocumentScopeToTracks`, and updated `saveDomainTrack` to preserve existing `minilm` track embeddings when `name` and `positive_keywords` are unchanged.
-  - Updated `processJob` (`src/server/services/ingestWorker.ts`) with `finalizeAwaitingScopeAfterJobFailure` so `awaiting_scope` tenders with permanently failed jobs either queue remaining downloadable attachments or finalize as `no-track-match` once a prior document was read without matching.
+  - Updated `processJob` (`src/server/runtime/ingestWorker.ts`) with `finalizeAwaitingScopeAfterJobFailure` so `awaiting_scope` tenders with permanently failed jobs either queue remaining downloadable attachments or finalize as `no-track-match` once a prior document was read without matching.
   - Added optional `graceDays` override to `runRetentionCycle` (`src/server/services/retention.ts`) and ran a live DB cleanup + MiniLM backfill on `./data/tender_tracker.db` (`179/179` tenders indexed with `all-MiniLM-L6-v2`).
 
 ### Version 1.8.0 (November 13, 2026)

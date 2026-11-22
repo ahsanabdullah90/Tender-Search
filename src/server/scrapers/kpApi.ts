@@ -1,4 +1,4 @@
-import { RawScrapedItem, ScrapeResult, isNonBidEvaluationOrPlanTitle, extractLocationFromPatterns } from './portalParsers.js';
+import { RawScrapedItem, ScrapeResult, isNonBidEvaluationOrPlanTitle, extractLocationFromPatterns } from './parserHelpers.js';
 import { PortalDefinition } from './portalList.js';
 import { parseDateString, formatClosingDate } from './dateParser.js';
 import { isValidReferenceNo } from '../services/referenceNo.js';

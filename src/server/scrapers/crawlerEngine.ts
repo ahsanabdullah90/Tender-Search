@@ -9,9 +9,7 @@ import {
   getKnownTenderMapForPortal,
   getDocumentQueueCounts
 } from '../db/index.js';
-import { scrapeSppraPortal } from './sppraApi.js';
-import { scrapeKpPortal } from './kpApi.js';
-import { scrapeBppraPortal } from './bppraScraper.js';
+import { getPortalAdapter } from './adapters/registry.js';
 import { fetchHtmlWithTolerantAgent } from './htmlFetcher.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { getHumanJitterDelay, HUMAN_CHROME_HEADERS } from './baseScraper.js';
@@ -581,48 +579,24 @@ export async function scrapePortal(
   options?: { depth?: ScanDepth; degradedMode?: boolean }
 ): Promise<ScrapeResult> {
   const usingRealTransport = crawlerDeps.fetchHtml === fetchHtmlWithTolerantAgent;
+  const adapter = getPortalAdapter(portal.id);
 
-  // Sindh SPPRA (portalsindh.eprocure.gov.pk) serves its public tender board via the official EPADS WSO2 JSON API.
-  if (portal.id === 'sppra') {
+  if (adapter.scrapeListings) {
     const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
-    const knownMap = depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null;
-    const spResult = await scrapeSppraPortal(portal, {
+    const customResult = await adapter.scrapeListings(portal, {
       depth,
-      knownMap,
-      timeoutMs: options?.degradedMode ? 45000 : 20000
+      degradedMode: Boolean(options?.degradedMode),
+      usingRealTransport,
+      getKnownMap: () => (depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null)
     });
-    spResult.items = sanitizeScrapedItems(spResult.items, portal);
-    return spResult;
-  }
-
-  // Khyber Pakhtunkhwa KPPRA & KP Portal serve active listings via the public REST API at mgn1.kp.gov.pk/api/tenders.
-  if (portal.id === 'kppra') {
-    const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
-    const knownMap = depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null;
-    const kpResult = await scrapeKpPortal(portal, {
-      depth,
-      knownMap,
-      timeoutMs: options?.degradedMode ? 45000 : 20000
-    });
-    kpResult.items = sanitizeScrapedItems(kpResult.items, portal);
-    return kpResult;
-  }
-
-  // Balochistan BPPRA (bpptwo.vdc.services:5451) uses Blazor Server pagination (Active Tenders, 100/page) + /RFP, /PreQualification, /EOI tabs.
-  if (portal.id === 'bppra' && usingRealTransport && portal.tendersUrl.includes('bpptwo.vdc.services')) {
-    const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
-    const knownMap = depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null;
-    const bpResult = await scrapeBppraPortal(portal, {
-      depth,
-      knownMap,
-      timeoutMs: options?.degradedMode ? 45000 : 25000
-    });
-    bpResult.items = sanitizeScrapedItems(bpResult.items, portal);
-    return bpResult;
+    if (customResult) {
+      customResult.items = sanitizeScrapedItems(customResult.items, portal);
+      return customResult;
+    }
   }
 
   const htmlTimeoutMs = options?.degradedMode
-    ? (portal.tendersUrl.includes('epms.ppra.gov.pk') ? 55000 : 45000)
+    ? (adapter.transport?.degradedTimeoutMs ?? 45000)
     : undefined;
   let html: string | null = null;
   let fetchError: any = null;
@@ -754,9 +728,10 @@ export async function scrapePortal(
 
       try {
         await crawlerDeps.sleep(getHumanJitterDelay(1500, 3000));
+        const forwardCookies = adapter.transport?.forwardResponseCookiesOnPagination ?? true;
         const pageFetched = postBody
           ? await postFormSmart(pageUrl, postBody, currentCookies, htmlTimeoutMs)
-          : await fetchHtmlSmart(pageUrl, portal.id === 'epms_ppra' ? portal.sessionCookies : currentCookies, htmlTimeoutMs);
+          : await fetchHtmlSmart(pageUrl, forwardCookies ? currentCookies : portal.sessionCookies, htmlTimeoutMs);
         if (!pageFetched.html) break;
         currentPageHtml = pageFetched.html;
         if (pageFetched.cookies) currentCookies = pageFetched.cookies;

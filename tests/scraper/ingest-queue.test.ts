@@ -25,7 +25,7 @@ import {
   addProgressListener,
   removeProgressListener
 } from '../../src/server/scrapers/crawlerEngine.js';
-import { processDocumentQueue, drainDocumentQueue } from '../../src/server/services/ingestWorker.js';
+import { processDocumentQueue, drainDocumentQueue } from '../../src/server/runtime/ingestWorker.js';
 import { networkMonitorDeps, resetNetworkMonitorForTests, checkNetworkHealth } from '../../src/server/services/networkMonitor.js';
 import { beginScanBudget, endScanBudget } from '../../src/server/services/ingestBudget.js';
 import { findSubmissionDeadlines } from '../../src/server/services/documentExtractor.js';

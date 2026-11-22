@@ -6,6 +6,9 @@ import {
   isDownloadableCandidateUrl,
   isCorrigendumLabel
 } from '../../../shared/documentUtils.js';
+import { isDetailPageDiscoveryUrl } from '../../domain/detailDiscovery.js';
+
+export { isDetailPageDiscoveryUrl };
 
 /**
  * Durable document-ingest queue (docs/13-ingestion-pipeline-plan.md, Phase 1.2).
@@ -44,25 +47,6 @@ export const DETAIL_DISCOVER_LABEL = '__detail_discover__';
 
 /** Retry delays after the 1st, 2nd, 3rd... failed attempt (minutes). The last value repeats. */
 export const JOB_BACKOFF_MINUTES = [2, 10, 30];
-
-/**
- * Dedicated tender detail pages whose listing row omits downloadable PDF/attachment links,
- * so the background worker must inspect the detail page HTML once to discover them.
- * Generic listing URLs and unrelated sites are excluded so tests and non-document links stay untouched.
- */
-export function isDetailPageDiscoveryUrl(url?: string | null, portalId?: string | null): boolean {
-  if (!url || !/^https?:\/\//i.test(url)) return false;
-  if (isDirectDocumentUrl(url)) return false;
-  if (/epms\.ppra\.gov\.pk\/public\/tenders\/tender-details\//i.test(url)) return true;
-  if (portalId === 'epms_ppra' && /\/tender-details\//i.test(url)) return true;
-  if (/fde\.gov\.pk\/download\/[^/?#]+/i.test(url) && !/\/download-category\//i.test(url) && !/[?&]wpdmdl=\d+/i.test(url)) {
-    return true;
-  }
-  if (portalId === 'bppra' && /bpptwo\.vdc\.services:9446\/+Reports\/.+[?&]id=\d+/i.test(url)) {
-    return true;
-  }
-  return false;
-}
 
 /**
  * Corrigenda/addenda/extensions first (they can change the deadline), then the main bidding

@@ -6,7 +6,7 @@ import { getPortalHealthList, savePortalCredentials } from '../../src/server/db/
 import { tryConsumeDailyAiText, getDailyAiTextUsage } from '../../src/server/services/ingestBudget.js';
 import { setAppSetting, getAppSetting } from '../../src/server/db/repositories/systemRepo.js';
 import { findDedupCandidates } from '../../src/server/db/repositories/tendersRepo.js';
-import { processDocumentQueue } from '../../src/server/services/ingestWorker.js';
+import { processDocumentQueue } from '../../src/server/runtime/ingestWorker.js';
 import { currentScanStatus } from '../../src/server/scrapers/crawlerEngine.js';
 import { hasProcurementSignals } from '../../src/server/scrapers/portalParsers.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
@@ -250,9 +250,11 @@ describe('System Governance, Security & Operational Invariants', () => {
       walk(srcRoot);
 
       const graph = new Map<string, string[]>();
+      const stripComments = (source: string) =>
+        source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n\r]*/g, '');
       const importRe = /(?:import|export)\s+(?:type\s+)?(?:[\w*{},\s$]+)\s+from\s+['"](\.[^'"]+)['"]|import\s*\(\s*['"](\.[^'"]+)['"]\s*\)|import\s+['"](\.[^'"]+)['"]/g;
       for (const file of files) {
-        const content = fs.readFileSync(file, 'utf8');
+        const content = stripComments(fs.readFileSync(file, 'utf8'));
         const targets: string[] = [];
         importRe.lastIndex = 0;
         let match: RegExpExecArray | null;
@@ -296,6 +298,70 @@ describe('System Governance, Security & Operational Invariants', () => {
       }
 
       expect([...cycles].sort()).toEqual([]);
+    });
+  });
+
+  describe('GOV-4 (Layer Boundaries): Unidirectional server architecture', () => {
+    it('enforces shared -> domain -> db -> services -> scrapers -> runtime -> routes without upward imports', () => {
+      const srcRoot = path.resolve(__dirname, '../../src');
+      const files: string[] = [];
+      const walk = (dir: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (/\.(ts|tsx)$/.test(entry.name)) files.push(full);
+        }
+      };
+      walk(srcRoot);
+
+      const rankOf = (rel: string): number => {
+        if (rel.startsWith('shared/')) return 0;
+        if (rel.startsWith('server/domain/')) return 1;
+        if (rel.startsWith('server/db/')) return 2;
+        if (rel.startsWith('server/services/')) return 3;
+        if (rel.startsWith('server/scrapers/')) return 4;
+        if (rel.startsWith('server/runtime/')) return 5;
+        if (rel.startsWith('server/routes/')) return 6;
+        return -1;
+      };
+
+      const stripComments = (source: string) =>
+        source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n\r]*/g, '');
+      const importRe = /(?:import|export)\s+(?:type\s+)?(?:[\w*{},\s$]+)\s+from\s+['"](\.[^'"]+)['"]|import\s*\(\s*['"](\.[^'"]+)['"]\s*\)|import\s+['"](\.[^'"]+)['"]/g;
+      const violations: string[] = [];
+
+      for (const file of files) {
+        const fromRel = path.relative(srcRoot, file).replace(/\\/g, '/');
+        const fromRank = rankOf(fromRel);
+        if (fromRank === -1) continue;
+
+        const clean = stripComments(fs.readFileSync(file, 'utf8'));
+        importRe.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = importRe.exec(clean))) {
+          const spec = match[1] || match[2] || match[3];
+          if (!spec) continue;
+          const base = path.resolve(path.dirname(file), spec.replace(/\.js$/, ''));
+          const hit = [
+            `${base}.ts`,
+            `${base}.tsx`,
+            path.join(base, 'index.ts'),
+            path.join(base, 'index.tsx'),
+            base
+          ].find(c => fs.existsSync(c) && fs.statSync(c).isFile());
+          if (!hit) continue;
+
+          const toRel = path.relative(srcRoot, hit).replace(/\\/g, '/');
+          const toRank = rankOf(toRel);
+          if (fromRel.startsWith('shared/') && toRank !== 0) {
+            violations.push(`${fromRel} -> ${toRel}`);
+          } else if (toRank !== -1 && toRank > fromRank) {
+            violations.push(`${fromRel} (layer ${fromRank}) -> ${toRel} (layer ${toRank})`);
+          }
+        }
+      }
+
+      expect(violations).toEqual([]);
     });
   });
 });

@@ -5,7 +5,7 @@ import path from 'path';
 import { createApp } from '../../server.js';
 import { crawlerDeps, currentScanStatus } from '../../src/server/scrapers/crawlerEngine.js';
 import { scanRouteDeps } from '../../src/server/routes/scan.routes.js';
-import { schedulerDeps, stopStartupScheduler } from '../../src/server/services/scheduler.js';
+import { schedulerDeps, stopStartupScheduler } from '../../src/server/runtime/scheduler.js';
 import {
   db,
   initDatabase,
