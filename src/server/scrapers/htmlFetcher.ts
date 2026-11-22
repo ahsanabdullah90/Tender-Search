@@ -9,6 +9,16 @@ export interface HtmlFetchResult {
   cookies?: string;
 }
 
+const legacyTlsHosts = new Set<string>();
+
+export function resetLegacyTlsHostsForTests(): void {
+  legacyTlsHosts.clear();
+}
+
+export function isLegacyTlsHost(hostname: string): boolean {
+  return legacyTlsHosts.has(hostname.toLowerCase());
+}
+
 function mergeCookies(existing?: string, setCookieHeaders?: string[]): string | undefined {
   const map = new Map<string, string>();
   for (const part of (existing || '').split(';')) {
@@ -77,6 +87,8 @@ function requestHtmlWithMetadata(
     }
 
     const isHttps = parsedUrl.protocol === 'https:';
+    const hostKey = parsedUrl.hostname.toLowerCase();
+    const effectiveUseLegacyTls = useLegacyTls || (isHttps && legacyTlsHosts.has(hostKey));
     const client = isHttps ? https : http;
 
     const reqHeaders: Record<string, string> = { ...HUMAN_CHROME_HEADERS };
@@ -86,10 +98,13 @@ function requestHtmlWithMetadata(
     if (method === 'POST' && formBody !== undefined) {
       reqHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
       reqHeaders['Content-Length'] = String(Buffer.byteLength(formBody));
+      reqHeaders['Origin'] = parsedUrl.origin;
+      reqHeaders['Referer'] = url;
+      reqHeaders['sec-fetch-site'] = 'same-origin';
     }
 
     const reqOpts: https.RequestOptions = {
-      agent: isHttps ? (useLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
+      agent: isHttps ? (effectiveUseLegacyTls ? legacySslTolerantAgent : sslTolerantAgent) : undefined,
       headers: reqHeaders,
       timeout: timeoutMs ?? (parsedUrl.hostname.includes('epms.ppra.gov.pk') ? 35000 : 25000)
     };
@@ -100,13 +115,14 @@ function requestHtmlWithMetadata(
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         const nextUrl = new URL(res.headers.location, url).toString();
+        const nextHost = new URL(nextUrl).hostname.toLowerCase();
         // Never downgrade back to http:// if an http:// origin explicitly redirected us to https://
         const nextAllowDowngrade = allowHttpDowngrade && !(!isHttps && nextUrl.startsWith('https:'));
         return requestHtmlWithMetadata(nextUrl, {
           method: 'GET',
           cookieStr: nextCookies,
           redirectCount: redirectCount + 1,
-          useLegacyTls,
+          useLegacyTls: nextHost === hostKey ? effectiveUseLegacyTls : false,
           allowHttpDowngrade: nextAllowDowngrade,
           timeoutMs
         }).then(finishResolve).catch(finishReject);
@@ -178,14 +194,17 @@ function requestHtmlWithMetadata(
     req.on('error', (err: any) => {
       const msg = String(err?.message || '');
       // 1. Retry HTTPS TLS / cipher-record failures (including wrong version number) with legacySslTolerantAgent first
-      if (isHttps && !useLegacyTls && isTlsFallbackError(err)) {
+      if (isHttps && !effectiveUseLegacyTls && isTlsFallbackError(err)) {
         return requestHtmlWithMetadata(url, {
           ...options,
           useLegacyTls: true
-        }).then(finishResolve).catch(() => finishReject(err));
+        }).then((res) => {
+          legacyTlsHosts.add(hostKey);
+          finishResolve(res);
+        }).catch(() => finishReject(err));
       }
       // 2. Only fall back to plain HTTP if legacy TLS already failed with wrong version number and we weren't redirected from HTTP
-      if (isHttps && useLegacyTls && allowHttpDowngrade && /wrong version number/i.test(msg)) {
+      if (isHttps && effectiveUseLegacyTls && allowHttpDowngrade && /wrong version number/i.test(msg)) {
         const httpUrl = url.replace(/^https:/i, 'http:');
         return requestHtmlWithMetadata(httpUrl, {
           ...options,

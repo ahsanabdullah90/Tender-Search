@@ -114,7 +114,10 @@
 
 ## Changelog
 
-### Version 1.9.0 (November 13–21, 2026)
+### Version 1.9.0 (November 13–22, 2026)
+- **Workstream A — Punjab PPRA (`punjab_eproc`) Hardening (November 22, 2026)**:
+  - Added `legacyTlsHosts` host caching (`resetLegacyTlsHostsForTests`, `isLegacyTlsHost`) and same-origin `Origin`, `Referer`, and `sec-fetch-site: same-origin` headers for form `POST` requests in `src/server/scrapers/htmlFetcher.ts`, eliminating silent IIS 7.5 `__VIEWSTATE` postback pagination timeouts on Page 2+.
+  - Hardened Section 3e RadGrid parsing in `src/server/scrapers/portalParsers.ts`: flagged `Addendum` alongside `Corrigendum`, skipped `Sales/Auction/Disposal` asset-disposal rows while preserving legitimate procurement services, added `extractPunjabLocation` for all 41 Punjab districts/major cities (`"<City>, Punjab"` or `"Punjab, Pakistan"` fallback), and disambiguated generic `"Tender Notice"` / `"Notice Inviting Tender"` / `"NIT"` titles as `"Tender Notice — <Department>"`.
 - **Federal PPRA (EPMS) Ongoing Scrape Hardening & Domain Track Optimization (November 21, 2026)**:
   - Filtered `epms_ppra` listing URL server-side (`?status=1` Published only) and bumped pagination (`quickMaxPages: 4` / `deepMaxPages: 20`) in `portalList.ts`.
   - Hardened EPMS extraction in `portalParsers.ts`: skips `"Cancelled <reason>"` (`.badge-danger`) rows, detects Status-column `.badge-corrigendum`, decodes `&#38;` in agency/sub-office strings, treats zero bid security (`0.00`) as `null`, and adds folder-aware labels (`advertisement_docs/` $\rightarrow$ `Tender Notice`, `tender_attachments/` $\rightarrow$ `Bidding Document`) for numeric EPMS `?file=` PDFs in `dossierManager.ts`.

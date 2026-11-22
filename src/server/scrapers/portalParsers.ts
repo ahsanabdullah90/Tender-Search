@@ -228,6 +228,102 @@ export function collectRowAttachments($: cheerio.CheerioAPI, el: any, portal: Po
   return attachmentUrls;
 }
 
+const PUNJAB_LOCATION_PATTERNS: Array<[RegExp, string]> = [
+  // Multi-word and abbreviated forms first
+  [/\b(?:d\.?\s*g\.?\s*khan|dera\s+ghazi\s+khan)\b/i, 'Dera Ghazi Khan'],
+  [/\b(?:r\.?\s*y\.?\s*khan|rahim\s+yar\s+khan)\b/i, 'Rahim Yar Khan'],
+  [/\b(?:t\.?\s*t\.?\s*singh|toba\s+tek\s+singh)\b/i, 'Toba Tek Singh'],
+  [/\b(?:m\.?\s*b\.?\s*din|mandi\s+(?:bahauddin|baha\s*-?\s*ud\s*-?\s*din))\b/i, 'Mandi Bahauddin'],
+  [/\bnankana(?:\s+sahib)?\b/i, 'Nankana Sahib'],
+  [/\bkot\s+addu\b/i, 'Kot Addu'],
+  [/\bpind\s+dadan\s+khan\b/i, 'Pind Dadan Khan'],
+  [/\bkallar\s+kahar\b/i, 'Kallar Kahar'],
+  [/\bfort\s+abbas\b/i, 'Fort Abbas'],
+  [/\bahm[ae]d\s*pur\s+east\b/i, 'Ahmadpur East'],
+  [/\bkahror\s+pacc?a\b/i, 'Kahror Pacca'],
+  [/\bwah\s+cantt\b/i, 'Wah Cantt'],
+  // All 41 Punjab districts & major cities/tehsils
+  [/\blahore\b/i, 'Lahore'],
+  [/\brawalpindi\b/i, 'Rawalpindi'],
+  [/\bfaisal\s*abad\b/i, 'Faisalabad'],
+  [/\bmultan\b/i, 'Multan'],
+  [/\bgujran\s*wala\b/i, 'Gujranwala'],
+  [/\bsialkot\b/i, 'Sialkot'],
+  [/\bbahawal\s*pur\b/i, 'Bahawalpur'],
+  [/\bsargodha\b/i, 'Sargodha'],
+  [/\bsheikhu\s*pura\b/i, 'Sheikhupura'],
+  [/\bjhang\b/i, 'Jhang'],
+  [/\bgujrat\b/i, 'Gujrat'],
+  [/\bsahiwal\b/i, 'Sahiwal'],
+  [/\bkasur\b/i, 'Kasur'],
+  [/\bokara\b/i, 'Okara'],
+  [/\bchiniot\b/i, 'Chiniot'],
+  [/\bhafizabad\b/i, 'Hafizabad'],
+  [/\bkhanewal\b/i, 'Khanewal'],
+  [/\bmuzaffar\s*garh\b/i, 'Muzaffargarh'],
+  [/\bjhelum\b/i, 'Jhelum'],
+  [/\bpakpattan\b/i, 'Pakpattan'],
+  [/\bvehari\b/i, 'Vehari'],
+  [/\bbahawal\s*nagar\b/i, 'Bahawalnagar'],
+  [/\bnarowal\b/i, 'Narowal'],
+  [/\bchakwal\b/i, 'Chakwal'],
+  [/\bkhushab\b/i, 'Khushab'],
+  [/\bmianwali\b/i, 'Mianwali'],
+  [/\battock\b/i, 'Attock'],
+  [/\blodhran\b/i, 'Lodhran'],
+  [/\blayyah\b/i, 'Layyah'],
+  [/\bbhakkar\b/i, 'Bhakkar'],
+  [/\brajanpur\b/i, 'Rajanpur'],
+  [/\bmurree\b/i, 'Murree'],
+  [/\btalagang\b/i, 'Talagang'],
+  [/\btaunsa\b/i, 'Taunsa'],
+  [/\bwazirabad\b/i, 'Wazirabad'],
+  [/\btaxila\b/i, 'Taxila'],
+  [/\bsadiqabad\b/i, 'Sadiqabad'],
+  [/\bburewala\b/i, 'Burewala'],
+  [/\bkamalia\b/i, 'Kamalia'],
+  [/\bkhanpur\b/i, 'Khanpur'],
+  [/\bchishtian\b/i, 'Chishtian'],
+  [/\bhasilpur\b/i, 'Hasilpur'],
+  [/\barifwala\b/i, 'Arifwala'],
+  [/\bpattoki\b/i, 'Pattoki'],
+  [/\bgojra\b/i, 'Gojra'],
+  [/\bsamundri\b/i, 'Samundri'],
+  [/\bjaranwala\b/i, 'Jaranwala'],
+  [/\bshakargarh\b/i, 'Shakargarh'],
+  [/\bdaska\b/i, 'Daska'],
+  [/\bkamoke\b/i, 'Kamoke'],
+  [/\bbhalwal\b/i, 'Bhalwal'],
+  [/\bshorkot\b/i, 'Shorkot'],
+  [/\bmailsi\b/i, 'Mailsi'],
+  [/\bkabirwala\b/i, 'Kabirwala'],
+  [/\bsohawa\b/i, 'Sohawa'],
+  [/\bharoonabad\b/i, 'Haroonabad'],
+  [/\balipur\b/i, 'Alipur'],
+  [/\bjatoi\b/i, 'Jatoi'],
+  [/\bliaquatpur\b/i, 'Liaquatpur'],
+  [/\bdunyapur\b/i, 'Dunyapur'],
+  [/\byazman\b/i, 'Yazman'],
+  [/\bbhera\b/i, 'Bhera'],
+  [/\bjauharabad\b/i, 'Jauharabad']
+];
+
+/**
+ * Extracts a canonical Punjab city/district location from department text (or title fallback).
+ */
+export function extractPunjabLocation(deptText: string, title?: string): string {
+  const candidates = title ? [deptText, title] : [deptText];
+  for (const source of candidates) {
+    if (!source) continue;
+    for (const [pattern, city] of PUNJAB_LOCATION_PATTERNS) {
+      if (pattern.test(source)) {
+        return `${city}, Punjab`;
+      }
+    }
+  }
+  return 'Punjab, Pakistan';
+}
+
 /**
  * Parses raw HTML string from a portal into structured items or detects verification challenge.
  */
@@ -676,18 +772,32 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
           $(aEl).remove();
         }
       });
-      const title = nameClone
+      const rawTitle = nameClone
         .text()
         .replace(/\(\s*\)\s*$/g, '')
         .replace(/\s+/g, ' ')
         .trim();
-      if (!title || title.length <= 5) return;
+      if (!rawTitle) return;
 
       const typeText = $(tds[2]).text().replace(/\s+/g, ' ').trim();
       const publishDate = parseDateString($(tds[3]).text().trim()) || undefined;
       const closingDate = parseDateString($(tds[4]).text().trim());
       const deptText = $(tds[5]).text().replace(/\s+/g, ' ').trim();
       const statusText = tds.length > 6 ? $(tds[6]).text().replace(/\s+/g, ' ').trim() : '';
+
+      const isAuctionOrDisposal =
+        /\b(?:sales?\s*\/\s*auction|auction|disposal|sale\s+of\s+scrap)\b/i.test(procType) ||
+        /\b(?:sales?|auction|disposal)\b/i.test(typeText) ||
+        /^(?:auction|disposal|sale)\b|\b(?:open\s+auction|public\s+auction|auction\s+(?:notice|of\b)|sale\s+of\s+(?:scrap|condemned|unserviceable|obsolete|vehicles|trees|fruit)|disposal\s+of\s+(?:scrap|condemned|unserviceable|obsolete|old|surplus|assets))\b/i.test(rawTitle);
+      if (isAuctionOrDisposal) return;
+
+      let title = rawTitle;
+      if (deptText && /^(?:tender\s+notice|notice\s+inviting\s+tenders?|invitation\s+(?:for|to)\s+bids?|tender\s+advertisement|procurement\s+notice|short\s+tender\s+notice|nit)$/i.test(rawTitle)) {
+        title = `Tender Notice — ${deptText}`;
+      } else if (deptText && /^(?:corrigendum|addendum)(?:\s+notice)?$/i.test(rawTitle)) {
+        title = `${rawTitle} — ${deptText}`;
+      }
+      if (!title || title.length <= 5) return;
 
       const attachmentUrls = collectRowAttachments($, el, portal);
       const detailUrl = detailHref ? resolvePortalUrl(detailHref, portal) : null;
@@ -696,17 +806,22 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 
       if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
 
+      const isCorrigendum =
+        /\b(?:corrigendum|addendum)\b/i.test(procType) ||
+        /\b(?:corrigendum|addendum)\b/i.test(rawTitle);
+
       const summaryParts = [procType, typeText, statusText].filter(Boolean);
 
       items.push({
-        referenceNo: extractRefFromText(title),
+        referenceNo: extractRefFromText(rawTitle),
         title,
         organization: deptText || portal.name,
+        location: extractPunjabLocation(deptText, rawTitle),
         directUrl,
         publishDate,
         closingDate,
         description: summaryParts.join(' | ').slice(0, 350),
-        isCorrigendum: /corrigendum/i.test(procType),
+        isCorrigendum,
         attachmentUrls
       });
     });

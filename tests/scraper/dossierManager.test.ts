@@ -13,6 +13,7 @@ import {
   saveManualDossier
 } from '../../src/server/services/dossierManager.js';
 import { fetchHtmlWithMetadata } from '../../src/server/scrapers/crawlerEngine.js';
+import { postFormWithMetadata, resetLegacyTlsHostsForTests, isLegacyTlsHost } from '../../src/server/scrapers/htmlFetcher.js';
 import { sslTolerantAgent, legacySslTolerantAgent } from '../../src/server/scrapers/baseScraper.js';
 import { db, initDatabase, DOSSIERS_DIR, setAppSetting } from '../../src/server/db/index.js';
 import { maxFileBytes } from '../../src/server/services/ingestBudget.js';
@@ -24,6 +25,7 @@ describe('dossierManager', () => {
   let fileContent: Buffer = Buffer.from('%PDF-1.4 Dummy PDF Tender Document');
 
   beforeEach(async () => {
+    resetLegacyTlsHostsForTests();
     // Start local in-memory HTTP server for file download testing
     await new Promise<void>((resolve) => {
       server = http.createServer((req, res) => {
@@ -72,6 +74,7 @@ describe('dossierManager', () => {
   });
 
   afterEach(async () => {
+    resetLegacyTlsHostsForTests();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
@@ -324,6 +327,80 @@ describe('dossierManager', () => {
       } finally {
         httpSpy.mockRestore();
         httpsSpy.mockRestore();
+      }
+    });
+
+    it('caches legacyTlsHosts after TLS fallback so subsequent GET and POST requests immediately use legacySslTolerantAgent and send Origin/Referer headers', async () => {
+      const getAgents: any[] = [];
+      const postAgents: any[] = [];
+      const postHeaders: Array<Record<string, any>> = [];
+
+      const httpsGetSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, opts: any, cb: any) => {
+        getAgents.push(opts.agent);
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        if (opts.agent === sslTolerantAgent) {
+          setImmediate(() => {
+            const err: any = new Error('ssl3_get_record:wrong version number');
+            err.code = 'ERR_SSL_WRONG_VERSION_NUMBER';
+            req.emit('error', err);
+          });
+        } else {
+          const res = new EventEmitter() as any;
+          res.statusCode = 200;
+          res.complete = true;
+          res.headers = { 'content-type': 'text/html; charset=utf-8' };
+          setImmediate(() => {
+            cb(res);
+            res.emit('data', Buffer.from('<html><body>Page OK</body></html>'));
+            res.emit('end');
+          });
+        }
+        return req;
+      });
+
+      const httpsReqSpy = vi.spyOn(https, 'request').mockImplementation((_url: any, opts: any, cb: any) => {
+        postAgents.push(opts.agent);
+        postHeaders.push(opts.headers || {});
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        req.write = vi.fn();
+        req.end = vi.fn(() => {
+          const res = new EventEmitter() as any;
+          res.statusCode = 200;
+          res.complete = true;
+          res.headers = { 'content-type': 'text/html; charset=utf-8' };
+          setImmediate(() => {
+            cb(res);
+            res.emit('data', Buffer.from('<html><body>POST Page 2 OK</body></html>'));
+            res.emit('end');
+          });
+        });
+        return req;
+      });
+
+      try {
+        const targetUrl = 'https://punjab-cache.example.gov.pk/ActiveTenders.aspx';
+        expect(isLegacyTlsHost('punjab-cache.example.gov.pk')).toBe(false);
+
+        const first = await fetchHtmlWithMetadata(targetUrl);
+        expect(first.html).toContain('Page OK');
+        expect(getAgents).toEqual([sslTolerantAgent, legacySslTolerantAgent]);
+        expect(isLegacyTlsHost('punjab-cache.example.gov.pk')).toBe(true);
+
+        const postRes = await postFormWithMetadata(targetUrl, '__EVENTTARGET=next&__VIEWSTATE=abc', 'ASP.NET_SessionId=xyz');
+        expect(postRes.html).toContain('POST Page 2 OK');
+        expect(postAgents).toEqual([legacySslTolerantAgent]);
+        expect(postHeaders[0]['Origin']).toBe('https://punjab-cache.example.gov.pk');
+        expect(postHeaders[0]['Referer']).toBe(targetUrl);
+        expect(postHeaders[0]['sec-fetch-site']).toBe('same-origin');
+
+        const secondGet = await fetchHtmlWithMetadata(targetUrl);
+        expect(secondGet.html).toContain('Page OK');
+        expect(getAgents).toEqual([sslTolerantAgent, legacySslTolerantAgent, legacySslTolerantAgent]);
+      } finally {
+        httpsGetSpy.mockRestore();
+        httpsReqSpy.mockRestore();
       }
     });
 

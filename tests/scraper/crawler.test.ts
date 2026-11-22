@@ -2080,6 +2080,134 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(scraped.pagesScanned).toBe(2);
       expect(crawlerDeps.postForm).toHaveBeenCalledTimes(1);
     });
+
+    it('hardens Punjab eProc RadGrid parsing: Addendum flags, Auction/Disposal skipping, city locations, and generic title disambiguation', () => {
+      const punjabDef = getActivePortalsList('punjab_eproc')[0];
+      const html = `
+        <html><body>
+          <form id="aspnetForm" action="./ActiveTenders.aspx">
+            <table class="rgMasterTable">
+              <tbody>
+                <tr class="rgRow">
+                  <td>Addendum</td>
+                  <td>Rehabilitation of Technical Training Centers</td>
+                  <td>Works</td>
+                  <td>15 Nov 2026</td>
+                  <td>05 Dec 2026</td>
+                  <td>TEVTA District Office D.G. Khan</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/1/addendum.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgAltRow">
+                  <td>Tender Notice</td>
+                  <td>Tender Notice</td>
+                  <td>Services</td>
+                  <td>15 Nov 2026</td>
+                  <td>06 Dec 2026</td>
+                  <td>District Health Authority Faisalabad</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/2/nit.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgRow">
+                  <td>Tender Notice</td>
+                  <td>Notice Inviting Tender</td>
+                  <td>Works</td>
+                  <td>16 Nov 2026</td>
+                  <td>07 Dec 2026</td>
+                  <td>Municipal Corporation R.Y. Khan</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/3/ry.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgAltRow">
+                  <td>Tender Notice</td>
+                  <td>NIT</td>
+                  <td>Goods</td>
+                  <td>16 Nov 2026</td>
+                  <td>08 Dec 2026</td>
+                  <td>Punjab Procurement Agency</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/4/nit4.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgRow">
+                  <td>Tender Notice</td>
+                  <td>Solid Waste Collection and Disposal Services</td>
+                  <td>Services</td>
+                  <td>17 Nov 2026</td>
+                  <td>09 Dec 2026</td>
+                  <td>Lahore Waste Management Company</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/5/swm.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgAltRow">
+                  <td>Tender Notice</td>
+                  <td>Supply of Point of Sale Terminals</td>
+                  <td>Goods</td>
+                  <td>17 Nov 2026</td>
+                  <td>10 Dec 2026</td>
+                  <td>Bank of Punjab Head Office</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/6/pos.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgRow">
+                  <td>Sales/Auction</td>
+                  <td>Auction of Condemned Vehicles</td>
+                  <td>Sales/Auction/Disposal</td>
+                  <td>17 Nov 2026</td>
+                  <td>10 Dec 2026</td>
+                  <td>Punjab Police Transport Wing</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/7/auc1.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgAltRow">
+                  <td>Tender Notice</td>
+                  <td>Sale of Scrap and Obsolete Equipment</td>
+                  <td>Disposal</td>
+                  <td>17 Nov 2026</td>
+                  <td>10 Dec 2026</td>
+                  <td>Forest Department Multan</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/8/auc2.pdf">Notice</a></td>
+                </tr>
+                <tr class="rgRow">
+                  <td>Tender Notice</td>
+                  <td>Disposal of Condemned Vehicles and Furniture</td>
+                  <td>Goods</td>
+                  <td>17 Nov 2026</td>
+                  <td>10 Dec 2026</td>
+                  <td>Irrigation Department Sargodha</td>
+                  <td>Active</td>
+                  <td><a href="Tenders/9/auc3.pdf">Notice</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </form>
+        </body></html>
+      `;
+
+      const parsed = parsePortalHtml(html, punjabDef);
+      expect(parsed.items).toHaveLength(6);
+
+      // Addendum flagged as corrigendum + D.G. Khan -> Dera Ghazi Khan, Punjab
+      expect(parsed.items[0].title).toBe('Rehabilitation of Technical Training Centers');
+      expect(parsed.items[0].isCorrigendum).toBe(true);
+      expect(parsed.items[0].location).toBe('Dera Ghazi Khan, Punjab');
+
+      // Generic titles disambiguated + city/fallback locations
+      expect(parsed.items[1].title).toBe('Tender Notice — District Health Authority Faisalabad');
+      expect(parsed.items[1].location).toBe('Faisalabad, Punjab');
+
+      expect(parsed.items[2].title).toBe('Tender Notice — Municipal Corporation R.Y. Khan');
+      expect(parsed.items[2].location).toBe('Rahim Yar Khan, Punjab');
+
+      expect(parsed.items[3].title).toBe('Tender Notice — Punjab Procurement Agency');
+      expect(parsed.items[3].location).toBe('Punjab, Pakistan');
+
+      // Legitimate procurement containing "Disposal" / "Sale" preserved
+      expect(parsed.items[4].title).toBe('Solid Waste Collection and Disposal Services');
+      expect(parsed.items[4].location).toBe('Lahore, Punjab');
+      expect(parsed.items[5].title).toBe('Supply of Point of Sale Terminals');
+      expect(parsed.items[5].location).toBe('Punjab, Pakistan');
+    });
   });
 
   describe('Plans C & D: Two-Speed Pagination, Early-Stop, Bounded Concurrency & Error Taxonomy', () => {

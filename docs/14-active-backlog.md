@@ -21,9 +21,83 @@ This document tracks **active operational items and approved non-breaking featur
 
 ---
 
-## 2. Planned Improvements (All Current Roadmap Plans A–F Completed)
+## 2. Planned Improvements & Active Workstreams (Approved — Ready for Execution)
 
-All approved non-breaking improvement plans are implemented and moved to the Completed Register below.
+### Master Plan: 7-Statutory Backbone, Two-Phase Scan Priority & Cross-Portal Dedup
+
+This master plan establishes the complete **7-portal statutory procurement backbone** across all provinces and administrative territories of Pakistan, enforces **Statutory-First scan priority**, and hardens cross-portal deduplication so individual agency websites merge cleanly into statutory tenders with zero duplication.
+
+#### Workstream A: Punjab PPRA (`punjab_eproc`) Hardening
+- **Objective:** Fix silent Page 2+ pagination timeouts, handle Addendum and auction rows, infer Punjab locations, and disambiguate generic titles.
+- **Tasks:**
+  1. `src/server/scrapers/htmlFetcher.ts`: Implement `legacyTlsHosts` memory cache so once a host (e.g. `eproc.punjab.gov.pk`) triggers legacy TLS fallback, subsequent `GET` and `POST` requests immediately use `legacySslTolerantAgent` with proper `Origin` and `Referer` headers. Fixes silent 25–35s IIS 7.5 timeout on `POST` with ~112KB `__VIEWSTATE` (drops Page 1+2 scan from 38s failed down to ~3.4s `200 OK`).
+  2. `src/server/scrapers/portalParsers.ts`: Update Section 3e RadGrid parser:
+     - Flag both `Corrigendum` and `Addendum` in `isCorrigendum`.
+     - Skip `Sales/Auction/Disposal` rows (asset disposal, not procurement).
+     - Extract Punjab city/district from Department text (`location: "<City>, Punjab"`, fallback `"Punjab, Pakistan"`).
+     - Disambiguate generic `"Tender Notice"` / `"Notice Inviting Tender"` names as `"Tender Notice — <Department>"`.
+- **Status:** `COMPLETED (2026-11-22)` — Implemented `legacyTlsHosts` + `POST` `Origin`/`Referer` headers in `src/server/scrapers/htmlFetcher.ts` and RadGrid hardening (`extractPunjabLocation`, `Addendum` flagging, `Sales/Auction/Disposal` filtering, generic title disambiguation) in `src/server/scrapers/portalParsers.ts`; verified with `npm run verify`.
+
+#### Workstream B: Khyber Pakhtunkhwa (`kppra`) Official JSON API Integration
+- **Objective:** Restore KP provincial coverage using the live public REST API powering `https://kp.gov.pk/tenders`, replacing the walled legacy domain.
+- **Tasks:**
+  1. Create new KP API scraper submodule (`kpApi.ts` under `src/server/scrapers/`): Scrape `https://mgn1.kp.gov.pk/api/tenders?domain=&page=<n>&search=` (`quickMaxPages: 8`, `deepMaxPages: 15`), paginating through active listings (88 tenders currently active across KPPRA and KP Portal).
+  2. Map structured JSON fields: `uuid` $\rightarrow$ direct detail URL (`https://kp.gov.pk/tender/detail/<uuid>`), `tender_number` $\rightarrow$ `referenceNo`, `department_name` $\rightarrow$ `organization`, `tender_type`, ISO advertisement & closing dates.
+  3. PDF & Corrigendum handling: Collect `media.file_path`, `bidding_document.file_path`, and `corrigenda[].corrigendum_document` (verified `200 OK` across `kppra.gov.pk` and `mgn1.kp.gov.pk` storage). When `corrigenda[]` has an extended closing date, auto-extend deadline and flag `isCorrigendum = true`.
+  4. Skip `"Auction"` / `"Auction of Toll Tax"` rows; extract KP district location (`"<District>, Khyber Pakhtunkhwa"`).
+  5. `src/server/scrapers/portalList.ts` & `crawlerEngine.ts`: Update `kppra` entry from `offline_broken` to `tier: 'http'`, `accessMode: 'public'`, `tendersUrl: 'https://kp.gov.pk/tenders'`, and dispatch to `scrapeKpPortal`.
+- **Status:** `QUEUED` (Designed & Probed live).
+
+#### Workstream C: Gilgit-Baltistan PPRA (`gilgit`) Hardening
+- **Objective:** Restore Gilgit-Baltistan statutory coverage by pointing `gilgit` to the live `gbppra.gov.pk/viewall` board.
+- **Tasks:**
+  1. `src/server/scrapers/portalList.ts`: Update `gilgit` from `offline_broken` (`gilgitbaltistan.gov.pk`) to `baseUrl: 'https://gbppra.gov.pk'`, `tendersUrl: 'https://gbppra.gov.pk/viewall'`, `category: 'Regulatory'`, `fileCode: 'GBPPRA'`, `accessMode: 'public'`, with query pagination (`quickMaxPages: 4`, `deepMaxPages: 12`).
+  2. `src/server/scrapers/portalParsers.ts`: Harden Section 3c `.job-post-item` parser:
+     - Filter non-biddable cards by checking `.badge-wrap .badge`: skip `Final Evaluation Report`, `Technical Evaluation`, `Financial Evaluation Result`, `Result`, `Cancelled`, `Postponed`, `Auction`, `Work Order / Supply Order`.
+     - Flag `Corrigendum` and `Addendum` badges in `isCorrigendum`.
+     - Directly parse publish date from `.text-success` and closing date from `.text-danger`.
+     - Extract GB district location (`Gilgit`, `Skardu`, `Chilas`, `Nagar`, `Hunza`, `Ghizer`, `Shigar`, `Kharmang`, `Ghanche`, `Astore`) $\rightarrow$ `"<District>, Gilgit-Baltistan"`.
+- **Status:** `QUEUED` (Designed & Probed live).
+
+#### Workstream D: Azad Jammu & Kashmir PPRA (`ajk_ppra`) Connector
+- **Objective:** Add AJK PPRA as the 7th statutory board, completing nationwide statutory coverage.
+- **Tasks:**
+  1. `src/server/scrapers/portalList.ts`: Register canonical portal `ajk_ppra` (`name: 'AJK PPRA (ajkppra.gov.pk)'`, `baseUrl: 'https://www.ajkppra.gov.pk'`, `tendersUrl: 'https://www.ajkppra.gov.pk/advertisements.php'`, `category: 'Regulatory'`, `fileCode: 'AJKPPRA'`, `tier: 'http'`, `accessMode: 'public'`).
+  2. `src/server/scrapers/portalParsers.ts`: Add Section 3g parser for `table.table` active procurement rows:
+     - Read Column 0 (`Procurement` + ID, skipping `Sales/Auction/Disposal`), Column 1 (`Procurement Title`), Column 2 (`Publishing Date` `DD-MM-YYYY`), Column 3 (`Closing Date` `DD-MM-YYYY`), Column 4 (`Department`), Column 5 (`Procuring Agency`).
+     - In Column 6 (`Download`), extract main `/uploadfiles/tenderdocuments/...pdf` and all inline red `Corrigendum` PDF links (`isCorrigendum: true`).
+     - Infer AJK district location (`Muzaffarabad`, `Mirpur`, `Bagh`, `Neelum`, `Rawalakot`, `Sudhanoti`, `Bhimber`, `Kotli`, `Hattian`, `Haveli`) $\rightarrow$ `"<District>, Azad Kashmir"`.
+  3. `src/server/services/dossierManager.ts`: Ensure document requests supply portal `Referer` header so Apache ModSecurity serves direct PDF bytes (`200 OK`) instead of HTTP 406 rejections.
+- **Status:** `QUEUED` (Designed & Probed live).
+
+#### Workstream E: Two-Phase Scan Execution & Anti-Duplication Protection
+- **Objective:** Ensure Federal and Provincial Statutory Portals take strict priority, and individual agency websites never produce duplicate tender records.
+- **Tasks:**
+  1. `src/server/scrapers/crawlerEngine.ts`: Implement **Two-Phase Scan Execution**:
+     - **Phase 1 (Statutory Backbone):** Run all 7 Federal & Provincial Regulatory portals (`epms_ppra`, `punjab_eproc`, `sppra`, `bppra`, `kppra`, `gilgit`, `ajk_ppra`) first so canonical statutory cards are indexed with definitive dates and references.
+     - **Phase 2 (Individual Agencies):** Run remaining active non-statutory portals (`psdf`, `pseb`, `fde`, `mofept`, `peef`).
+  2. `src/server/db/repositories/tendersRepo.ts` (`findDedupCandidates`) & `src/server/services/deduplicator.ts`:
+     - Fix undated-vs-dated cross-portal deduplication: allow candidates where one notice has a closing date and the other does not yet have an HTML closing date, comparing on high lexical similarity (`Dice >= 0.90` with `orgSim >= 0.50`, or `Dice >= 0.94` when `!titlesAreDistinguishable`).
+     - When an individual website scrapes a tender already present from a statutory portal, `applyRescanToExistingTender` records the agency listing under `secondary_sources` ("Also listed on"), queues any new document or corrigendum links, and creates 0 duplicate cards.
+  3. Merge existing historical cross-portal duplicate pairs in SQLite (e.g. `psdf` vs `punjab_eproc` `Provision of HR Outsourcing Services` and `Advance Technology Program`).
+- **Status:** `QUEUED` (Designed & Root cause diagnosed).
+
+#### Workstream F: Domain Track Organization Watchlist
+- **Objective:** Automate discovery of high-value education, PPP, and TVET tenders across all statutory boards.
+- **Tasks:**
+  1. Configure `track-priority-orgs` ("Priority Education & Skills Organizations") in live SQLite with targets: `PEF`, `Punjab Education Foundation`, `PEIMA`, `Sindh Education Foundation`, `SEF`, `PSDF`, `NAVTTC`, `TEVTA`, `STEVTA`, `KPTEVTA`, `BTEVTA`, `KPITB`, `Elementary & Secondary Education`, `School Education Department`, `BEF`, `NCHD`, `FDE`, `MOFEPT`, `Ignite`, `PSEB`, `HEC`.
+  2. Apply the strict negative exclusions (supply, civil construction, solar, gas, uniforms, vehicles, food/catering).
+- **Status:** `QUEUED` (Designed).
+
+#### Workstream G: Governance, Test Coverage & System Synchronization
+- **Tasks:**
+  1. Add hermetic offline parser contract tests: `tests/scraper/kp-api.test.ts`, `tests/scraper/ajk-ppra.test.ts`, and updated `portal-contracts.test.ts`.
+  2. Add cross-portal deduplication tests for dated-vs-undated pairs in `tests/unit/deduplicator.test.ts`.
+  3. Synchronize documentation (`docs/02`, `docs/03`, `docs/04`, `docs/05`, `docs/08`, `docs/12`, `docs/14`, `README.md`).
+  4. Run `npm run verify` to achieve 0 TypeScript errors, passing test suites, and clean builds.
+- **Status:** `QUEUED`.
+
+---
 
 ---
 
