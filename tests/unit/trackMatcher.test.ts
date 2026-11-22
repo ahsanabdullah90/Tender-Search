@@ -239,4 +239,80 @@ describe('trackMatcher (Domain Track Matching & Word Boundary Logic)', () => {
       expect(result.matchScore).toBe(0);
     });
   });
+
+  describe('Priority Education & Skills Organizations watchlist (Workstream F)', () => {
+    const priorityOrgTrack = {
+      id: 'track-priority-orgs',
+      name: 'Priority Education & Skills Organizations',
+      positive_keywords: [
+        'PEF', 'Punjab Education Foundation', 'PEIMA', 'Sindh Education Foundation', 'SEF',
+        'PSDF', 'NAVTTC', 'TEVTA', 'STEVTA', 'KPTEVTA', 'BTEVTA', 'KPITB',
+        'Elementary & Secondary Education', 'School Education Department', 'BEF', 'NCHD',
+        'FDE', 'MOFEPT', 'Ignite', 'PSEB', 'HEC'
+      ],
+      negative_keywords: [
+        'supply of', 'purchase of', 'furniture', 'stationery', 'civil works', 'building construction',
+        'construction of', 'rehabilitation of', 'renovation of', 'solar', 'solarization',
+        'gas', 'ssgc', 'uniform', 'vehicle', 'food', 'catering', 'canteen', 'auction', 'scrap'
+      ],
+      is_active: 1
+    };
+
+    it('matches education, PPP, and TVET service tenders from all 21 priority organization watch targets', () => {
+      const targetOrgs = [
+        'PEF',
+        'Punjab Education Foundation',
+        'PEIMA',
+        'Sindh Education Foundation',
+        'SEF',
+        'PSDF',
+        'NAVTTC',
+        'TEVTA',
+        'STEVTA',
+        'KPTEVTA',
+        'BTEVTA',
+        'KPITB',
+        'Elementary & Secondary Education Department',
+        'School Education Department',
+        'BEF',
+        'NCHD',
+        'FDE',
+        'MOFEPT',
+        'Ignite',
+        'PSEB',
+        'HEC'
+      ];
+
+      for (const org of targetOrgs) {
+        const res = matchTracks(
+          {
+            title: 'Hiring of Training Service Providers and Third-Party Academic Evaluation',
+            organization: org,
+            description: 'Public-private partnership skills delivery and institutional assessment services'
+          },
+          [priorityOrgTrack]
+        );
+        expect(res.matchedTracks, `org ${org}`).toEqual(['Priority Education & Skills Organizations']);
+        expect(res.matchScore).toBeGreaterThanOrEqual(30);
+      }
+    });
+
+    it('strictly excludes supply, civil construction, solar, gas, uniforms, vehicles, and food/catering even from priority organizations', () => {
+      const blockedCases: Array<[string, string]> = [
+        ['Punjab Education Foundation', 'Supply of Office Stationery and Printing Paper'],
+        ['School Education Department', 'Rehabilitation of Dangerous School Buildings and Boundary Wall'],
+        ['TEVTA Punjab', 'Construction of New Workshop Block and Civil Works'],
+        ['FDE Islamabad', 'Solarization of Federal Public Schools and Solar Panels'],
+        ['KPTEVTA Peshawar', 'Installation of Natural Gas Heating Pipeline'],
+        ['PEIMA Lahore', 'Purchase of School Uniforms and Shoes for Students'],
+        ['NAVTTC Islamabad', 'Procurement of Operational Vehicles and Vans'],
+        ['Higher Education Commission (HEC)', 'Hiring of Catering and Food Services for Annual Conference']
+      ];
+
+      for (const [org, title] of blockedCases) {
+        const res = matchTracks({ title, organization: org }, [priorityOrgTrack]);
+        expect(res.matchedTracks, `blocked: ${org} - ${title}`).toEqual([]);
+      }
+    });
+  });
 });

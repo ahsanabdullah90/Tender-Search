@@ -88,7 +88,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
 - **Tasks:**
   1. Configure `track-priority-orgs` ("Priority Education & Skills Organizations") in live SQLite with targets: `PEF`, `Punjab Education Foundation`, `PEIMA`, `Sindh Education Foundation`, `SEF`, `PSDF`, `NAVTTC`, `TEVTA`, `STEVTA`, `KPTEVTA`, `BTEVTA`, `KPITB`, `Elementary & Secondary Education`, `School Education Department`, `BEF`, `NCHD`, `FDE`, `MOFEPT`, `Ignite`, `PSEB`, `HEC`.
   2. Apply the strict negative exclusions (supply, civil construction, solar, gas, uniforms, vehicles, food/catering).
-- **Status:** `QUEUED` (Designed).
+- **Status:** `COMPLETED (2026-11-22)` — Configured `track-priority-orgs` in `./data/tender_tracker.db` with all 21 watch targets and strict exclusions, generated its MiniLM track embedding (`backfillModelEmbeddings`), ran `reScoreTendersAgainstTracks()` (`44` $\rightarrow$ `46` `ready`, `0` demoted, `10` watchlist matches), added unit coverage in `tests/unit/trackMatcher.test.ts`, and verified with `npm run verify`.
 
 #### Workstream G: Governance, Test Coverage & System Synchronization
 - **Tasks:**

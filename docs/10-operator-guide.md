@@ -112,6 +112,7 @@ Navigate to **Sources & Keywords**:
 1. **Keywords Subtab**:
    - Add new domain tracks or customize positive and negative match terms.
    - Example: Add `inverter` or `photovoltaic` to *Solar & Clean Energy*; add `cleaning` or `janitorial` to the Ignore list.
+   - **Organization Watchlist (`track-priority-orgs`)**: Tracks priority education, PPP, and TVET bodies (such as `PEF`, `PEIMA`, `SEF`, `PSDF`, `NAVTTC`, `TEVTA`s, `KPITB`, `BEF`, `NCHD`, `FDE`, `MOFEPT`, `Ignite`, `PSEB`, `HEC`) across all statutory portals while pairing strict negative exclusions for supply, civil works, solar, gas, uniforms, vehicles, and catering.
 2. **Portals Subtab**:
    - Check the operational health, clickable website URL, and last scan yields of all 19 portals.
    - **Self-Healing Recovery**: If a portal moves its tenders sub-page or changes its HTML layout, the scraper automatically runs the 5-step discovery process during the scan and updates the portal URL.

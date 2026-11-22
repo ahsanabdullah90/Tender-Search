@@ -115,6 +115,8 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Workstream F — Domain Track Organization Watchlist (November 22, 2026)**:
+  - Configured `track-priority-orgs` (*"Priority Education & Skills Organizations"*) in `./data/tender_tracker.db` targeting 21 priority education, PPP, and TVET authorities (`PEF`, `Punjab Education Foundation`, `PEIMA`, `Sindh Education Foundation`, `SEF`, `PSDF`, `NAVTTC`, `TEVTA`, `STEVTA`, `KPTEVTA`, `BTEVTA`, `KPITB`, `Elementary & Secondary Education`, `School Education Department`, `BEF`, `NCHD`, `FDE`, `MOFEPT`, `Ignite`, `PSEB`, `HEC`) with strict supply/purchase/civil/solar/gas/uniforms/vehicles/catering exclusions, backfilled its 384-D `all-MiniLM-L6-v2` embedding (`backfillModelEmbeddings`), re-scored live tenders (`44` $\rightarrow$ `46` `ready` Inbox opportunities, `0` demoted, `10` watchlist matches), and added unit coverage in `tests/unit/trackMatcher.test.ts`.
 - **Workstream E — Two-Phase Scan Execution & Anti-Duplication Protection (November 22, 2026)**:
   - Implemented **Two-Phase Scan Execution** in `src/server/scrapers/crawlerEngine.ts` (`STATUTORY_PORTAL_IDS`, `isStatutoryPortal`), completing all 7 Federal & Provincial statutory boards before running individual agency portals.
   - Extended `findDedupCandidates` (`src/server/db/repositories/tendersRepo.ts`), `findCanonicalMatch` (`src/server/services/deduplicator.ts`), and pre-hold deduplication (`src/server/scrapers/ingestPipeline.ts`) to match undated-vs-dated cross-portal pairs (`Dice >= 0.90` with `orgSim >= 0.50`, or `Dice >= 0.94` when `!titlesAreDistinguishable`) and merge agency listings onto existing `ready` or `awaiting_scope` statutory records under `secondary_sources`.
