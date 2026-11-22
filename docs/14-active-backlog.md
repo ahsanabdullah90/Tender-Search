@@ -9,13 +9,13 @@ This document tracks **active operational items and approved non-breaking featur
 ## 1. Portal Maintenance & Periodic Connector Monitoring
 
 ### Item 1: Connector & Session Monitoring
-- **Active Regulatory Coverage (`11/11` online in live DB):**
+- **Active Regulatory Coverage (`12/12` online in live DB):**
   - `epms_ppra`: Open Federal PPRA EPMS (`https://epms.ppra.gov.pk/public/tenders/active-tenders?status=1`, `tier: 'http'`, `accessMode: 'public'`, 50/page, `quickMaxPages: 4` / `deepMaxPages: 20`), paired with deterministic detail-page `BidBrief`, cancelled-reason/corrigendum-badge/`&#38;` parser guards (`parseEpmsDetailHtml` in `src/server/scrapers/portalParsers.ts`), and folder-aware `/pdf?file=` labels (`dossierManager.ts`). Legacy `epads` is retired in `deleted_portals` while preserving historical tenders.
   - `punjab_eproc`: Primary Punjab provincial source (`https://eproc.punjab.gov.pk/ActiveTenders.aspx`, ASP.NET postback pagination bumped to `quickMaxPages: 3` / `deepMaxPages: 10`), aggregating tenders across Punjab departments and authorities centrally.
   - `bppra`: Upgraded Balochistan BPPRA (`https://bpptwo.vdc.services:5451/Tenders`, `tier: 'playwright'`) with `src/server/scrapers/bppraScraper.ts` for Blazor `Active Tenders` 100/page pagination + `/RFP`, `/PreQualification`, and `/EOI` tabs, `District` location & `Corrigendum` extraction (`portalParsers.ts`), and deterministic `:9446` NIT JSON API `BidBrief` / FTS5 text & automatic BOQ PDF discovery (`tenderAnalysis.ts`).
   - `sppra`: Restored Sindh SPPRA (`https://portalsindh.eprocure.gov.pk/#/`) as the sole active Sindh portal via `src/server/scrapers/sppraApi.ts` (`tier: 'http'`, direct EPADS WSO2 public JSON API + DMS PDF downloads for NIT and PA Published Documents), with Angular `<section class="card">` DOM fallback in `portalParsers.ts` and full unit/contract tests (`tests/unit/sppra-api.test.ts`).
+  - `kppra`: Restored Khyber Pakhtunkhwa KPPRA (`https://kp.gov.pk/tenders`) via `src/server/scrapers/kpApi.ts` (`tier: 'http'`, `accessMode: 'public'`, `https://mgn1.kp.gov.pk/api/tenders`, `quickMaxPages: 8` / `deepMaxPages: 15`), mapping `uuid` detail URLs, `media`/`bidding_document`/`corrigenda` PDFs with deadline auto-extension, auction skipping, and KP district location extraction (`tests/scraper/kp-api.test.ts`).
 - **Removed / Blocked Portals (`deleted_portals` in live DB; canonical entries retained in `PORTAL_DEFINITIONS` per `HEAL-7`):**
-  - `kppra`: KP government portal migrated to EPADS (`kp.eprocure.gov.pk`), access-walled / timing out (`offline_broken`); archived out of active scans via `deletePortal`.
   - `psda`: Individual Punjab authority (`psda.punjab.gov.pk/tenders`) consistently displays `"No Opening"`; Punjab tenders are covered centrally via `punjab_eproc`, so `psda` was archived via `deletePortal`.
   - `gilgit`: `gilgitbaltistan.gov.pk` lacks a dedicated public tenders board (`offline_broken`); archived via `deletePortal`.
 
@@ -46,7 +46,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
   3. PDF & Corrigendum handling: Collect `media.file_path`, `bidding_document.file_path`, and `corrigenda[].corrigendum_document` (verified `200 OK` across `kppra.gov.pk` and `mgn1.kp.gov.pk` storage). When `corrigenda[]` has an extended closing date, auto-extend deadline and flag `isCorrigendum = true`.
   4. Skip `"Auction"` / `"Auction of Toll Tax"` rows; extract KP district location (`"<District>, Khyber Pakhtunkhwa"`).
   5. `src/server/scrapers/portalList.ts` & `crawlerEngine.ts`: Update `kppra` entry from `offline_broken` to `tier: 'http'`, `accessMode: 'public'`, `tendersUrl: 'https://kp.gov.pk/tenders'`, and dispatch to `scrapeKpPortal`.
-- **Status:** `QUEUED` (Designed & Probed live).
+- **Status:** `COMPLETED (2026-11-22)` — Implemented `src/server/scrapers/kpApi.ts`, wired `kppra` in `portalList.ts` / `crawlerEngine.ts` / `schema.ts`, restored `kppra` in `./data/tender_tracker.db`, added `tests/scraper/kp-api.test.ts`, and verified with `npm run verify`.
 
 #### Workstream C: Gilgit-Baltistan PPRA (`gilgit`) Hardening
 - **Objective:** Restore Gilgit-Baltistan statutory coverage by pointing `gilgit` to the live `gbppra.gov.pk/viewall` board.

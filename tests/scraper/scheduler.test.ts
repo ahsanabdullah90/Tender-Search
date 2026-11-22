@@ -99,6 +99,7 @@ describe('scheduler and startup watchdog', () => {
   });
 
   it('runs daily portal health advisement and handles portal unreachable error', async () => {
+    updatePortalHealth('kppra', { access_mode: 'offline_broken' });
     schedulerDeps.startCrawlerScan = vi.fn().mockRejectedValue(new Error('Domain lookup timed out'));
 
     initStartupScheduler();

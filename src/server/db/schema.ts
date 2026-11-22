@@ -502,9 +502,16 @@ export function seedPortalHealth() {
             db.prepare('UPDATE portal_health SET base_url = ?, tenders_url = ?, verified_status = ? WHERE portal_id = ?')
               .run(p.baseUrl, p.tendersUrl, p.verifiedStatus, p.id);
           }
-          if (p.id === 'kppra' && String(dbRow.tenders_url).includes('kp.gov.pk/tenders')) {
-            db.prepare("UPDATE portal_health SET base_url = ?, tenders_url = ?, access_mode = ?, status = 'error', verified_status = ? WHERE portal_id = ?")
-              .run(p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
+          if (
+            p.id === 'kppra' &&
+            (String(dbRow.tenders_url).includes('kp.eprocure.gov.pk') ||
+              dbRow.tenders_url !== p.tendersUrl ||
+              dbRow.access_mode === 'offline_broken' ||
+              dbRow.tier !== p.tier)
+          ) {
+            db.prepare(
+              "UPDATE portal_health SET portal_name = ?, tier = ?, base_url = ?, tenders_url = ?, access_mode = ?, status = 'online', verified_status = ?, last_error_message = NULL, last_error_code = NULL WHERE portal_id = ?"
+            ).run(p.name, p.tier, p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
           }
           if (
             p.id === 'punjab_eproc' &&

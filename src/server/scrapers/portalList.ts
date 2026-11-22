@@ -70,16 +70,17 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
   },
   {
     id: 'kppra',
-    name: 'Khyber Pakhtunkhwa KPPRA (kp.eprocure.gov.pk)',
+    name: 'Khyber Pakhtunkhwa KPPRA (kp.gov.pk)',
     category: 'Regulatory',
-    tier: 'playwright',
-    baseUrl: 'https://kp.eprocure.gov.pk',
-    tendersUrl: 'https://kp.eprocure.gov.pk',
+    tier: 'http',
+    baseUrl: 'https://kp.gov.pk',
+    tendersUrl: 'https://kp.gov.pk/tenders',
     fileCode: 'KPPRA',
-    description: 'KP EPADS portal (Protected by basic-auth challenge, marketing domain unreachable)',
+    description: 'Khyber Pakhtunkhwa PPRA & KP Portal official public tenders REST API (mgn1.kp.gov.pk/api/tenders)',
     defaultKeywords: ['civil works', 'solarization', 'textbooks', 'equipment'],
-    accessMode: 'offline_broken',
-    verifiedStatus: 'Access-walled / basic-auth challenge on portal'
+    accessMode: 'public',
+    verifiedStatus: 'Working — Live KP Government & KPPRA public JSON API',
+    pagination: { kind: 'api', maxPages: 8, quickMaxPages: 8, deepMaxPages: 15 }
   },
   {
     id: 'bppra',

@@ -42,7 +42,7 @@ const synthetic = ['punjab_eproc', 'sppra', 'tender_services'].filter(d => fs.ex
 
 /** Portals with no fixture, and why. */
 const NOT_COVERED: Record<string, string> = {
-  kppra: 'offline_broken: the portal is unreachable',
+  kppra: 'JSON API-backed (kpApi.ts): tested in tests/scraper/kp-api.test.ts',
   gilgit: 'offline_broken: the portal is unreachable',
   ungm: 'JavaScript-rendered: needs the Playwright tier, not plain HTTP'
 };

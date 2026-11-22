@@ -115,6 +115,9 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Workstream B — Khyber Pakhtunkhwa (`kppra`) Official JSON API Integration (November 22, 2026)**:
+  - Created `src/server/scrapers/kpApi.ts` integrating the official KP Government / KPPRA public REST API (`https://mgn1.kp.gov.pk/api/tenders`, `quickMaxPages: 8` / `deepMaxPages: 15`, DB early-stop), mapping `uuid` detail URLs (`https://kp.gov.pk/tender/detail/<uuid>`), `tender_number` references, `department_name` organizations, `media`/`bidding_document`/`corrigenda` PDFs with automatic corrigendum deadline extension, auction/disposal skipping, and KP district location extraction (`extractKpLocation`).
+  - Upgraded `kppra` in `src/server/scrapers/portalList.ts` and `src/server/db/schema.ts` to `tier: 'http'`, `accessMode: 'public'`, `tendersUrl: 'https://kp.gov.pk/tenders'`, dispatched `kppra` in `src/server/scrapers/crawlerEngine.ts`, restored `kppra` in `./data/tender_tracker.db`, and added hermetic unit/contract coverage in `tests/scraper/kp-api.test.ts`.
 - **Workstream A — Punjab PPRA (`punjab_eproc`) Hardening (November 22, 2026)**:
   - Added `legacyTlsHosts` host caching (`resetLegacyTlsHostsForTests`, `isLegacyTlsHost`) and same-origin `Origin`, `Referer`, and `sec-fetch-site: same-origin` headers for form `POST` requests in `src/server/scrapers/htmlFetcher.ts`, eliminating silent IIS 7.5 `__VIEWSTATE` postback pagination timeouts on Page 2+.
   - Hardened Section 3e RadGrid parsing in `src/server/scrapers/portalParsers.ts`: flagged `Addendum` alongside `Corrigendum`, skipped `Sales/Auction/Disposal` asset-disposal rows while preserving legitimate procurement services, added `extractPunjabLocation` for all 41 Punjab districts/major cities (`"<City>, Punjab"` or `"Punjab, Pakistan"` fallback), and disambiguated generic `"Tender Notice"` / `"Notice Inviting Tender"` / `"NIT"` titles as `"Tender Notice — <Department>"`.

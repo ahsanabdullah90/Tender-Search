@@ -12,6 +12,7 @@ import {
 } from '../db/index.js';
 import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
 import { scrapeSppraPortal } from './sppraApi.js';
+import { scrapeKpPortal } from './kpApi.js';
 import { scrapeBppraPortal } from './bppraScraper.js';
 import { fetchHtmlWithTolerantAgent } from './htmlFetcher.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
@@ -78,6 +79,8 @@ export {
   fetchHtmlWithMetadata,
   fetchHtmlWithTolerantAgent
 } from './htmlFetcher.js';
+
+export { scrapeKpPortal } from './kpApi.js';
 
 export {
   crawlerDeps,
@@ -586,6 +589,19 @@ export async function scrapePortal(
     });
     spResult.items = sanitizeScrapedItems(spResult.items, portal);
     return spResult;
+  }
+
+  // Khyber Pakhtunkhwa KPPRA & KP Portal serve active listings via the public REST API at mgn1.kp.gov.pk/api/tenders.
+  if (portal.id === 'kppra') {
+    const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
+    const knownMap = depth === 'quick' ? getKnownTenderMapForPortal(portal.id) : null;
+    const kpResult = await scrapeKpPortal(portal, {
+      depth,
+      knownMap,
+      timeoutMs: options?.degradedMode ? 45000 : 20000
+    });
+    kpResult.items = sanitizeScrapedItems(kpResult.items, portal);
+    return kpResult;
   }
 
   // Balochistan BPPRA (bpptwo.vdc.services:5451) uses Blazor Server pagination (Active Tenders, 100/page) + /RFP, /PreQualification, /EOI tabs.
