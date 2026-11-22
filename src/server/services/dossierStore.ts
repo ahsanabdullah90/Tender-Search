@@ -67,7 +67,6 @@ export function formatDocTypeDisplayLabel(docType: DocType, index?: number): str
  */
 export const PORTAL_FILE_CODES: Record<string, string> = {
   epms_ppra: 'FPPRA',
-  epads: 'FPPRA',
   punjab_eproc: 'PPPRA',
   sppra: 'SPPRA',
   kppra: 'KPPRA',
@@ -215,7 +214,7 @@ export interface FilenameOptions {
   docType?: DocType;
   index?: number;
   version?: number;
-  buffer: Buffer;
+  buffer?: Buffer;
   extension?: string;
 }
 
@@ -225,8 +224,8 @@ export interface FilenameOptions {
  * Total length capped at 100 characters while keeping prefix & suffix intact.
  */
 export function generateCanonicalFilename(opts: FilenameOptions): { filename: string; sha256: string; hash8: string } {
-  const sha256 = crypto.createHash('sha256').update(opts.buffer).digest('hex');
-  const hash8 = sha256.slice(0, 8);
+  const sha256 = opts.buffer ? crypto.createHash('sha256').update(opts.buffer).digest('hex') : '';
+  const hash8 = sha256 ? sha256.slice(0, 8) : '';
 
   const portal = (opts.portalCode || 'GEN').replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'GEN';
   const typeToken = formatDocTypeForFilename(opts.docType || 'bidding-document');
@@ -362,7 +361,7 @@ export function saveTenderDocument(
     index?: number;
     extension?: string;
     existingDossiers?: CachedDossier[];
-    source?: 'portal_scrape' | 'manual_upload' | 'pasted_image';
+    source?: 'portal_scrape' | 'manual_upload';
   }
 ): CachedDossier {
   const tenderDir = path.resolve(DOSSIERS_DIR, tenderId);
@@ -582,7 +581,6 @@ export function renameDossierToCanonical(
 
   let chosenIdx = 1;
   let targetFilename = currentFilename;
-  const dummyBuf = Buffer.alloc(0);
   for (let idx = 1; idx <= 50; idx++) {
     const candidate = generateCanonicalFilename({
       portalCode,
@@ -592,7 +590,6 @@ export function renameDossierToCanonical(
       docType: nextDocType,
       index: idx,
       version,
-      buffer: dummyBuf,
       extension: ext
     }).filename;
     if (!siblingNames.has(candidate.toLowerCase())) {
@@ -660,7 +657,6 @@ export function migrateDossierFilenames(): { tendersUpdated: number; filesRename
     } catch {}
 
     let rowChanged = false;
-    const dummyBuf = Buffer.alloc(0);
     const updatedDossiers: CachedDossier[] = dossiers.map(doc => {
       const srcFilename = decodeURIComponentSafe(path.basename(doc.localPath || ''));
       if (!srcFilename) return doc;
@@ -688,7 +684,6 @@ export function migrateDossierFilenames(): { tendersUpdated: number; filesRename
           docType,
           index: idx,
           version,
-          buffer: dummyBuf,
           extension: ext
         }).filename;
 

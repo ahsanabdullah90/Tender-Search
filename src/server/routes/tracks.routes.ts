@@ -50,4 +50,3 @@ const handleAckCorrigendum = (req: any, res: any) => {
   res.json({ success: true });
 };
 corrigendaRouter.post('/:id/acknowledge', handleAckCorrigendum);
-corrigendaRouter.post('/:id/ack', handleAckCorrigendum);

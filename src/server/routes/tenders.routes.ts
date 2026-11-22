@@ -120,7 +120,6 @@ const handleViewedUpdate = (req: any, res: any) => {
   res.json({ success: true, viewed: viewed ? 1 : 0 });
 };
 tendersRouter.patch('/:id/viewed', handleViewedUpdate);
-tendersRouter.post('/:id/viewed', handleViewedUpdate);
 
 // 3. On-Demand Tender AI Analysis & Live Refresh
 // When analysis finds the deadline has passed, the tender is auto-expired (deleted). Report that

@@ -1,11 +1,9 @@
 export interface PaginationConfig {
-  kind: 'query' | 'path' | 'postback' | 'click' | 'api';
+  kind: 'query' | 'postback' | 'click' | 'api';
   param?: string;
-  pathPattern?: string;
   maxPages: number;
   quickMaxPages?: number;
   deepMaxPages?: number;
-  nextSelector?: string;
 }
 
 export interface PortalDefinition {

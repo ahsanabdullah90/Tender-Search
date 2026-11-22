@@ -19,7 +19,7 @@ import { findSubmissionDeadlines } from './documentExtractor.js';
 import { migrateDossierFilenames, reclassifyExistingDossiersFromText } from './dossierStore.js';
 import { runRetentionCycle } from './retention.js';
 import { backfillModelEmbeddings } from './embeddingBackfill.js';
-import { processDocumentQueue, drainDocumentQueue } from './ingestWorker.js';
+import { drainDocumentQueue } from './ingestWorker.js';
 import {
   checkNetworkHealth,
   getCachedNetworkStatus,
@@ -41,7 +41,6 @@ export const schedulerDeps = {
   backupDatabase: () => backupDatabase(),
   runRetentionCycle: (opts?: any) => runRetentionCycle(opts),
   backfillModelEmbeddings: (limit?: number) => backfillModelEmbeddings(limit),
-  processDocumentQueue: (limit?: number) => processDocumentQueue(limit),
   drainDocumentQueue: (opts?: { maxBatches?: number; batchSize?: number; concurrency?: number }) =>
     drainDocumentQueue(opts),
   reclassifyExistingDossiersFromText: () => reclassifyExistingDossiersFromText(),

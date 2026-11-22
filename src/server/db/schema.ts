@@ -136,12 +136,15 @@ export function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_ingest_jobs_due ON document_ingest_jobs(status, next_retry_at);
     CREATE INDEX IF NOT EXISTS idx_ingest_jobs_tender ON document_ingest_jobs(tender_id);
+    -- 10. Deleted Portals (tracks intentionally deleted portals so restarts do not re-seed them)
+    CREATE TABLE IF NOT EXISTS deleted_portals (
+      portal_id TEXT PRIMARY KEY,
+      deleted_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Migrations for columns added over time
   try { db.prepare('ALTER TABLE tenders ADD COLUMN result_expected_date TEXT').run(); } catch {}
-  try { db.prepare('ALTER TABLE tenders ADD COLUMN passed_at TEXT').run(); } catch {}
-  try { db.prepare('ALTER TABLE tenders ADD COLUMN slimmed_at TEXT').run(); } catch {}
   try { db.prepare('ALTER TABLE tenders ADD COLUMN embedding BLOB').run(); } catch {}
   try { db.prepare('ALTER TABLE tenders ADD COLUMN semantic_score REAL DEFAULT 0').run(); } catch {}
   try { db.prepare("ALTER TABLE tenders ADD COLUMN extracted_text TEXT DEFAULT ''").run(); } catch {}
@@ -400,22 +403,6 @@ export function seedDefaultDomainTracks() {
 }
 
 export function seedPortalHealth() {
-  // Ensure deleted_portals tracking table exists so user deletions persist across reboots
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS deleted_portals (
-      portal_id TEXT PRIMARY KEY,
-      deleted_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // Check if columns exist; if not, add them (schema migration)
-  try { db.prepare('ALTER TABLE portal_health ADD COLUMN access_mode TEXT DEFAULT "public"').run(); } catch {}
-  try { db.prepare('ALTER TABLE portal_health ADD COLUMN verified_status TEXT').run(); } catch {}
-  try { db.prepare('ALTER TABLE portal_health ADD COLUMN login_url TEXT').run(); } catch {}
-  try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_username TEXT').run(); } catch {}
-  try { db.prepare('ALTER TABLE portal_health ADD COLUMN auth_password TEXT').run(); } catch {}
-  try { db.prepare('ALTER TABLE portal_health ADD COLUMN session_cookies TEXT').run(); } catch {}
-
   // One-time migration: retire legacy Federal EPADS source in favor of open Federal PPRA (EPMS)
   // while preserving historical saved tenders in the tenders table.
   const EPMS_MIGRATION_KEY = 'migration_epms_ppra_2026_11';

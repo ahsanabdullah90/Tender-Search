@@ -71,7 +71,7 @@ export function PortalPills({
         <span>All Portals</span>
         {totalUnreadCount > 0 ? (
           <span
-            className={`ml-1 rounded-full px-1.5 py-0.2 text-[10px] font-bold ${
+            className={`ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
               selectedPortalId === 'All'
                 ? 'bg-accent-ink/20 text-accent-ink'
                 : 'bg-accent text-accent-ink'
@@ -101,7 +101,7 @@ export function PortalPills({
             <span className="truncate max-w-[140px]">{p.portal_name.replace(/\(.*?\)/g, '').trim()}</span>
             {p.unread_count > 0 ? (
               <span
-                className={`rounded-full px-1.5 py-0.2 text-[10px] font-bold ${
+                className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
                   isSelected
                     ? 'bg-accent-ink/20 text-accent-ink'
                     : 'bg-accent text-accent-ink'
@@ -151,7 +151,7 @@ export function PortalPills({
 
         {/* Dropdown Menu */}
         {dropdownOpen && (
-          <div className="absolute left-0 top-full z-30 mt-1.5 w-72 rounded-xl border border-line bg-surface p-2 shadow-lg animate-in fade-in zoom-in-95">
+          <div className="absolute left-0 top-full z-30 mt-1.5 w-72 rounded-xl border border-line bg-surface p-2 shadow-lg">
             {/* Search filter in popover */}
             <div className="relative mb-2">
               <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-ink-muted" />
@@ -189,7 +189,7 @@ export function PortalPills({
                       <span className="truncate pr-2">{p.portal_name}</span>
                       <div className="flex items-center gap-1.5 flex-shrink-0 font-mono">
                         {p.unread_count > 0 && (
-                          <span className="rounded-full bg-accent text-accent-ink px-1.5 py-0.2 text-[10px] font-bold">
+                          <span className="rounded-full bg-accent text-accent-ink px-1.5 py-0.5 text-[10px] font-bold">
                             {p.unread_count}
                           </span>
                         )}

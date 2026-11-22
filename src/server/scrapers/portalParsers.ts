@@ -511,8 +511,9 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     $('#tendersdownload-button .dropdown-content a[href$=".pdf"], .dropdown-content a[href$=".pdf"]').each((_, aEl) => {
       const href = $(aEl).attr('href');
       if (!href) return;
-      // Skip historical archive years 2020-2024 on PSDF uploads
-      if (/\/wp-content\/uploads\/202[0-4]\//i.test(href)) return;
+      // Skip historical PSDF upload archive folders (>1 year before current year)
+      const archiveYearMatch = href.match(/\/wp-content\/uploads\/(20\d{2})\//i);
+      if (archiveYearMatch && Number(archiveYearMatch[1]) < new Date().getUTCFullYear() - 1) return;
 
       const fullUrl = resolvePortalUrl(href, portal);
       if (seenUrls.has(fullUrl)) return;
@@ -550,7 +551,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       });
     });
 
-    // 3b. Parse advertisement listing boxes (.inner-advertisement-listing-box)
+    // 3a-2. Parse advertisement listing boxes (.inner-advertisement-listing-box)
     $('.inner-advertisement-listing-box').each((_, el) => {
       const title = stripLiteralHtmlTags(
         ($(el).find('h4.listingadver-title1').first().text() || $(el).find('h4, h3, .listingadver-title1').first().text()).replace(/\s+/g, ' ').trim()
@@ -802,7 +803,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
     if (items.length > 0) return { items, hitlRequired: false };
   }
 
-  // 3d. Structured UNGM Notice Rows (.tableRow.dataRow, .ungm-list-item, div[data-noticeid])
+  // 3d-2. Structured UNGM Notice Rows (.tableRow.dataRow, .ungm-list-item, div[data-noticeid])
   if ($('.tableRow.dataRow, .ungm-list-item, div[data-noticeid]').length > 0) {
     $('.tableRow.dataRow, .ungm-list-item, div[data-noticeid]').each((_, el) => {
       const noticeLink = $(el).find('a[href*="/Public/Notice/"]').first();

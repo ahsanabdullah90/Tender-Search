@@ -17,7 +17,6 @@ import {
   extractDatesFromText,
   processAndSaveTender,
   startCrawlerScan,
-  seedRealisticTenders,
   getActivePortalsList,
   formatClosingDate,
   parseDateString,
@@ -630,17 +629,6 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       const res = await processAndSaveTender(itemWithAttachment, portalDef, tracks);
       expect(res.isNew).toBe(true);
       expect(res.matched).toBe(true);
-    });
-
-    it('seeds realistic sample tenders on clean database and skips if already present', () => {
-      expect((db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c).toBe(0);
-      seedRealisticTenders();
-      const countAfter = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c;
-      expect(countAfter).toBeGreaterThan(5);
-
-      // Subsequent call does nothing
-      seedRealisticTenders();
-      expect((db.prepare('SELECT COUNT(*) as c FROM tenders').get() as any).c).toBe(countAfter);
     });
 
     it('maps all db portal fields in getActivePortalsList', () => {
@@ -1875,7 +1863,7 @@ describe('Crawler Engine & Scraper Pipeline', () => {
     });
 
     it('B6c uses a rolling year window rather than a hard-coded 2010-2025 range', async () => {
-      const { referencesOnlyPriorYears } = await import('../../src/server/scrapers/crawlerEngine.js');
+      const { referencesOnlyPriorYears } = await import('../../src/server/scrapers/ingestPipeline.js');
       const jan2027 = new Date('2027-01-15T00:00:00Z');
       const mar2026 = new Date('2026-03-15T00:00:00Z');
       const nov2026 = new Date('2026-11-10T00:00:00Z');

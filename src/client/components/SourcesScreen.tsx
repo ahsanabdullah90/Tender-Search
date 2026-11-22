@@ -171,7 +171,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
     portal_name: '',
     website_url: '',
     category: 'Provincial',
-    tier: 'cheerio',
+    tier: 'http',
     access_mode: 'public',
     login_url: ''
   });
@@ -491,7 +491,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                     portal_name: '',
                     website_url: '',
                     category: 'Provincial',
-                    tier: 'cheerio',
+                    tier: 'http',
                     access_mode: 'public',
                     login_url: ''
                   });
@@ -807,7 +807,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const [retentionRunning, setRetentionRunning] = useState(false);
   const [reconciling, setReconciling] = useState(false);
 
-  const saveRetentionSettings = async (newSettings: { autoClean?: boolean; graceDays?: number; passedRetentionDays?: number }) => {
+  const saveRetentionSettings = async (newSettings: { autoClean: boolean }) => {
     setRetentionSaving(true);
     try {
       const res = await fetch('/api/system/retention/settings', {

@@ -5,7 +5,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
-  Design tokens. Light values are the default. src/theme.ts adds the
+  Design tokens. Light values are the default. src/client/theme.ts adds the
   .dark class to <html> when dark mode applies, which swaps these values.
   Components use the semantic names (bg-surface, text-ink, border-line),
   never raw colours, so light and dark stay in step.
@@ -85,8 +85,7 @@
     line-height: 1.45;
     -webkit-font-smoothing: antialiased;
   }
-  .font-mono,
-  [data-tabular] {
+  .font-mono {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }

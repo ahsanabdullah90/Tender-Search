@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseDateString, formatClosingDate, extractDatesFromText } from '../../src/server/scrapers/crawlerEngine.js';
-import { isPlausibleTenderYear, normalizeExtractedDate, reconcileDeadline } from '../../src/server/scrapers/dateParser.js';
+import { isPlausibleTenderYear, normalizeExtractedDate } from '../../src/server/scrapers/dateParser.js';
 
 describe('parseDateString - Pakistani Procurement Date Formats', () => {
   it('parses standard DD/MM/YYYY and DD-MM-YYYY formats', () => {
@@ -133,9 +133,7 @@ describe('extractDatesFromText', () => {
   });
 });
 
-describe('Extracted date normalization & deadline reconciliation (audit findings 1 & 4)', () => {
-  const NOW = Date.parse('2026-11-10T09:00:00.000Z');
-
+describe('Extracted date normalization (audit finding 1)', () => {
   it('does not shift explicit-offset ISO timestamps by the PKT offset', () => {
     expect(parseDateString('2026-12-20T10:00:00Z')).toBe('2026-12-20T10:00:00.000Z');
     expect(parseDateString('2026-12-20T10:00:00.000Z')).toBe('2026-12-20T10:00:00.000Z');
@@ -152,26 +150,6 @@ describe('Extracted date normalization & deadline reconciliation (audit findings
     expect(normalizeExtractedDate('Not Available')).toBeNull();
     expect(normalizeExtractedDate('')).toBeNull();
     expect(normalizeExtractedDate(null)).toBeNull();
-  });
-
-  it('keeps a later known deadline when an attachment shows an earlier, past one', () => {
-    const r = reconcileDeadline('2026-12-01T09:00:00.000Z', '2026-10-01T09:00:00.000Z', NOW);
-    expect(r.closingDate).toBe('2026-12-01T09:00:00.000Z');
-    expect(r.isExpired).toBe(false);
-    expect(r.isExtension).toBe(false);
-  });
-
-  it('adopts a later extracted deadline as an extension', () => {
-    const r = reconcileDeadline('2026-12-01T09:00:00.000Z', '2026-12-15T09:00:00.000Z', NOW);
-    expect(r.closingDate).toBe('2026-12-15T09:00:00.000Z');
-    expect(r.isExtension).toBe(true);
-    expect(r.isExpired).toBe(false);
-  });
-
-  it('expires only when no later valid deadline is known', () => {
-    expect(reconcileDeadline(null, '2026-10-01T09:00:00Z', NOW).isExpired).toBe(true);
-    expect(reconcileDeadline('garbage', '2026-10-01T09:00:00Z', NOW).isExpired).toBe(true);
-    expect(reconcileDeadline(null, 'garbage', NOW)).toEqual({ closingDate: null, isExtension: false, isExpired: false });
   });
 });
 

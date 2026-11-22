@@ -18,7 +18,7 @@ function fileToBase64(file: File): Promise<string> {
 
 const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
 
-export interface AddTenderModalProps {
+interface AddTenderModalProps {
   open: boolean;
   onClose: () => void;
   onTenderCreated?: (tender: Tender) => void;

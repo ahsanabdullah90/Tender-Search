@@ -14,7 +14,6 @@ export function getAppSetting(key: string): string | null {
 }
 
 export function setAppSetting(key: string, value: string | null): void {
-  db.exec('CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)');
   if (value === null || !value.trim()) {
     db.prepare('DELETE FROM app_settings WHERE key = ?').run(key);
   } else {

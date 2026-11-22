@@ -391,8 +391,8 @@ Lists the last 3 retained session execution logs or retrieves/downloads (`?downl
 Lists all available SQLite backups with filenames, creation timestamps, and byte sizes, or generates an immediate SQLite online backup (`db.backup()`) in `data/backups/`.
 
 ### `GET /api/system/digest` & `POST /api/system/digest/settings`
-- `GET /api/system/digest` *(alias `/api/digest`, optional `?hours=48`)*: Returns the proactive alert summary (`closingSoon`, `closingSoonCount`, `unacknowledgedCorrigendaCount`, `newMatchesLast24hCount`) plus current `settings` (`enabled`, `webhookUrl`, `withinHours`, `lastSentDatePkt`).
-- `POST /api/system/digest/settings` *(alias `/api/digest/settings`)*: Updates opt-in daily digest webhook configuration (`enabled`, `webhookUrl`, `withinHours`) in `app_settings`. Non-empty `webhookUrl` values must pass `validateExternalHttpUrl` (`urlSafety.ts`, `SEC-5`, returning `400 Bad Request` on invalid or private/loopback targets).
+- `GET /api/system/digest` *(optional `?hours=48`)*: Returns the proactive alert summary (`closingSoon`, `closingSoonCount`, `unacknowledgedCorrigendaCount`, `newMatchesLast24hCount`) plus current `settings` (`enabled`, `webhookUrl`, `withinHours`, `lastSentDatePkt`).
+- `POST /api/system/digest/settings`: Updates opt-in daily digest webhook configuration (`enabled`, `webhookUrl`, `withinHours`) in `app_settings`. Non-empty `webhookUrl` values must pass `validateExternalHttpUrl` (`urlSafety.ts`, `SEC-5`, returning `400 Bad Request` on invalid or private/loopback targets).
 
 ### `POST /api/system/shutdown`
 Token-guarded graceful shutdown endpoint used by the standalone Windows system tray host (`TENDER_SHUTDOWN_TOKEN`).

@@ -8,7 +8,6 @@ import { sslTolerantDispatcher } from './baseScraper.js';
 export const KP_API_BASE = 'https://mgn1.kp.gov.pk';
 export const KP_TENDERS_API_URL = `${KP_API_BASE}/api/tenders`;
 export const KP_PORTAL_ORIGIN = 'https://kp.gov.pk';
-export const KP_DEFAULT_PAGE_SIZE = 12;
 
 export const KP_API_HEADERS: Record<string, string> = {
   accept: 'application/json, text/plain, */*',

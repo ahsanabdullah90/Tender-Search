@@ -22,7 +22,7 @@ export const NOT_STAGING_SQL = "COALESCE(ingestion_status, 'ready') NOT IN ('sta
  * 'awaiting_scope': the listing matched no track, so the tender is hidden until the worker has
  * read its documents and either releases it (a track matched) or removes it (docs/15 F2).
  */
-export type IngestionStatus = 'staging' | 'ready' | 'failed_verification' | 'awaiting_scope';
+export type IngestionStatus = 'staging' | 'ready' | 'awaiting_scope';
 
 /**
  * Undated tenders are aged for this many days, in ingest (B6b), retention and the Inbox alike, so
@@ -411,8 +411,6 @@ export function deleteTenders(
       }
     }
 
-    db.prepare(`DELETE FROM corrigendum_logs WHERE tender_id IN (${placeholders})`).run(...tenderIds);
-    db.prepare(`DELETE FROM pipeline_audit_logs WHERE tender_id IN (${placeholders})`).run(...tenderIds);
     db.prepare(`DELETE FROM tenders WHERE id IN (${placeholders})`).run(...tenderIds);
   });
 
@@ -902,7 +900,7 @@ export interface DedupCandidateRow {
  * normalizeReferenceNo). Tenders held for their documents ('awaiting_scope') are not considered;
  * staging rows are, so a tender being verified is not inserted twice.
  */
-export function findTendersByReferenceNorm(referenceNorm: string, _portalId?: string | null): DedupCandidateRow[] {
+export function findTendersByReferenceNorm(referenceNorm: string): DedupCandidateRow[] {
   return db.prepare(`
     SELECT id, canonical_id, title, organization, closing_date, embedding, portal_id
     FROM tenders
@@ -1227,86 +1225,5 @@ export function upsertScrapedTender(input: UpsertScrapedTenderInput): boolean {
  */
 export function deleteStagedTender(id: string): void {
   db.prepare(`DELETE FROM tenders WHERE id = ? AND ingestion_status = 'staging' AND pipeline_status = 'New Opportunity'`).run(id);
-}
-
-export function seedSampleTendersIfEmpty(
-  sampleTenders: {
-    referenceNo: string;
-    title: string;
-    organization: string;
-    portalId: string;
-    portalName: string;
-    directUrl: string;
-    closingDate: string;
-    estimatedValue: string;
-    location: string;
-    description: string;
-    tracks: string[];
-    keywords: string[];
-    score: number;
-  }[],
-  formatClosingDateFn: (iso: string | null) => string
-): boolean {
-  const count = (db.prepare('SELECT COUNT(*) as c FROM tenders').get() as { c: number }).c;
-  if (count > 0) return false;
-
-  const insertStmt = db.prepare(`
-    INSERT INTO tenders (
-      id, canonical_id, reference_no, title, organization, portal_id, portal_name, direct_url,
-      domain_tracks, matched_keywords, match_score, publish_date, closing_date, closing_date_formatted,
-      estimated_value, location, description, has_corrigendum, pipeline_status, status_notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const insertMany = db.transaction((tendersList: typeof sampleTenders) => {
-    for (let i = 0; i < tendersList.length; i++) {
-      const t = tendersList[i];
-      const tenderId = `tender-${t.portalId}-${i + 1}`;
-      const formattedDate = formatClosingDateFn(t.closingDate);
-
-      let initialStatus = 'New Opportunity';
-      let notes = '';
-      if (i === 0) {
-        initialStatus = 'Preparing Bid';
-        notes = 'BOQ evaluated. Vendor quotes for solar inverters requested from Multan suppliers.';
-      } else if (i === 1) {
-        initialStatus = 'Under Review';
-        notes = 'Evaluating NCC site access and building structural engineering clearance.';
-      }
-
-      insertStmt.run(
-        tenderId,
-        tenderId,
-        t.referenceNo,
-        t.title,
-        t.organization,
-        t.portalId,
-        t.portalName,
-        t.directUrl,
-        JSON.stringify(t.tracks),
-        JSON.stringify(t.keywords),
-        t.score,
-        new Date(Date.now() - (i * 2 + 1) * 24 * 3600 * 1000).toISOString().slice(0, 10),
-        t.closingDate,
-        formattedDate,
-        t.estimatedValue,
-        t.location,
-        t.description,
-        i === 0 ? 1 : 0,
-        initialStatus,
-        notes
-      );
-
-      if (i === 0) {
-        db.prepare(`
-          INSERT INTO corrigendum_logs (id, tender_id, change_type, previous_value, new_value, is_acknowledged)
-          VALUES (?, ?, 'deadline_extension', '10 Nov 2026, 02:00 PM PKT', ?, 0)
-        `).run('corr-seed-01', tenderId, formattedDate);
-      }
-    }
-  });
-
-  insertMany(sampleTenders);
-  return true;
 }
 

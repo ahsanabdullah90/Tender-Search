@@ -167,9 +167,7 @@ const handleUpdateIngestBudgets = (req: any, res: any) => {
   res.json({ success: true, budgets: updated });
 };
 
-systemRouter.get('/ingest-budgets', handleGetIngestBudgets);
 systemRouter.get('/system/ingest-budgets', handleGetIngestBudgets);
-systemRouter.post('/ingest-budgets', handleUpdateIngestBudgets);
 systemRouter.post('/system/ingest-budgets', handleUpdateIngestBudgets);
 
 // 4. Google AI Studio (Gemini API) Configuration & Extraction Routes
@@ -261,9 +259,7 @@ const handleGetLogFile = (req: any, res: any) => {
   res.json({ filename, content });
 };
 
-systemRouter.get('/logs', handleListLogs);
 systemRouter.get('/system/logs', handleListLogs);
-systemRouter.get('/logs/:filename', handleGetLogFile);
 systemRouter.get('/system/logs/:filename', handleGetLogFile);
 
 // 7. Automated Retention & Dossier Reconciliation
@@ -291,13 +287,9 @@ const handleReconcileDossiers = (req: any, res: any) => {
   res.json(result);
 };
 
-systemRouter.get('/retention', handleGetRetention);
 systemRouter.get('/system/retention', handleGetRetention);
-systemRouter.post('/retention/run', handleRunRetention);
 systemRouter.post('/system/retention/run', handleRunRetention);
-systemRouter.post('/retention/settings', handleUpdateRetentionSettings);
 systemRouter.post('/system/retention/settings', handleUpdateRetentionSettings);
-systemRouter.post('/dossiers/reconcile', handleReconcileDossiers);
 systemRouter.post('/system/dossiers/reconcile', handleReconcileDossiers);
 
 // 8. Proactive 48h Closing Alerts & Daily Digest (Plan B)
@@ -324,9 +316,7 @@ const handleUpdateDigestSettings = (req: any, res: any) => {
   res.json({ success: true, settings: updated });
 };
 
-systemRouter.get('/digest', handleGetDigest);
 systemRouter.get('/system/digest', handleGetDigest);
-systemRouter.post('/digest/settings', handleUpdateDigestSettings);
 systemRouter.post('/system/digest/settings', handleUpdateDigestSettings);
 
 // 9. Token-Guarded Graceful Shutdown (for standalone desktop tray host)

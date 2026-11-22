@@ -130,15 +130,22 @@ async function capture(portalId: string) {
   return { bytes: Buffer.byteLength(clean), ...expected };
 }
 
-const ids = process.argv.slice(2);
-if (!ids.length) {
-  console.error('Usage: npx tsx scripts/capture-portal-fixture.ts <portalId> [...]');
-  process.exit(1);
-}
-for (const id of ids) {
-  try {
-    console.log(JSON.stringify(await capture(id)));
-  } catch (err: any) {
-    console.log(JSON.stringify({ portalId: id, error: err?.message || String(err) }));
+const isDirectRun = Boolean(
+  process.argv[1] &&
+  path.resolve(process.argv[1]).toLowerCase().endsWith('capture-portal-fixture.ts')
+);
+
+if (isDirectRun) {
+  const ids = process.argv.slice(2);
+  if (!ids.length) {
+    console.error('Usage: npx tsx scripts/capture-portal-fixture.ts <portalId> [...]');
+    process.exit(1);
+  }
+  for (const id of ids) {
+    try {
+      console.log(JSON.stringify(await capture(id)));
+    } catch (err: any) {
+      console.log(JSON.stringify({ portalId: id, error: err?.message || String(err) }));
+    }
   }
 }

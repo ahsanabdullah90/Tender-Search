@@ -612,7 +612,7 @@ export default function App() {
         onOpenSources={() => { setSourcesTab('portals'); handleNavigate('sources'); }}
       />
 
-      {/* 2. TAB A: Tenders Pipeline View */}
+      {/* 2. Main Active Workspace */}
       {inboxMode ? (
         <InboxScreen
           tenders={tenders}

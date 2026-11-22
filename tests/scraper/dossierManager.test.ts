@@ -197,6 +197,7 @@ describe('dossierManager', () => {
     expect(fs.existsSync(path.resolve(DOSSIERS_DIR, 't-aborted-dir'))).toBe(false);
 
     // Streaming maxBytes cap and ingestBudget maxFileBytes default setting (DOC-4)
+    initDatabase();
     setAppSetting('ingest_max_file_mb', '15');
     expect(maxFileBytes()).toBe(15 * 1024 * 1024);
     const oversizedRes = await downloadAndCacheDossier(

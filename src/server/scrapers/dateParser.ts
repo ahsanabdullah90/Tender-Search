@@ -206,45 +206,6 @@ export function endOfPktDayMs(iso: string): number {
   return new Date(`${day}T23:59:59.999+05:00`).getTime();
 }
 
-export interface DeadlineResolution {
-  /** The deadline to keep: the later of the known and extracted deadlines (or whichever one is valid). */
-  closingDate: string | null;
-  /** True when the extracted deadline is strictly later than a valid known deadline. */
-  isExtension: boolean;
-  /** True when the resolved deadline is in the past. */
-  isExpired: boolean;
-}
-
-/**
- * Reconciles a tender's known deadline with a newly extracted one. The later valid date wins, so an
- * old attachment (or an AI misread) can never pull a deadline backwards past a listing's extension
- * and cause a still-open tender to be auto-expired.
- */
-export function reconcileDeadline(
-  known: string | null | undefined,
-  extracted: string | null | undefined,
-  nowMs: number = Date.now()
-): DeadlineResolution {
-  const knownMs = known ? new Date(known).getTime() : NaN;
-  const validKnown = !isNaN(knownMs) ? known! : null;
-  const extractedIso = normalizeExtractedDate(extracted);
-  const extractedMs = extractedIso ? new Date(extractedIso).getTime() : NaN;
-
-  let closingDate: string | null = validKnown;
-  let isExtension = false;
-  if (extractedIso) {
-    if (!validKnown) {
-      closingDate = extractedIso;
-    } else if (extractedMs > knownMs) {
-      closingDate = extractedIso;
-      isExtension = true;
-    }
-  }
-
-  const resolvedMs = closingDate ? new Date(closingDate).getTime() : NaN;
-  return { closingDate, isExtension, isExpired: !isNaN(resolvedMs) && resolvedMs < nowMs };
-}
-
 export type DeadlineSourceKind = 'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual';
 export type DeadlineConfidence = 'high' | 'medium' | 'low';
 

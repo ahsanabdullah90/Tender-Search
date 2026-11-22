@@ -63,7 +63,7 @@ C:\Tender_Tracker/
   dist/                     # Built Vite client bundle (served by Express in production)
   dist-server/              # Compiled server bundle (dist-server/server.mjs)
   public/                   # Brand logos (public/brand/), favicons, and web app manifest (public/manifest.webmanifest)
-  scripts/                  # Operational scripts (launch.cmd, tray-app.ps1, launch-desktop.vbs, seed-sample.ts, probe-portals.ts, capture-portal-fixture.ts, create-desktop-shortcut.ps1, install-startup-task.ps1, migrate-dossier-names.ts)
+  scripts/                  # Operational scripts (launch.cmd, tray-app.ps1, launch-desktop.vbs, seed-sample.ts, probe-portals.ts, capture-portal-fixture.ts, create-desktop-shortcut.ps1, install-startup-task.ps1)
   src/                      # Application source code
     client/                 # React 19 UI application (App, theme, index.css, components/, ui/)
       components/           # UI screens (Inbox, Pipeline, Sources, AppShell, inbox/, pipeline/)

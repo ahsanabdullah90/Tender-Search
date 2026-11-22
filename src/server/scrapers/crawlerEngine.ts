@@ -6,11 +6,9 @@ import {
   getPortalHealthList,
   getAppSetting,
   setAppSetting,
-  seedSampleTendersIfEmpty,
   getKnownTenderMapForPortal,
   getDocumentQueueCounts
 } from '../db/index.js';
-import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
 import { scrapeSppraPortal } from './sppraApi.js';
 import { scrapeKpPortal } from './kpApi.js';
 import { scrapeBppraPortal } from './bppraScraper.js';
@@ -32,7 +30,6 @@ import {
 } from '../services/networkMonitor.js';
 import {
   parseDateString,
-  formatClosingDate,
   extractDatesFromText
 } from './dateParser.js';
 import {
@@ -57,31 +54,22 @@ import {
   isValidHealedTendersUrl,
   sanitizeBaseOrigin
 } from './healer.js';
+import { getInFlightDocFetchTenderIds } from './tenderAnalysis.js';
 import { processAndSaveTender } from './ingestPipeline.js';
 
 // ===========================================================================
-// Re-exports for 100% backward compatibility across all modules and tests
+// Re-exports for backward compatibility across active callers and tests
 // ===========================================================================
 export {
-  isValidCalendarDay,
-  MONTH_NAMES,
   parseDateString,
   formatClosingDate,
-  DATE_CANDIDATE_PATTERN,
-  extractDatesFromText,
-  normalizeExtractedDate,
-  reconcileDeadline,
-  resolveCanonicalDeadline,
-  inferPublishDateFromUrl,
-  type DeadlineSignal
+  extractDatesFromText
 } from './dateParser.js';
 
 export {
   fetchHtmlWithMetadata,
   fetchHtmlWithTolerantAgent
 } from './htmlFetcher.js';
-
-export { scrapeKpPortal } from './kpApi.js';
 
 export {
   crawlerDeps,
@@ -91,10 +79,8 @@ export {
 export {
   type RawScrapedItem,
   type ScrapeResult,
-  resolvePortalUrl,
   isNonBidEvaluationOrPlanTitle,
   extractRefFromText,
-  cleanRowSummary,
   isGenericListingUrl,
   isNavigationRow,
   sanitizeScrapedItems,
@@ -107,33 +93,17 @@ export {
 } from './portalParsers.js';
 
 export {
-  matchTracks,
-  applyDocumentScopeToTracks,
-  containsKeyword
+  matchTracks
 } from './trackMatcher.js';
 
 export {
   readCachedDossier,
-  isReadableDocumentMime,
   fetchDocumentsForTender,
-  analyzeTenderById,
-  getInFlightDocFetchTenderIds
+  analyzeTenderById
 } from './tenderAnalysis.js';
 
 export {
-  UPFRONT_MAX_DOCS,
-  MAX_DOCUMENTS_PER_TENDER,
-  type ProcessTenderResult,
-  type UpfrontExtraction,
-  referencesOnlyPriorYears,
-  computeTenderId,
-  isDirectDocumentUrl,
-  isDownloadableCandidateUrl,
   orderDocumentCandidates,
-  fetchAndReadDocumentsUpfront,
-  applyRescannedDeadline,
-  applyRescanToExistingTender,
-  holdForDocumentScope,
   processAndSaveTender
 } from './ingestPipeline.js';
 
@@ -799,8 +769,6 @@ export async function scrapePortal(
         } catch {
           break;
         }
-      } else if (portal.pagination.kind === 'path') {
-        pageUrl = (portal.pagination.pathPattern || `${portal.tendersUrl}/{page}`).replace('{page}', String(page));
       } else if (portal.pagination.kind === 'postback') {
         postBody = buildAspNetPostBackBody(currentPageHtml, page);
         if (!postBody) break;
@@ -916,120 +884,4 @@ export async function scrapePortal(
   }
 
   return result;
-}
-
-/**
- * Seeds a high-fidelity realistic dataset representing real-world tenders
- * across Pakistani statutory portals on fresh install.
- */
-export function seedRealisticTenders() {
-  const sampleTenders = [
-    {
-      referenceNo: 'EPMS-2026-SLR-041',
-      title: 'Solarization of 150 Public Schools and Rural Health Centers in Southern Punjab (Phase-II)',
-      organization: 'Punjab Energy Department / Punjab eProc',
-      portalId: 'punjab_eproc',
-      portalName: 'Punjab PPRA (eproc.punjab.gov.pk)',
-      directUrl: 'https://eproc.punjab.gov.pk/ActiveTenders.aspx',
-      closingDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000 + 4 * 3600 * 1000).toISOString(),
-      estimatedValue: 'PKR 85,000,000',
-      location: 'Multan & Bahawalpur, Punjab',
-      description: 'Turnkey EPC contract for design, supply, installation, testing and commissioning of 10kW to 25kW hybrid solar photovoltaic (PV) systems with net metering and lithium iron phosphate (LiFePO4) storage banks.',
-      tracks: ['Solar & Clean Energy'],
-      keywords: ['solarization', 'pv system', 'photovoltaic', 'inverter', 'net metering'],
-      score: 95
-    },
-    {
-      referenceNo: 'MOFEPT/SOLAR/2026/08',
-      title: 'Supply and Installation of 200kW Grid-Tied Rooftop Solar PV System at National Curriculum Council',
-      organization: 'Ministry of Federal Education & Professional Training',
-      portalId: 'mofept',
-      portalName: 'Ministry of Federal Education & Professional Training',
-      directUrl: 'https://mofept.gov.pk/Tenders',
-      closingDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'PKR 32,500,000',
-      location: 'Islamabad Capital Territory',
-      description: 'Procurement of Tier-1 bifacial monocrystalline solar panels, string on-grid inverters, and net-metering bidirectional meters.',
-      tracks: ['Solar & Clean Energy', 'Education & Learning'],
-      keywords: ['solar panels', 'pv system', 'clean energy', 'education'],
-      score: 88
-    },
-    {
-      referenceNo: 'KPPRA-CW-2026-112',
-      title: 'Rehabilitation and Infrastructure Upgradation of District Hospital Complex Swat',
-      organization: 'KP Communication & Works Department',
-      portalId: 'kppra',
-      portalName: 'Khyber Pakhtunkhwa KPPRA (kp.eprocure.gov.pk)',
-      directUrl: 'https://kp.eprocure.gov.pk',
-      closingDate: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000 + 6 * 3600 * 1000).toISOString(),
-      estimatedValue: 'PKR 142,000,000',
-      location: 'Swat, Khyber Pakhtunkhwa',
-      description: 'Civil works comprising structural retrofitting, architectural renovation, waterproofing, HVAC ducting, and exterior masonry rehabilitation.',
-      tracks: ['Construction & Civil Works'],
-      keywords: ['civil works', 'rehabilitation', 'renovation', 'infrastructure', 'masonry'],
-      score: 92
-    },
-    {
-      referenceNo: 'NDMA-INFRA-890',
-      title: 'Construction of Prefabricated Flood-Resilient Community Warehouses & Emergency Hubs',
-      organization: 'National Disaster Management Authority (NDMA)',
-      portalId: 'ndma',
-      portalName: 'National Disaster Management Authority (NDMA)',
-      directUrl: 'https://ndma.gov.pk/tenders',
-      closingDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'PKR 64,000,000',
-      location: 'Lasbela & Naseerabad, Balochistan',
-      description: 'Civil construction of elevated concrete plinths and installation of prefabricated heavy-duty insulated steel warehouses.',
-      tracks: ['Construction & Civil Works'],
-      keywords: ['construction', 'infrastructure', 'prefabricated', 'building repair'],
-      score: 85
-    },
-    {
-      referenceNo: 'PSDF-TVET-2026-Q4',
-      title: 'Skills for High-Demand Industrial Trades: Provision of Competency-Based Training (CBT) Courses',
-      organization: 'Punjab Skills Development Fund (PSDF)',
-      portalId: 'psdf',
-      portalName: 'Punjab Skills Development Fund (PSDF)',
-      directUrl: 'https://psdf.org.pk/procurement',
-      closingDate: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'PKR 55,000,000',
-      location: 'Lahore, Faisalabad & Gujranwala',
-      description: 'Engaging certified Technical & Vocational Training Institutes (TVET) to deliver 3-month and 6-month hands-on vocational courses with guaranteed post-training placement.',
-      tracks: ['Vocational Training (TVET)'],
-      keywords: ['tvet', 'vocational', 'skill development', 'technical training', 'capacity building'],
-      score: 96
-    },
-    {
-      referenceNo: 'FDE-EDU-2026-03',
-      title: 'Printing and Supply of Single National Curriculum Supplementary Readers & Classroom Textbooks',
-      organization: 'Federal Directorate of Education (FDE)',
-      portalId: 'fde',
-      portalName: 'Federal Directorate of Education (FDE)',
-      directUrl: 'https://fde.gov.pk/download-category/tender/',
-      closingDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000 + 12 * 3600 * 1000).toISOString(),
-      estimatedValue: 'PKR 48,000,000',
-      location: 'ICT Islamabad',
-      description: 'Four-color offset printing on 75 GSM offset paper with art-card laminated covers for Grade 1 through 8 textbooks across Islamabad educational institutions.',
-      tracks: ['Education & Learning', 'Stationery & Office Supplies'],
-      keywords: ['education', 'curriculum', 'textbooks', 'printing', 'school supplies'],
-      score: 94
-    },
-    {
-      referenceNo: 'IGNITE-MEDIA-2026-02',
-      title: 'Hiring of Creative Agency for National Innovation Documentary Series and Digital Video Production',
-      organization: 'Ignite National Technology Fund',
-      portalId: 'ignite',
-      portalName: 'Ignite National Technology Fund',
-      directUrl: 'https://ignite.org.pk/procurement/',
-      closingDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
-      estimatedValue: 'PKR 28,000,000',
-      location: 'Islamabad',
-      description: 'Production of 10 high-impact documentary episodes (4K cinematic grade), 25 short-form social reels, and nationwide digital public relations campaign spotlighting Pakistani tech founders and startup incubators.',
-      tracks: ['Media, Documentaries & Communications'],
-      keywords: ['documentary', 'media production', 'video production', 'digital communications', 'short film'],
-      score: 98
-    }
-  ];
-
-  seedSampleTendersIfEmpty(sampleTenders, formatClosingDate);
 }

@@ -12,7 +12,6 @@ interface DeadlineRunwayProps {
 interface DayBucket {
   dateStr: string; // YYYY-MM-DD
   dayLabel: string; // 'Today', 'Tomorrow', 'Fri 07', etc.
-  dayNum: string;
   isToday: boolean;
   tenders: Tender[];
   urgentCount: number; // < 24 hours
@@ -47,7 +46,6 @@ export function DeadlineRunway({ tenders, selectedDate, onSelectDate }: Deadline
       days.push({
         dateStr,
         dayLabel,
-        dayNum: dateStr.slice(8, 10).replace(/^0/, ''),
         isToday: i === 0,
         tenders: [],
         urgentCount: 0,

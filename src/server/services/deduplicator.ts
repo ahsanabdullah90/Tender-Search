@@ -130,7 +130,7 @@ export function findCanonicalMatch(candidate: {
     // A long structured reference ("NUST/IT-2026/01", "TSE-2627111220673") identifies a tender on
     // its own; a short one ("VR-4345S") needs a second signal before it may merge two tenders.
     const strongReference = norm.length >= 8 && (norm.match(/\d/g) || []).length >= 2 && (norm.match(/\p{L}/gu) || []).length >= 2;
-    for (const existing of findTendersByReferenceNorm(norm, portalId)) {
+    for (const existing of findTendersByReferenceNorm(norm)) {
       const corroborated = strongReference ||
         calculateStringSimilarity(candidate.organization, existing.organization) >= 0.5 ||
         calculateStringSimilarity(candidate.title, existing.title) >= 0.5 ||

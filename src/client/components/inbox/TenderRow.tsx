@@ -14,7 +14,7 @@ function asList<T>(value: unknown): T[] {
   return (value as T[]) || [];
 }
 
-export interface TenderRowProps {
+interface TenderRowProps {
   tender: Tender;
   docQueue?: DocumentQueueStatus;
   selected: boolean;

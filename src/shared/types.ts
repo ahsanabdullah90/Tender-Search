@@ -19,8 +19,7 @@ export interface CachedDossier {
   docType?: 'notice' | 'bidding-document' | 'rfp' | 'boq' | 'tor' | 'drawings' | 'corrigendum' | 'clarification' | 'other';
   originalName?: string;
   addedAt?: string;
-  source?: 'portal_scrape' | 'manual_upload' | 'pasted_image';
-  superseded?: boolean;
+  source?: 'portal_scrape' | 'manual_upload';
 }
 
 export interface SecondarySource {
@@ -106,7 +105,7 @@ export interface Tender {
   created_at: string;
   updated_at: string;
   // Ingestion provenance (docs/13-ingestion-pipeline-plan.md, Phase 1)
-  ingestion_status?: 'staging' | 'ready' | 'failed_verification' | 'awaiting_scope';
+  ingestion_status?: 'staging' | 'ready' | 'awaiting_scope';
   /** 'listing' (stated by the portal) or 'upload_folder' (inferred upper bound, never used for ageing). */
   publish_date_source?: 'listing' | 'upload_folder' | null;
   deadline_source?: 'corrigendum_doc' | 'primary_doc' | 'html_detail' | 'html_row' | 'manual' | null;

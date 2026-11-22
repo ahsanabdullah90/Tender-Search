@@ -68,7 +68,7 @@ describe('dossierStore', () => {
     });
 
     it('maps portal IDs to standard uppercase file codes', () => {
-      expect(getPortalFileCode('epads')).toBe('FPPRA');
+      expect(getPortalFileCode('epms_ppra')).toBe('FPPRA');
       expect(getPortalFileCode('punjab_eproc')).toBe('PPPRA');
       expect(getPortalFileCode('sppra')).toBe('SPPRA');
       expect(getPortalFileCode('kppra')).toBe('KPPRA');

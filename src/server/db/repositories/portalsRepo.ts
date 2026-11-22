@@ -146,7 +146,7 @@ export function createPortal(input: {
   }
 
   const category = input.category?.trim() || 'Provincial';
-  const tier = (input.tier === 'playwright' ? 'playwright' : 'cheerio');
+  const tier = (input.tier === 'playwright' ? 'playwright' : 'http');
   const accessMode = (input.access_mode || 'public');
   const status = accessMode === 'login_required' || accessMode === 'cloudflare' ? 'hitl_required' : 'online';
   const loginUrl = input.login_url?.trim() || null;
@@ -173,12 +173,6 @@ export function createPortal(input: {
 export function deletePortal(portalId: string): boolean {
   const deleteTx = db.transaction(() => {
     try {
-      db.prepare(`
-        CREATE TABLE IF NOT EXISTS deleted_portals (
-          portal_id TEXT PRIMARY KEY,
-          deleted_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-      `).run();
       db.prepare('INSERT OR IGNORE INTO deleted_portals (portal_id) VALUES (?)').run(portalId);
     } catch {}
 

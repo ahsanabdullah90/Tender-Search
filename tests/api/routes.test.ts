@@ -1099,8 +1099,7 @@ describe('Server API Routes', () => {
         expect(res.body.success).toBe(true);
         expect(res.headers.connection).toBe('close');
 
-        await new Promise(resolve => setTimeout(resolve, 100));
-        expect(handlerSpy).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(handlerSpy).toHaveBeenCalledTimes(1), { timeout: 1000 });
       } finally {
         setShutdownHandler(null);
         if (prevToken === undefined) delete process.env.TENDER_SHUTDOWN_TOKEN;

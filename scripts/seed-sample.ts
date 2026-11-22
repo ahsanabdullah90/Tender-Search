@@ -20,7 +20,7 @@ const dbFile = path.resolve(sampleDir, 'tender_tracker.db');
 if (fs.existsSync(dbFile)) {
   try { fs.rmSync(dbFile, { force: true }); } catch {}
 }
-for (const sub of ['backups', 'dossiers', 'sessions', 'models', 'logs']) {
+for (const sub of ['backups', 'dossiers', 'sessions', 'models', 'logs', 'tessdata']) {
   const p = path.resolve(sampleDir, sub);
   if (!fs.existsSync(p)) {
     try { fs.mkdirSync(p, { recursive: true }); } catch {}
@@ -29,44 +29,44 @@ for (const sub of ['backups', 'dossiers', 'sessions', 'models', 'logs']) {
 process.env.TENDER_DATA_DIR = sampleDir;
 
 const { db, initDatabase, DATA_DIR } = await import('../src/server/db/index.js');
+const { formatClosingDate } = await import('../src/server/scrapers/dateParser.js');
 if (path.resolve(DATA_DIR) !== sampleDir) throw new Error('Refusing to seed: not pointing at sampleDir');
 initDatabase();
 
 const H = 3600_000, D = 24 * H;
 const now = Date.now();
 const iso = (ms: number) => new Date(ms).toISOString();
-const fmt = (ms: number) =>
-  new Date(ms).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Karachi' });
+const fmt = (ms: number) => formatClosingDate(iso(ms));
 
 type Opts = { bookmark?: boolean; amended?: boolean; ageDays?: number; value?: string; location?: string; notes?: string };
 type S = [string, string, string, string, number | null, string[], string[], Opts?];
 
 const SAMPLES: S[] = [
   // Closing-dates strip anchors:
-  ['epads', 'EPADS/2026/0412', 'Procurement of Enterprise Cloud Infrastructure & Migration Services', 'Ministry of IT & Telecom', now + 2 * D, ['Technology & IT', 'Infrastructure & Construction'], ['cloud', 'migration', 'enterprise'], { bookmark: true, value: 'PKR 45,000,000', location: 'Islamabad' }],
-  ['epads', 'EPADS/2026/0398', 'Solar Hybrid Inverter & Battery Storage for 40 Healthcare Facilities', 'National Health Services', now + 3 * D, ['Alternative Energy & Solar', 'Healthcare & Medical'], ['solar', 'hybrid inverter', 'battery storage'], { value: 'PKR 120,000,000', location: 'Nationwide' }],
-  ['punjab_eproc', 'PPRA-LHR-9921', 'Supply of High-Throughput Diagnostic Laboratory Equipment', 'Punjab Health Department', now + 5 * D, ['Healthcare & Medical'], ['laboratory', 'diagnostic', 'medical equipment'], { bookmark: true, value: 'PKR 85,000,000', location: 'Lahore' }],
-  ['punjab_eproc', 'PPRA-RWP-4410', 'Consultancy for Smart Traffic Management & Surveillance System', 'Rawalpindi Development Authority', now + 7 * D, ['Security & Surveillance', 'Consultancy & Advisory'], ['surveillance', 'smart traffic', 'consultancy'], { value: 'PKR 28,000,000', location: 'Rawalpindi' }],
-  ['sppra', 'SPPRA-KHI-2026-118', 'Desalination Plant Maintenance & Reverse Osmosis Membrane Replacement', 'Karachi Water & Sewerage Board', now + 12 * D, ['Infrastructure & Construction', 'Engineering & Industrial'], ['desalination', 'reverse osmosis', 'maintenance'], { value: 'PKR 65,000,000', location: 'Karachi' }],
-  ['sppra', 'SPPRA-HYD-5502', 'Fiber Optic Backbone Ring Expansion Phase 2', 'Sindh IT Board', now + 14 * D, ['Technology & IT', 'Telecom & Networking'], ['fiber optic', 'backbone', 'networking'], { bookmark: true, value: 'PKR 92,000,000', location: 'Hyderabad' }],
+  ['epms_ppra', 'EPMS/2026/0412', 'Procurement of Enterprise Textbook Printing & Classroom Materials', 'Ministry of Federal Education', now + 2 * D, ['Education & Learning', 'Stationery & Office Supplies'], ['education', 'textbooks', 'printing', 'classroom'], { bookmark: true, value: 'PKR 45,000,000', location: 'Islamabad' }],
+  ['epms_ppra', 'EPMS/2026/0398', 'Solar Hybrid Inverter & Battery Bank for 40 Rural Health Centers', 'National Health Services', now + 3 * D, ['Solar & Clean Energy', 'Construction & Civil Works'], ['solar', 'hybrid solar', 'battery bank', 'infrastructure'], { value: 'PKR 120,000,000', location: 'Nationwide' }],
+  ['punjab_eproc', 'PPRA-LHR-9921', 'Competency-Based Youth Skills & Technical Training Program', 'Punjab TEVTA', now + 5 * D, ['Vocational Training (TVET)', 'Education & Learning'], ['tvet', 'technical training', 'youth skills'], { bookmark: true, value: 'PKR 85,000,000', location: 'Lahore' }],
+  ['punjab_eproc', 'PPRA-RWP-4410', 'Civil Renovation & Prefabricated Classrooms Expansion', 'Rawalpindi Development Authority', now + 7 * D, ['Construction & Civil Works', 'Education & Learning'], ['renovation', 'prefabricated', 'classroom'], { value: 'PKR 28,000,000', location: 'Rawalpindi' }],
+  ['sppra', 'SPPRA-KHI-2026-118', 'Rehabilitation & Masonry Infrastructure Works at Regional Centers', 'Works & Services Department Sindh', now + 12 * D, ['Construction & Civil Works'], ['rehabilitation', 'masonry', 'infrastructure'], { value: 'PKR 65,000,000', location: 'Karachi' }],
+  ['sppra', 'SPPRA-HYD-5502', 'Supply of Office Stationery, Toner & Photocopier Consumables', 'Sindh School Education Department', now + 14 * D, ['Stationery & Office Supplies'], ['stationery', 'toner', 'consumables'], { bookmark: true, value: 'PKR 18,000,000', location: 'Hyderabad' }],
 
   // Rest of the 15-day runway + farther out:
-  ['kppra', 'KPPRA/PESH/2026/88', 'Deployment of Electric Feeder Buses for BRT Feeder Routes', 'Peshawar Urban Transport Authority', now + 8 * D, ['Engineering & Industrial'], ['electric buses', 'transport', 'feeder'], { value: 'PKR 210,000,000', location: 'Peshawar' }],
-  ['bppra', 'BPPRA-QTA-2026-033', 'Establishment of 10MW Off-Grid Solar Microgrids', 'Balochistan Energy Department', now + 9 * D, ['Alternative Energy & Solar'], ['microgrid', 'off-grid', 'solar power'], { value: 'PKR 180,000,000', location: 'Quetta' }],
-  ['ungm', 'UNGM-PAK-2026-004', 'Supply of Cold-Chain Refrigerators for Polio Eradication Drive', 'UNICEF Pakistan', now + 10 * D, ['Healthcare & Medical'], ['cold-chain', 'refrigerator', 'polio'], { value: 'USD 850,000', location: 'Nationwide' }],
-  ['giz', 'GIZ-PAK-9021', 'Technical Assistance: Industrial Energy Efficiency Decarbonization Roadmap', 'GIZ Pakistan Country Office', now + 11 * D, ['Consultancy & Advisory', 'Alternative Energy & Solar'], ['energy efficiency', 'decarbonization', 'advisory'], { value: 'EUR 350,000', location: 'Islamabad' }],
-  ['ndma', 'NDMA-REL-2026-077', 'Emergency Dewatering Pumps & Rapid Deployment Generator Sets', 'National Disaster Management Authority', now + 13 * D, ['Infrastructure & Construction'], ['dewatering pump', 'generator', 'emergency'], { value: 'PKR 55,000,000', location: 'Islamabad' }],
-  ['fde', 'FDE-EDU-2026-102', 'Provision of Interactive Smart Boards & STEM Lab Kits for 50 Colleges', 'Federal Directorate of Education', now + 6 * D, ['Technology & IT'], ['smart board', 'stem kit', 'interactive'], { amended: true, value: 'PKR 42,000,000', location: 'Islamabad' }],
-  ['mofept', 'MOFEPT-PROC-2026-19', 'National Digital Learning Portal Revamp & Content Licensing', 'Ministry of Federal Education & Professional Training', now + 4 * D, ['Technology & IT', 'Consultancy & Advisory'], ['digital learning', 'portal', 'lms'], { value: 'PKR 34,000,000', location: 'Islamabad' }],
-  ['gilgit', 'GB-TND-2026-015', 'Small Hydro Turbine Replacement for Hunza Mini-Hydel Station', 'Gilgit-Baltistan Power Department', now + 15 * D, ['Alternative Energy & Solar', 'Engineering & Industrial'], ['hydro turbine', 'mini-hydel', 'power'], { value: 'PKR 78,000,000', location: 'Hunza' }],
-  ['pseb', 'PSEB-TECH-2026-08', 'Software Technology Park Islamabad - High-Density Data Cabling', 'Pakistan Software Export Board', now + 1 * D, ['Telecom & Networking', 'Technology & IT'], ['data cabling', 'cat6a', 'structured cabling'], { bookmark: true, value: 'PKR 18,000,000', location: 'Islamabad' }],
+  ['kppra', 'KPPRA/PESH/2026/88', 'Supply of Vocational Tool Kits & Apprenticeship Training', 'KP TEVTA Peshawar', now + 8 * D, ['Vocational Training (TVET)'], ['tool kits', 'apprenticeship', 'vocational'], { value: 'PKR 48,000,000', location: 'Peshawar' }],
+  ['bppra', 'BPPRA-QTA-2026-033', 'Establishment of 10MW Off-Grid Solar PV Microgrids', 'Balochistan Energy Department', now + 9 * D, ['Solar & Clean Energy'], ['solar', 'pv system', 'solarization'], { value: 'PKR 180,000,000', location: 'Quetta' }],
+  ['ajk_ppra', 'AJK-CW-2026-004', 'Building Repair & Earthwork Protection Walls in Muzaffarabad', 'AJK Communication & Works', now + 10 * D, ['Construction & Civil Works'], ['building repair', 'earthwork', 'civil works'], { value: 'PKR 32,000,000', location: 'Muzaffarabad, AJK' }],
+  ['ungm', 'UNGM-PAK-2026-004', 'Teacher Training & Digital EdTech Classroom Rollout', 'UNICEF Pakistan', now + 11 * D, ['Education & Learning'], ['teacher training', 'edtech', 'classroom'], { value: 'USD 850,000', location: 'Nationwide' }],
+  ['giz', 'GIZ-PAK-9021', 'Advocacy Campaign & Documentary Media Production on TVET Reform', 'GIZ Pakistan Country Office', now + 11 * D, ['Media, Documentaries & Communications', 'Vocational Training (TVET)'], ['advocacy campaign', 'documentary', 'tvet'], { value: 'EUR 350,000', location: 'Islamabad' }],
+  ['ndma', 'NDMA-REL-2026-077', 'Construction of Prefabricated Flood-Resilient Community Warehouses', 'National Disaster Management Authority', now + 13 * D, ['Construction & Civil Works'], ['construction', 'prefabricated', 'infrastructure'], { value: 'PKR 55,000,000', location: 'Islamabad' }],
+  ['fde', 'FDE-EDU-2026-102', 'Provision of Classroom Supplies & Solar Backup for 50 Colleges', 'Federal Directorate of Education', now + 6 * D, ['Education & Learning', 'Solar & Clean Energy'], ['classroom', 'school supplies', 'solar'], { amended: true, value: 'PKR 42,000,000', location: 'Islamabad' }],
+  ['mofept', 'MOFEPT-PROC-2026-19', 'National Literacy & Curriculum Digital Learning Content', 'Ministry of Federal Education & Professional Training', now + 4 * D, ['Education & Learning'], ['literacy', 'curriculum', 'education'], { value: 'PKR 34,000,000', location: 'Islamabad' }],
+  ['gilgit', 'GB-TND-2026-015', 'Hybrid Solarization & Net Metering for District Schools', 'Gilgit-Baltistan Education Department', now + 15 * D, ['Solar & Clean Energy', 'Education & Learning'], ['solarization', 'net metering', 'education'], { value: 'PKR 78,000,000', location: 'Hunza' }],
+  ['pseb', 'PSEB-TECH-2026-08', 'Digital Communications & Public Relations Summit Campaign', 'Pakistan Software Export Board', now + 1 * D, ['Media, Documentaries & Communications'], ['digital communications', 'public relations', 'event management'], { bookmark: true, value: 'PKR 18,000,000', location: 'Islamabad' }],
 
   // Special cases: amended, older unread, edge cases
-  ['tender_services', 'TSP-CORR-2026-03', 'Upgradation of Sewage Treatment Plant Aeration Basins (Corrigendum 2)', 'Capital Development Authority', now + 11 * D, ['Infrastructure & Construction'], ['sewage', 'treatment plant', 'aeration'], { amended: true, value: 'PKR 110,000,000', location: 'Islamabad' }],
-  ['peef', 'PEEF-SCH-2026-01', 'Annual Printing & Distribution of 50,000 Scholarship Information Packs', 'Punjab Educational Endowment Fund', now + 13 * D, [], ['printing', 'distribution', 'publications'], { value: 'PKR 8,500,000', location: 'Lahore' }],
-  ['psda', 'PSDA-AUTO-2026-02', 'Supply of Automotive Diagnostic Workstations for Vocational Institutes', 'Punjab Skills Development Authority', now + 8 * D, ['Engineering & Industrial'], ['automotive', 'diagnostic workstation', 'vocational'], { value: 'PKR 22,000,000', location: 'Multan' }],
-  ['psdf', 'PSDF-TRG-2026-44', 'Skills Training in Renewable Energy & Solar PV Installation', 'Punjab Skills Development Fund', now + 10 * D, ['Alternative Energy & Solar', 'Consultancy & Advisory'], ['skills training', 'solar pv', 'vocational'], { value: 'PKR 38,000,000', location: 'Lahore' }],
-  ['ignite', 'IGNITE-INC-2026-05', 'Management and Incubation Operations of National Incubation Center Karachi', 'Ignite National Technology Fund', now + 15 * D, ['Technology & IT', 'Consultancy & Advisory'], ['incubation', 'startup', 'accelerator'], { bookmark: true, value: 'PKR 150,000,000', location: 'Karachi' }]
+  ['tender_services', 'TSP-CORR-2026-03', 'Rehabilitation & Asphalt Road Works (Corrigendum 2)', 'Capital Development Authority', now + 11 * D, ['Construction & Civil Works'], ['rehabilitation', 'asphalt', 'civil works'], { amended: true, value: 'PKR 110,000,000', location: 'Islamabad' }],
+  ['peef', 'PEEF-SCH-2026-01', 'Annual Printing & Distribution of 50,000 Scholarship Packs', 'Punjab Educational Endowment Fund', now + 13 * D, ['Stationery & Office Supplies', 'Education & Learning'], ['printing', 'scholarships', 'stationery'], { value: 'PKR 8,500,000', location: 'Lahore' }],
+  ['psdf', 'PSDF-TRG-2026-44', 'Skills Development & Renewable Solar PV Vocational Courses', 'Punjab Skills Development Fund', now + 10 * D, ['Vocational Training (TVET)', 'Solar & Clean Energy'], ['skill development', 'vocational courses', 'solar'], { value: 'PKR 38,000,000', location: 'Lahore' }],
+  ['ignite', 'IGNITE-INC-2026-05', 'Audio Visual & Animation Series for National Tech Incubation', 'Ignite National Technology Fund', now + 15 * D, ['Media, Documentaries & Communications'], ['audio visual', 'animation', 'video production'], { bookmark: true, value: 'PKR 24,000,000', location: 'Karachi' }]
 ];
 
 console.log('Seeding', SAMPLES.length, 'rich realistic tenders into data-sample...');

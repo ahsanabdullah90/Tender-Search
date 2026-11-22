@@ -18,7 +18,7 @@ import { Button, Chip } from '../../ui';
 import { DeleteTenderModal } from './DeleteTenderModal';
 import { HighlightedDescription } from './HighlightedDescription';
 
-export function formatCountdown(closingDate: string | null) {
+function formatCountdown(closingDate: string | null) {
   if (!closingDate) return null;
   const diff = new Date(closingDate).getTime() - Date.now();
   if (Number.isNaN(diff)) return null;
@@ -30,7 +30,7 @@ export function formatCountdown(closingDate: string | null) {
   return d > 0 ? `${d}d ${clock}` : clock;
 }
 
-export function fileToBase64(file: File): Promise<string> {
+function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -109,7 +109,7 @@ export function humanReviewReason(reason?: string | null): string {
   }
 }
 
-export function LiveCountdown({ closingDate }: { closingDate: string | null }) {
+function LiveCountdown({ closingDate }: { closingDate: string | null }) {
   useTick(1000);
   const countdown = formatCountdown(closingDate);
   if (!countdown) return null;
@@ -122,7 +122,7 @@ export function LiveCountdown({ closingDate }: { closingDate: string | null }) {
   );
 }
 
-export function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="rounded-lg bg-surface-2 px-3 py-2.5">
       <div className="text-xs text-ink-muted">{label}</div>
@@ -131,13 +131,13 @@ export function Fact({ label, value, mono = false }: { label: string; value: str
   );
 }
 
-export function SectionTitle({ children }: { children: React.ReactNode }) {
+function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-ink-muted">{children}</h3>;
 }
 
-export const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
+const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
 
-export interface TenderDocProcessingState {
+interface TenderDocProcessingState {
   kind: 'processing' | 'queued' | 'failed' | 'complete' | 'listing_only';
   savedCount: number;
   pendingCount: number;
@@ -243,7 +243,7 @@ export function getTenderDocProcessingState(
   };
 }
 
-export interface DetailProps {
+interface DetailProps {
   tender: Tender;
   corrigenda: CorrigendumLog[];
   docQueue?: DocumentQueueStatus;
@@ -259,7 +259,7 @@ export interface DetailProps {
 }
 
 /** True when an opened tender has no saved files yet, is not Passed/failed, and has a fetchable attachment or detail page. */
-export function hasAutoFetchableDocuments(t: Tender): boolean {
+function hasAutoFetchableDocuments(t: Tender): boolean {
   if (asList(t.cached_dossiers).length > 0) return false;
   if (t.pipeline_status === 'Passed' || t.doc_fetch_status === 'failed') return false;
   const attUrls = asList<string>(t.attachment_urls);
@@ -879,7 +879,7 @@ export function Detail({
           </div>
         )}
 
-        {/* 4-Card Fact Strip */}
+        {/* Fact Strip */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           <Fact label="Estimated value" value={currentTender.estimated_value || 'Not disclosed'} mono />
           <Fact label="Published" value={currentTender.publish_date ? new Date(currentTender.publish_date).toLocaleDateString('en-GB') : 'Not stated'} mono />
@@ -1159,7 +1159,7 @@ export function Detail({
                         <FileText className="h-4 w-4 shrink-0 text-ink-muted" />
                         <span className="truncate font-semibold">{file.label || `Document ${i + 1}`}</span>
                         {file.docType && (
-                          <span className="rounded bg-chip px-1.5 py-0.2 text-[10px] font-bold uppercase text-ink-muted">
+                          <span className="rounded bg-chip px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-muted">
                             {file.docType}
                           </span>
                         )}
@@ -1252,4 +1252,3 @@ export function Detail({
     </div>
   );
 }
-export default Detail;

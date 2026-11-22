@@ -11,14 +11,13 @@
     "preview": "vite preview",
     "start": "node dist-server/server.mjs --production",
     "desktop": "wscript.exe scripts/launch-desktop.vbs",
-    "clean": "node -e \"try{fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-server',{recursive:true,force:true});fs.rmSync('server.js',{force:true})}catch(e){}\"",
+    "clean": "node -e \"try{fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-server',{recursive:true,force:true})}catch(e){}\"",
     "lint": "tsc --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "verify": "npm run lint && vitest run --testTimeout=30000 && npm run build",
     "seed:sample": "tsx scripts/seed-sample.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage --maxWorkers=1",
-    "test:e2e": "playwright test",
     "probe:portals": "tsx scripts/probe-portals.ts",
     "shortcut": "powershell -ExecutionPolicy Bypass -File scripts/create-desktop-shortcut.ps1"
   },
@@ -28,8 +27,6 @@
     "@google/genai": "^2.32.0",
     "@huggingface/transformers": "^4.3.2",
     "@napi-rs/canvas": "^1.1.1",
-    "@tailwindcss/vite": "^4.3.3",
-    "@vitejs/plugin-react": "^6.1.1",
     "better-sqlite3": "^11.8.1",
     "cheerio": "^1.2.0",
     "dotenv": "^17.2.3",
@@ -39,11 +36,11 @@
     "pdfjs-dist": "4.10.38",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "tesseract.js": "^7.0.0",
-    "vite": "^8.3.5"
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.8",
@@ -53,6 +50,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@types/supertest": "^7.2.1",
+    "@vitejs/plugin-react": "^6.1.1",
     "@vitest/coverage-v8": "^4.1.12",
     "esbuild": "^0.28.2",
     "jsdom": "^29.1.1",
@@ -60,6 +58,7 @@
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
+    "vite": "^8.3.5",
     "vitest": "^4.1.12"
   }
 }

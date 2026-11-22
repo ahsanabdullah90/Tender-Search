@@ -476,5 +476,3 @@ function decideAwaitingScope(tender: Tender, result: DocumentExtractionResult, j
   deleteTenders([tender.id], 'no-track-match');
   return 'removed';
 }
-
-export { applyDocumentResultToTender };
