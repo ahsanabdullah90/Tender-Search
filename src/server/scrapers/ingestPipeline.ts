@@ -39,12 +39,13 @@ import {
 } from '../db/repositories/ingestJobsRepo.js';
 import { matchTracks, applyDocumentScopeToTracks } from './trackMatcher.js';
 import { embedTextToBlobAsync, buildTenderEmbeddingText } from '../services/embeddingService.js';
-import { purgeTenderFiles, shouldUpgradeDocType, renameDossierToCanonical } from '../services/dossierStore.js';
+import { purgeTenderFiles, readCachedDossier, shouldUpgradeDocType, renameDossierToCanonical } from '../services/dossierStore.js';
 import { canRunHeavyNetworkTask } from '../services/networkMonitor.js';
 import { deriveDossierLabel } from '../services/dossierManager.js';
 import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import {
   INGEST_DEFAULTS,
+  UPFRONT_MAX_DOCS,
   getActiveScanBudget,
   hasUpfrontTime,
   maxFileBytes,
@@ -52,9 +53,8 @@ import {
   tryConsumeScanVision
 } from '../services/ingestBudget.js';
 import { crawlerDeps } from './crawlerDeps.js';
-import { readCachedDossier } from './tenderAnalysis.js';
 
-export const UPFRONT_MAX_DOCS = 2;
+export { UPFRONT_MAX_DOCS };
 export const MAX_DOCUMENTS_PER_TENDER = 5;
 
 export interface ProcessTenderResult {

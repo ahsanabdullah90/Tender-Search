@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import type { DocType } from '../../shared/types.js';
+import { isCorrigendumLabel, safeDecodeURIComponent } from '../../shared/documentUtils.js';
 
 export function getPathSizeBytes(targetPath: string): number {
   try {
@@ -159,4 +161,98 @@ export function isDocxBuffer(buf: Buffer, mimeType?: string): boolean {
     mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     (buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b && /word|docx/i.test(mimeType || ''))
   );
+}
+
+function extractUrlClues(remoteUrl?: string | null): string {
+  if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return '';
+  const parts: string[] = [];
+  try {
+    const parsed = new URL(remoteUrl);
+    parts.push(safeDecodeURIComponent(parsed.pathname));
+    parts.push(safeDecodeURIComponent(parsed.search));
+
+    const fileParam = parsed.searchParams.get('file');
+    if (fileParam && /^[A-Za-z0-9+/=]{8,}$/.test(fileParam)) {
+      try {
+        const decoded = Buffer.from(fileParam, 'base64').toString('utf8').trim();
+        if (/^[\w./-\s]+$/.test(decoded)) parts.push(decoded);
+      } catch {}
+    }
+
+    const baseName = path.basename(parsed.pathname);
+    const metaMatch = baseName.match(/-meta([A-Za-z0-9+/=]+)-/i);
+    if (metaMatch?.[1]) {
+      try {
+        const decoded = Buffer.from(metaMatch[1], 'base64').toString('utf8').trim();
+        if (decoded) parts.push(decoded);
+      } catch {}
+    }
+  } catch {
+    parts.push(safeDecodeURIComponent(remoteUrl));
+  }
+  return parts.join(' ').toLowerCase();
+}
+
+/**
+ * Determines document type from filename, label, and optional remote URL path/query.
+ */
+export function inferDocType(labelOrName: string = '', remoteUrl?: string | null): DocType {
+  const combined = `${labelOrName || ''} ${extractUrlClues(remoteUrl)}`.toLowerCase();
+  if (isCorrigendumLabel(combined)) return 'corrigendum';
+  if (/(?:^|[^a-z0-9])boq(?:[^a-z0-9]|$)|\/boqmanual\/|bill[\s_-]*of[\s_-]*quantit|pricing[\s_-]*schedule|schedule[\s_-]*of[\s_-]*requirement/i.test(combined)) return 'boq';
+  if (/(?:^|[^a-z0-9])rfp(?:[^a-z0-9]|$)|request[\s_-]*for[\s_-]*proposal/i.test(combined)) return 'rfp';
+  if (/(?:^|[^a-z0-9])tor(?:[^a-z0-9]|$)|terms[\s_-]*of[\s_-]*reference/i.test(combined)) return 'tor';
+  if (/(drawing|blueprint|diagram|(?:^|[^a-z0-9])map(?:[^a-z0-9]|$)|layout)/i.test(combined)) return 'drawings';
+  if (/(?:^|[^a-z0-9])(?:qa|q\s*&\s*a)(?:[^a-z0-9]|$)|clarification|pre[-\s]?bid[\s_-]*minutes|\bquery\b/i.test(combined)) return 'clarification';
+  if (/bidding[\s_-]*doc|\/biddingdocuments\/|standard[\s_-]*bidding|tender[\s_-]*doc|(?:^|[^a-z0-9])rfq(?:[^a-z0-9]|$)|solicitation/i.test(combined)) {
+    return 'bidding-document';
+  }
+  if (/notice|advertisement|\/advertisement_docs\/|\/tenders\/|(?:^|[^a-z0-9])(?:nit|ifb|eoi)(?:[^a-z0-9]|$)|invitation|banner|clipp(?:er|ing)|image/i.test(combined)) {
+    return 'notice';
+  }
+  return 'other';
+}
+
+/**
+ * Moves tender folders to .trash and deletes them, calling `onPurgeFailure` when a Windows/Drive file lock holds a handle.
+ */
+export function purgeTenderDirsOnDisk(
+  dossiersDir: string,
+  trashDir: string,
+  tenderIds: string[],
+  onPurgeFailure?: (id: string, folderPath: string, errorMessage: string) => void
+): { purged: string[]; queued: string[] } {
+  const purged: string[] = [];
+  const queued: string[] = [];
+
+  if (!fs.existsSync(trashDir)) {
+    try {
+      fs.mkdirSync(trashDir, { recursive: true });
+    } catch {}
+  }
+
+  for (const id of tenderIds) {
+    if (!id || id.includes('..') || id.includes('/') || id.includes('\\')) continue;
+    const dir = path.resolve(dossiersDir, id);
+    if (!fs.existsSync(dir)) continue;
+
+    const trashTarget = path.resolve(trashDir, `${id}_${Date.now()}`);
+
+    try {
+      fs.renameSync(dir, trashTarget);
+
+      try {
+        fs.rmSync(trashTarget, { recursive: true, force: true });
+        purged.push(id);
+      } catch (rmErr: any) {
+        onPurgeFailure?.(id, trashTarget, rmErr?.message || String(rmErr));
+        queued.push(id);
+      }
+    } catch (renameErr: any) {
+      onPurgeFailure?.(id, dir, renameErr?.message || String(renameErr));
+      queued.push(id);
+    }
+  }
+
+  return { purged, queued };
 }

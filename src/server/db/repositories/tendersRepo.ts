@@ -1,6 +1,7 @@
-import { db, safeJsonParse } from '../connection.js';
+import path from 'path';
+import { db, safeJsonParse, DOSSIERS_DIR } from '../connection.js';
 import { Tender, BidBrief } from '../../../shared/types.js';
-import { purgeTenderFiles } from '../../services/dossierStore.js';
+import { purgeTenderDirsOnDisk } from '../../services/fileUtils.js';
 import { normalizeReferenceNo } from '../../services/referenceNo.js';
 import {
   buildTenderEmbeddingText,
@@ -418,7 +419,7 @@ export function deleteTenders(
 
   deleteTx();
 
-  const { purged } = purgeTenderFiles(tenderIds);
+  const { purged } = purgeTenderDirectories(tenderIds);
   return { deletedCount: tenderIds.length, purgedFiles: purged };
 }
 
@@ -471,7 +472,7 @@ export function slimPassedTenders(tenderIds: string[]): { slimmedCount: number; 
 
   slimTx();
 
-  const { purged } = purgeTenderFiles(tenderIds);
+  const { purged } = purgeTenderDirectories(tenderIds);
   return { slimmedCount: tenderIds.length, purgedFiles: purged };
 }
 
@@ -1227,5 +1228,49 @@ export function upsertScrapedTender(input: UpsertScrapedTenderInput): boolean {
  */
 export function deleteStagedTender(id: string): void {
   db.prepare(`DELETE FROM tenders WHERE id = ? AND ingestion_status = 'staging' AND pipeline_status = 'New Opportunity'`).run(id);
+}
+
+export interface PendingFilePurgeRow {
+  id: string;
+  folder_path: string;
+  attempts: number;
+}
+
+export function enqueuePendingFilePurge(id: string, folderPath: string, errorMessage: string): void {
+  db.prepare(`
+    INSERT INTO pending_file_purges (id, folder_path, attempts, last_error)
+    VALUES (?, ?, 1, ?)
+    ON CONFLICT(id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error
+  `).run(id, folderPath, errorMessage);
+}
+
+export function getPendingFilePurges(maxAttempts: number = 10): PendingFilePurgeRow[] {
+  return db.prepare('SELECT id, folder_path, attempts FROM pending_file_purges WHERE attempts < ?').all(maxAttempts) as PendingFilePurgeRow[];
+}
+
+export function deletePendingFilePurge(id: string): void {
+  db.prepare('DELETE FROM pending_file_purges WHERE id = ?').run(id);
+}
+
+export function incrementPendingFilePurgeAttempt(id: string, errorMessage: string): void {
+  db.prepare('UPDATE pending_file_purges SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(errorMessage, id);
+}
+
+export function countPendingFilePurges(maxAttempts: number = 10): number {
+  try {
+    const row = db.prepare('SELECT COUNT(*) as c FROM pending_file_purges WHERE attempts < ?').get(maxAttempts) as { c: number } | undefined;
+    return row?.c || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function purgeTenderDirectories(tenderIds: string[]): { purged: string[]; queued: string[] } {
+  return purgeTenderDirsOnDisk(
+    DOSSIERS_DIR,
+    path.resolve(DOSSIERS_DIR, '.trash'),
+    tenderIds,
+    (id, folderPath, message) => enqueuePendingFilePurge(`purge-${id}-${Date.now()}`, folderPath, message)
+  );
 }
 

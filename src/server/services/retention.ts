@@ -1,7 +1,6 @@
 import {
   getAppSetting,
   setAppSetting,
-  countPendingFilePurges,
   pruneOldDailyVisionCounters
 } from '../db/repositories/systemRepo.js';
 import {
@@ -13,7 +12,8 @@ import {
   deleteTenders,
   releaseStaleStagingTenders,
   getStaleAwaitingScopeTenderIds,
-  countAwaitingScopeTenders
+  countAwaitingScopeTenders,
+  countPendingFilePurges
 } from '../db/repositories/tendersRepo.js';
 import { releaseExpiredLeases } from '../db/repositories/ingestJobsRepo.js';
 import {

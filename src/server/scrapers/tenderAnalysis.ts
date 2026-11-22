@@ -1,8 +1,5 @@
-import fs from 'fs';
-import path from 'path';
 import * as cheerio from 'cheerio';
 import {
-  DOSSIERS_DIR,
   getTenderById,
   updateTenderFields,
   getGeminiApiKey,
@@ -13,7 +10,6 @@ import {
   refreshTenderDocFetchStatus
 } from '../db/index.js';
 import {
-  safeDecodeURIComponent,
   sanitizeOriginUrl,
   isDirectDocumentUrl,
   isImageUrl
@@ -21,7 +17,13 @@ import {
 import { Tender, CachedDossier } from '../../shared/types.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { deriveDossierLabel, isHtmlContent, detectExtensionAndMime } from '../services/dossierManager.js';
-import { saveTenderDocument, getPortalFileCode, upgradeDossierDocTypeIfNeeded, DocType } from '../services/dossierStore.js';
+import {
+  saveTenderDocument,
+  readCachedDossier,
+  getPortalFileCode,
+  upgradeDossierDocTypeIfNeeded,
+  DocType
+} from '../services/dossierStore.js';
 import { extractFromDocument, DocumentExtractionResult } from '../services/documentExtractor.js';
 import { applyDocumentResultToTender } from '../services/documentApply.js';
 import { summarizeTenderTextWithAI } from '../services/ocrService.js';
@@ -33,14 +35,7 @@ import { extractBppraBidId, fetchBppraDetailMetadata } from './bppraScraper.js';
 import { orderDocumentCandidates } from './ingestPipeline.js';
 import { crawlerDeps } from './crawlerDeps.js';
 
-/** Reads a cached dossier's bytes from disk, or null if it is missing. */
-export function readCachedDossier(tenderId: string, dossier: CachedDossier): Buffer | null {
-  const filename = safeDecodeURIComponent(path.basename(dossier.localPath || ''));
-  if (!filename) return null;
-  const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
-  if (!diskPath.startsWith(path.resolve(DOSSIERS_DIR) + path.sep) || !fs.existsSync(diskPath)) return null;
-  return fs.readFileSync(diskPath);
-}
+export { readCachedDossier };
 
 function resolvePortalDefForTender(tender: Tender): PortalDefinition {
   return (

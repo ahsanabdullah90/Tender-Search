@@ -5,27 +5,32 @@ import { DOSSIERS_DIR } from '../db/connection.js';
 import { PORTAL_DEFINITIONS } from '../scrapers/portalList.js';
 import {
   safeDecodeURIComponent,
-  isCorrigendumLabel,
   isGenericDossierLabel
 } from '../../shared/documentUtils.js';
-import { getMimeTypeFromExt, getPathSizeBytes } from './fileUtils.js';
+import {
+  getMimeTypeFromExt,
+  getPathSizeBytes,
+  inferDocType,
+  purgeTenderDirsOnDisk
+} from './fileUtils.js';
+import {
+  getAppSetting,
+  setAppSetting
+} from '../db/repositories/systemRepo.js';
 import {
   enqueuePendingFilePurge,
   getPendingFilePurges,
   deletePendingFilePurge,
   incrementPendingFilePurgeAttempt,
-  getAppSetting,
-  setAppSetting
-} from '../db/repositories/systemRepo.js';
-import {
   getTenderById,
   getAllTenderDossierRows,
   getAllTendersWithDossiers,
   setTenderCachedDossiersRaw
 } from '../db/repositories/tendersRepo.js';
-import { CachedDossier, Tender } from '../../shared/types.js';
+import { CachedDossier, DocType, Tender } from '../../shared/types.js';
 
-export { getMimeTypeFromExt };
+export type { DocType };
+export { getMimeTypeFromExt, inferDocType };
 
 export const TRASH_DIR = path.resolve(DOSSIERS_DIR, '.trash');
 
@@ -35,8 +40,6 @@ if (!fs.existsSync(TRASH_DIR)) {
     fs.mkdirSync(TRASH_DIR, { recursive: true });
   } catch {}
 }
-
-export type DocType = 'notice' | 'bidding-document' | 'rfp' | 'boq' | 'tor' | 'drawings' | 'corrigendum' | 'clarification' | 'other';
 
 const DOC_TYPE_FILENAME_TOKENS: Record<DocType, string> = {
   'bidding-document': 'Bidding-Document',
@@ -88,56 +91,6 @@ export function getPortalFileCode(portalId?: string | null): string {
   const clean = portalId.toLowerCase().trim();
   if (PORTAL_FILE_CODES[clean]) return PORTAL_FILE_CODES[clean];
   return clean.replace(/[^a-z0-9]/g, '').slice(0, 6).toUpperCase() || 'GEN';
-}
-
-function extractUrlClues(remoteUrl?: string | null): string {
-  if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return '';
-  const parts: string[] = [];
-  try {
-    const parsed = new URL(remoteUrl);
-    parts.push(safeDecodeURIComponent(parsed.pathname));
-    parts.push(safeDecodeURIComponent(parsed.search));
-
-    const fileParam = parsed.searchParams.get('file');
-    if (fileParam && /^[A-Za-z0-9+/=]{8,}$/.test(fileParam)) {
-      try {
-        const decoded = Buffer.from(fileParam, 'base64').toString('utf8').trim();
-        if (/^[\w./-\s]+$/.test(decoded)) parts.push(decoded);
-      } catch {}
-    }
-
-    const baseName = path.basename(parsed.pathname);
-    const metaMatch = baseName.match(/-meta([A-Za-z0-9+/=]+)-/i);
-    if (metaMatch?.[1]) {
-      try {
-        const decoded = Buffer.from(metaMatch[1], 'base64').toString('utf8').trim();
-        if (decoded) parts.push(decoded);
-      } catch {}
-    }
-  } catch {
-    parts.push(safeDecodeURIComponent(remoteUrl));
-  }
-  return parts.join(' ').toLowerCase();
-}
-
-/**
- * Determines document type from filename, label, and optional remote URL path/query.
- */
-export function inferDocType(labelOrName: string = '', remoteUrl?: string | null): DocType {
-  const combined = `${labelOrName || ''} ${extractUrlClues(remoteUrl)}`.toLowerCase();
-  if (isCorrigendumLabel(combined)) return 'corrigendum';
-  if (/(?:^|[^a-z0-9])boq(?:[^a-z0-9]|$)|\/boqmanual\/|bill[\s_-]*of[\s_-]*quantit|pricing[\s_-]*schedule|schedule[\s_-]*of[\s_-]*requirement/i.test(combined)) return 'boq';
-  if (/(?:^|[^a-z0-9])rfp(?:[^a-z0-9]|$)|request[\s_-]*for[\s_-]*proposal/i.test(combined)) return 'rfp';
-  if (/(?:^|[^a-z0-9])tor(?:[^a-z0-9]|$)|terms[\s_-]*of[\s_-]*reference/i.test(combined)) return 'tor';
-  if (/(drawing|blueprint|diagram|(?:^|[^a-z0-9])map(?:[^a-z0-9]|$)|layout)/i.test(combined)) return 'drawings';
-  if (/(?:^|[^a-z0-9])(?:qa|q\s*&\s*a)(?:[^a-z0-9]|$)|clarification|pre[-\s]?bid[\s_-]*minutes|\bquery\b/i.test(combined)) return 'clarification';
-  if (/bidding[\s_-]*doc|\/biddingdocuments\/|standard[\s_-]*bidding|tender[\s_-]*doc|(?:^|[^a-z0-9])rfq(?:[^a-z0-9]|$)|solicitation/i.test(combined)) {
-    return 'bidding-document';
-  }
-  if (/notice|advertisement|\/advertisement_docs\/|\/tenders\/|(?:^|[^a-z0-9])(?:nit|ifb|eoi)(?:[^a-z0-9]|$)|invitation|banner|clipp(?:er|ing)|image/i.test(combined)) {
-    return 'notice';
-  }
-  return 'other';
 }
 
 const GENERIC_TITLE_SLUGS = new Set(['tender', 'tender-notice', 'notice', 'corrigendum', 'document', 'item']);
@@ -796,41 +749,25 @@ export async function reclassifyExistingDossiersFromText(options?: { force?: boo
   return { filesReclassified };
 }
 
+/** Reads a cached dossier's bytes from disk, or null if it is missing. */
+export function readCachedDossier(tenderId: string, dossier: CachedDossier): Buffer | null {
+  const filename = safeDecodeURIComponent(path.basename(dossier.localPath || ''));
+  if (!filename) return null;
+  const diskPath = path.resolve(DOSSIERS_DIR, tenderId, filename);
+  if (!diskPath.startsWith(path.resolve(DOSSIERS_DIR) + path.sep) || !fs.existsSync(diskPath)) return null;
+  return fs.readFileSync(diskPath);
+}
+
 /**
  * Moves tender folder to .trash with retry queue for Windows/Google Drive file locks
  */
 export function purgeTenderFiles(tenderIds: string[]): { purged: string[]; queued: string[] } {
-  const purged: string[] = [];
-  const queued: string[] = [];
-
-  for (const id of tenderIds) {
-    if (!id || id.includes('..') || id.includes('/') || id.includes('\\')) continue;
-    const dir = path.resolve(DOSSIERS_DIR, id);
-    if (!fs.existsSync(dir)) continue;
-
-    const trashTarget = path.resolve(TRASH_DIR, `${id}_${Date.now()}`);
-
-    try {
-      // 1. Move to trash folder (atomic operation on same drive)
-      fs.renameSync(dir, trashTarget);
-
-      // 2. Immediate deletion attempt from trash
-      try {
-        fs.rmSync(trashTarget, { recursive: true, force: true });
-        purged.push(id);
-      } catch (rmErr: any) {
-        // Locked file in trash, enqueue for background purge
-        enqueuePendingFilePurge(`purge-${id}-${Date.now()}`, trashTarget, rmErr.message);
-        queued.push(id);
-      }
-    } catch (renameErr: any) {
-      // Failed to rename (e.g. process holding active handle)
-      enqueuePendingFilePurge(`purge-${id}-${Date.now()}`, dir, renameErr.message);
-      queued.push(id);
-    }
-  }
-
-  return { purged, queued };
+  return purgeTenderDirsOnDisk(
+    DOSSIERS_DIR,
+    TRASH_DIR,
+    tenderIds,
+    (id, folderPath, message) => enqueuePendingFilePurge(`purge-${id}-${Date.now()}`, folderPath, message)
+  );
 }
 
 /**

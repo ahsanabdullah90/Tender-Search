@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Request, Response, Router } from 'express';
 import { asyncHandler, maskApiKey, decodeBase64Payload } from './routeUtils.js';
 import crypto from 'crypto';
 import path from 'path';
@@ -154,11 +154,11 @@ systemRouter.get('/storage', (_req, res) => {
 systemRouter.post('/dossiers/prune-passed', (_req, res) => res.json(pruneDossiersForPassed()));
 
 // 3b. Ingest & Vision Budgets Configuration
-const handleGetIngestBudgets = (_req: any, res: any) => {
+const handleGetIngestBudgets = (_req: Request, res: Response) => {
   res.json(getIngestBudgetSettings());
 };
 
-const handleUpdateIngestBudgets = (req: any, res: any) => {
+const handleUpdateIngestBudgets = (req: Request, res: Response) => {
   const updated = updateIngestBudgetSettings(req.body || {});
   res.json({ success: true, budgets: updated });
 };
@@ -223,14 +223,14 @@ systemRouter.get('/system/embedding-status', (_req, res) => {
 });
 
 // 6. Session Execution Logs (Strict Last 3 Retained)
-const handleListLogs = (_req: any, res: any) => {
+const handleListLogs = (_req: Request, res: Response) => {
   res.json({
     currentSession: getCurrentSessionFilename(),
     sessions: listSessionLogs()
   });
 };
 
-const handleGetLogFile = (req: any, res: any) => {
+const handleGetLogFile = (req: Request, res: Response) => {
   const { filename } = req.params;
   const content = readSessionLog(filename);
   if (content === null) {
@@ -250,17 +250,17 @@ systemRouter.get('/system/logs', handleListLogs);
 systemRouter.get('/system/logs/:filename', handleGetLogFile);
 
 // 7. Automated Retention & Dossier Reconciliation
-const handleGetRetention = (_req: any, res: any) => {
+const handleGetRetention = (_req: Request, res: Response) => {
   res.json(getRetentionStatus());
 };
 
-const handleRunRetention = (req: any, res: any) => {
+const handleRunRetention = (req: Request, res: Response) => {
   const dryRun = req.query.dryRun === 'true' || req.query.dryRun === '1' || req.body?.dryRun === true;
   const report = runRetentionCycle({ dryRun, forceAll: true });
   res.json(report);
 };
 
-const handleUpdateRetentionSettings = (req: any, res: any) => {
+const handleUpdateRetentionSettings = (req: Request, res: Response) => {
   const { autoClean, graceDays, passedDays } = req.body || {};
   if (autoClean !== undefined) setAppSetting('retention_auto_clean', String(Boolean(autoClean)));
   if (graceDays !== undefined) setAppSetting('retention_grace_days', String(Math.max(1, Number(graceDays) || 2)));
@@ -268,7 +268,7 @@ const handleUpdateRetentionSettings = (req: any, res: any) => {
   res.json({ success: true, status: getRetentionStatus() });
 };
 
-const handleReconcileDossiers = (req: any, res: any) => {
+const handleReconcileDossiers = (req: Request, res: Response) => {
   const dryRun = req.query.dryRun === 'true' || req.query.dryRun === '1' || req.body?.dryRun === true;
   const result = reconcileDossiers({ dryRun, graceMinutes: 60 });
   res.json(result);
@@ -280,14 +280,14 @@ systemRouter.post('/system/retention/settings', handleUpdateRetentionSettings);
 systemRouter.post('/system/dossiers/reconcile', handleReconcileDossiers);
 
 // 8. Proactive 48h Closing Alerts & Daily Digest (Plan B)
-const handleGetDigest = (req: any, res: any) => {
+const handleGetDigest = (req: Request, res: Response) => {
   const settings = getDigestSettings();
   const hoursParam = req.query?.hours ? Number(req.query.hours) : settings.withinHours;
   const summary = getAlertsDigest(Number.isFinite(hoursParam) ? hoursParam : 48);
   res.json({ ...summary, settings });
 };
 
-const handleUpdateDigestSettings = (req: any, res: any) => {
+const handleUpdateDigestSettings = (req: Request, res: Response) => {
   const { enabled, webhookUrl, withinHours } = req.body || {};
   if (typeof webhookUrl === 'string' && webhookUrl.trim()) {
     const check = validateExternalHttpUrl(webhookUrl);

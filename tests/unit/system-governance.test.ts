@@ -235,4 +235,67 @@ describe('System Governance, Security & Operational Invariants', () => {
       expect(startupScript).toContain('--minimized');
     });
   });
+
+  describe('GOV-3: Zero circular imports across src/', () => {
+    it('contains zero static or dynamic import cycles across src/', () => {
+      const srcRoot = path.resolve(__dirname, '../../src');
+      const files: string[] = [];
+      const walk = (dir: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (/\.(ts|tsx)$/.test(entry.name)) files.push(full);
+        }
+      };
+      walk(srcRoot);
+
+      const graph = new Map<string, string[]>();
+      const importRe = /(?:import|export)\s+(?:type\s+)?(?:[\w*{},\s$]+)\s+from\s+['"](\.[^'"]+)['"]|import\s*\(\s*['"](\.[^'"]+)['"]\s*\)|import\s+['"](\.[^'"]+)['"]/g;
+      for (const file of files) {
+        const content = fs.readFileSync(file, 'utf8');
+        const targets: string[] = [];
+        importRe.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = importRe.exec(content))) {
+          const spec = match[1] || match[2] || match[3];
+          if (!spec) continue;
+          const base = path.resolve(path.dirname(file), spec.replace(/\.js$/, ''));
+          const candidates = [
+            `${base}.ts`,
+            `${base}.tsx`,
+            path.join(base, 'index.ts'),
+            path.join(base, 'index.tsx'),
+            base
+          ];
+          const hit = candidates.find(c => fs.existsSync(c) && fs.statSync(c).isFile());
+          if (hit) targets.push(hit);
+        }
+        graph.set(file, targets);
+      }
+
+      const cycles = new Set<string>();
+      const dfs = (node: string, stack: string[], onPath: Set<string>) => {
+        for (const target of graph.get(node) || []) {
+          const idx = stack.indexOf(target);
+          if (idx !== -1) {
+            const cycleNodes = stack.slice(idx).map(p => path.relative(srcRoot, p).replace(/\\/g, '/'));
+            const minNode = cycleNodes.reduce((a, b) => (a < b ? a : b));
+            const minIdx = cycleNodes.indexOf(minNode);
+            const normalized = [...cycleNodes.slice(minIdx), ...cycleNodes.slice(0, minIdx), minNode].join(' -> ');
+            cycles.add(normalized);
+          } else if (!onPath.has(target)) {
+            const next = new Set(onPath);
+            next.add(target);
+            dfs(target, [...stack, target], next);
+          }
+        }
+      };
+
+      for (const file of files) {
+        dfs(file, [file], new Set([file]));
+      }
+
+      expect([...cycles].sort()).toEqual([]);
+    });
+  });
 });

@@ -25,7 +25,8 @@ import { getAllDomainTracks } from '../db/repositories/tracksRepo.js';
 import { deriveDossierLabel } from './dossierManager.js';
 import { upgradeDossierDocTypeIfNeeded } from './dossierStore.js';
 import { extractFromDocument, DocumentExtractionResult } from './documentExtractor.js';
-import { maxFileBytes, tryConsumeDailyVision } from './ingestBudget.js';
+import { isDownloadableCandidateUrl } from '../../shared/documentUtils.js';
+import { maxFileBytes, tryConsumeDailyVision, UPFRONT_MAX_DOCS } from './ingestBudget.js';
 import {
   crawlerDeps,
   currentScanStatus,
@@ -33,7 +34,6 @@ import {
   fetchDocumentsForTender,
   updateDocQueueStatus
 } from '../scrapers/crawlerEngine.js';
-import { isDownloadableCandidateUrl, UPFRONT_MAX_DOCS } from '../scrapers/ingestPipeline.js';
 import { applyDocumentScopeToTracks, matchTracks } from '../scrapers/trackMatcher.js';
 import { applyDocumentResultToTender } from './documentApply.js';
 import { Tender } from '../../shared/types.js';

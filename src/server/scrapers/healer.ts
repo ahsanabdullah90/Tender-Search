@@ -3,15 +3,15 @@ import { sanitizeOriginUrl } from '../../shared/documentUtils.js';
 import { PORTAL_DEFINITIONS, PortalDefinition } from './portalList.js';
 import { updatePortalHealth } from '../db/index.js';
 import { discoverTenderLinkWithAI, extractTenderListFromHtmlWithAI } from '../services/ocrService.js';
+import { fetchHtmlSmart } from './crawlerDeps.js';
 import {
   RawScrapedItem,
   ScrapeResult,
-  fetchHtmlSmart,
   parsePortalHtml,
   hasEmptyTenderTableState,
   hasProcurementSignals,
   compactHtmlForAiExtraction
-} from './crawlerEngine.js';
+} from './portalParsers.js';
 
 /**
  * Step 3 of the 5-Step Autonomous Healer:

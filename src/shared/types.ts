@@ -9,6 +9,17 @@ export const TENDER_STATUSES = [
 
 export type OpportunityStatus = (typeof TENDER_STATUSES)[number];
 
+export type DocType =
+  | 'notice'
+  | 'bidding-document'
+  | 'rfp'
+  | 'boq'
+  | 'tor'
+  | 'drawings'
+  | 'corrigendum'
+  | 'clarification'
+  | 'other';
+
 export interface CachedDossier {
   label: string;
   localPath: string;
@@ -16,7 +27,7 @@ export interface CachedDossier {
   mimeType: string;
   sha256: string;
   sizeBytes?: number;
-  docType?: 'notice' | 'bidding-document' | 'rfp' | 'boq' | 'tor' | 'drawings' | 'corrigendum' | 'clarification' | 'other';
+  docType?: DocType;
   originalName?: string;
   addedAt?: string;
   source?: 'portal_scrape' | 'manual_upload';

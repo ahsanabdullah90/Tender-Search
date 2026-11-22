@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Request, Response, Router } from 'express';
 import { asyncHandler } from './routeUtils.js';
 import { getAppSetting } from '../db/repositories/systemRepo.js';
 import { getDocumentQueueCounts } from '../db/index.js';
@@ -64,7 +64,7 @@ scanRouter.get('/status', (_req, res) => {
   res.json(withLiveDocQueue({ ...currentScanStatus, lastFullScanTimestamp: fullScanAt }));
 });
 
-const handleScanSse = (req: any, res: any) => {
+const handleScanSse = (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');

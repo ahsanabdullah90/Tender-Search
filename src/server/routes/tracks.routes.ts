@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Request, Response, Router } from 'express';
 import {
   getAllDomainTracks,
   saveDomainTrack,
@@ -45,7 +45,7 @@ corrigendaRouter.get('/', (_req, res) => {
   res.json(corrigenda);
 });
 
-const handleAckCorrigendum = (req: any, res: any) => {
+const handleAckCorrigendum = (req: Request, res: Response) => {
   acknowledgeCorrigendum(req.params.id);
   res.json({ success: true });
 };

@@ -19,6 +19,8 @@ export const INGEST_DEFAULTS = {
   perTenderBudgetMs: 20000
 };
 
+export const UPFRONT_MAX_DOCS = 2;
+
 function intSetting(key: string, fallback: number): number {
   const v = parseInt(getAppSetting(key) || '', 10);
   return Number.isFinite(v) && v >= 0 ? v : fallback;

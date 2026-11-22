@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Request, Response, Router } from 'express';
 import { asyncHandler, decodeBase64Payload } from './routeUtils.js';
 import {
   getAllTenders,
@@ -82,7 +82,7 @@ tendersRouter.patch('/:id/status', (req, res) => {
   res.json({ success: true, status });
 });
 
-const handleNotesUpdate = (req: any, res: any) => {
+const handleNotesUpdate = (req: Request, res: Response) => {
   const { notes } = req.body;
   const success = updateTenderNotes(req.params.id, notes || '');
   if (!success) {
@@ -104,14 +104,14 @@ tendersRouter.patch('/:id/result-date', (req, res) => {
   res.json({ success: true, result_expected_date: date || null });
 });
 
-const handleBookmarkToggle = (req: any, res: any) => {
+const handleBookmarkToggle = (req: Request, res: Response) => {
   const result = toggleTenderBookmark(req.params.id);
   res.json(result);
 };
 tendersRouter.patch('/:id/bookmark', handleBookmarkToggle);
 tendersRouter.post('/:id/bookmark', handleBookmarkToggle);
 
-const handleViewedUpdate = (req: any, res: any) => {
+const handleViewedUpdate = (req: Request, res: Response) => {
   const viewed = req.body?.viewed !== undefined ? Boolean(req.body.viewed) : true;
   const success = markTenderViewed(req.params.id, viewed);
   if (!success) {
