@@ -13,6 +13,7 @@ import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus, PortalHealth, D
 import { getPktDateKey } from '../../shared/pktDate';
 import { Button, EmptyState, Panel, Popover } from '../ui';
 import { DeadlineRunway, PortalPills, PortalSummaryItem, Detail, TenderRow, AddTenderModal, useTick } from './inbox';
+import { formatRelativeAge } from '../utils/format';
 
 export {
   Detail,
@@ -382,9 +383,7 @@ export function InboxScreen(props: InboxScreenProps) {
             {(() => {
               const latestSuccess = props.portals.map(p => p.last_success_at).filter(Boolean).sort().reverse()[0];
               if (!latestSuccess) return '';
-              const diffMs = Date.now() - new Date(latestSuccess).getTime();
-              const hours = Math.round(diffMs / 3600000);
-              return ` · last success ${hours <= 0 ? 'just now' : `${hours}h ago`}`;
+              return ` · last success ${formatRelativeAge(latestSuccess, { compactHours: true })}`;
             })()})
           </span>
         )}

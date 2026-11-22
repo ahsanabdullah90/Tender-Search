@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState } from 'react';
 import { ChevronDown, Globe, Search, Check, X } from 'lucide-react';
+import { Popover } from '../../ui';
 
 export interface PortalSummaryItem {
   portal_id: string;
@@ -23,24 +24,7 @@ export function PortalPills({
   totalActiveCount,
   totalUnreadCount
 }: PortalPillsProps) {
-  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState('');
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setDropdownOpen(false);
-      }
-    }
-    if (dropdownOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [dropdownOpen]);
 
   // Top 5 busiest portals sorted by total_count descending
   const sortedSummary = [...summary].sort((a, b) => b.total_count - a.total_count);
@@ -117,42 +101,44 @@ export function PortalPills({
       })}
 
       {/* More Portals Dropdown / Selected Other Portal */}
-      <div className="relative" ref={dropdownRef}>
-        <button
-          type="button"
-          onClick={() => setDropdownOpen(!dropdownOpen)}
-          className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition ${
-            selectedInRemaining
-              ? 'bg-accent text-accent-ink shadow-sm'
-              : 'bg-surface border border-line text-ink-muted hover:bg-surface-2 hover:text-ink'
-          }`}
-        >
-          {selectedInRemaining ? (
-            <>
-              <span className="truncate max-w-[130px]">{selectedInRemaining.portal_name}</span>
-              {selectedInRemaining.unread_count > 0 && (
-                <span className="rounded-full bg-accent-ink/20 px-1.5 text-[10px] text-accent-ink">
-                  {selectedInRemaining.unread_count}
-                </span>
-              )}
-            </>
-          ) : (
-            <>
-              <span>More portals</span>
-              {remaining.reduce((sum, p) => sum + p.unread_count, 0) > 0 && (
-                <span className="rounded-full bg-accent text-accent-ink px-1.5 text-[10px]">
-                  {remaining.reduce((sum, p) => sum + p.unread_count, 0)}
-                </span>
-              )}
-            </>
-          )}
-          <ChevronDown className="h-3 w-3 opacity-70" />
-        </button>
-
-        {/* Dropdown Menu */}
-        {dropdownOpen && (
-          <div className="absolute left-0 top-full z-30 mt-1.5 w-72 rounded-xl border border-line bg-surface p-2 shadow-lg">
-            {/* Search filter in popover */}
+      <Popover
+        panelClassName="w-72"
+        trigger={({ open, toggle }) => (
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={toggle}
+            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition ${
+              selectedInRemaining
+                ? 'bg-accent text-accent-ink shadow-sm'
+                : 'bg-surface border border-line text-ink-muted hover:bg-surface-2 hover:text-ink'
+            }`}
+          >
+            {selectedInRemaining ? (
+              <>
+                <span className="truncate max-w-[130px]">{selectedInRemaining.portal_name}</span>
+                {selectedInRemaining.unread_count > 0 && (
+                  <span className="rounded-full bg-accent-ink/20 px-1.5 text-[10px] text-accent-ink">
+                    {selectedInRemaining.unread_count}
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                <span>More portals</span>
+                {remaining.reduce((sum, p) => sum + p.unread_count, 0) > 0 && (
+                  <span className="rounded-full bg-accent text-accent-ink px-1.5 text-[10px]">
+                    {remaining.reduce((sum, p) => sum + p.unread_count, 0)}
+                  </span>
+                )}
+              </>
+            )}
+            <ChevronDown className="h-3 w-3 opacity-70" />
+          </button>
+        )}
+      >
+        {(close) => (
+          <>
             <div className="relative mb-2">
               <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-ink-muted" />
               <input
@@ -165,7 +151,6 @@ export function PortalPills({
               />
             </div>
 
-            {/* Portal list */}
             <div className="max-h-60 overflow-y-auto space-y-0.5">
               {filteredRemaining.length === 0 ? (
                 <div className="py-3 text-center text-xs text-ink-muted">No portals found</div>
@@ -178,7 +163,7 @@ export function PortalPills({
                       type="button"
                       onClick={() => {
                         onSelectPortal(p.portal_id);
-                        setDropdownOpen(false);
+                        close();
                       }}
                       className={`flex w-full cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 text-xs text-left transition ${
                         isCurrent
@@ -208,7 +193,7 @@ export function PortalPills({
                   type="button"
                   onClick={() => {
                     onSelectPortal('All');
-                    setDropdownOpen(false);
+                    close();
                   }}
                   className="flex w-full cursor-pointer items-center justify-center gap-1 py-1 text-xs font-semibold text-danger hover:bg-danger-soft rounded-lg"
                 >
@@ -217,9 +202,9 @@ export function PortalPills({
                 </button>
               </div>
             )}
-          </div>
+          </>
         )}
-      </div>
+      </Popover>
     </div>
   );
 }

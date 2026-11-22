@@ -1,18 +1,8 @@
-import { Paperclip, TriangleAlert, Bookmark, RotateCw } from 'lucide-react';
+import { Paperclip, TriangleAlert, Bookmark } from 'lucide-react';
 import { Tender, DocumentQueueStatus } from '../../../shared/types';
-import { Chip, DeadlineChip } from '../../ui';
+import { Chip, DeadlineChip, DocStatusChip } from '../../ui';
+import { asList } from '../../utils/format';
 import { getTenderDocProcessingState } from './Detail';
-
-function asList<T>(value: unknown): T[] {
-  if (typeof value === 'string') {
-    try {
-      return JSON.parse(value || '[]');
-    } catch {
-      return [];
-    }
-  }
-  return (value as T[]) || [];
-}
 
 interface TenderRowProps {
   tender: Tender;
@@ -67,24 +57,12 @@ export function TenderRow({
           )}
         </div>
         <span className="flex shrink-0 items-center gap-2">
-          {(docState.kind === 'processing' || docState.kind === 'queued' || docState.kind === 'failed') && (
-            <span
-              data-testid="row-doc-status"
-              title={docState.bannerTitle}
-              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ${
-                docState.kind === 'processing'
-                  ? 'bg-accent-soft text-accent'
-                  : docState.kind === 'failed'
-                    ? 'bg-warn-soft text-warn'
-                    : 'bg-surface-2 text-ink-muted'
-              }`}
-            >
-              {docState.kind === 'processing' && (
-                <RotateCw aria-hidden="true" className="h-3 w-3 motion-safe:animate-spin" />
-              )}
-              {docState.shortLabel}
-            </span>
-          )}
+          <DocStatusChip
+            kind={docState.kind}
+            shortLabel={docState.shortLabel}
+            title={docState.bannerTitle}
+            testId="row-doc-status"
+          />
           {files.length > 0 && (
             <span
               className="inline-flex items-center gap-0.5 font-mono text-xs text-ink-muted"

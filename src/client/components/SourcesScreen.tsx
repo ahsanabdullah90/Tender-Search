@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Download, ExternalLink, FileText, KeyRound, Pencil, Plus, RotateCw, Trash2 } from 'lucide-react';
-import { DomainTrack, PortalHealth, SessionLogMeta } from '../../shared/types';
-import { Button, Chip, Dialog, EmptyState, Panel, Tabs } from '../ui';
+import { DigestSummary, DomainTrack, PortalHealth, SessionLogMeta } from '../../shared/types';
+import { Button, Chip, Dialog, EmptyState, FIELD_INPUT_CLASS, Panel, Tabs } from '../ui';
+import { apiJson, apiMutate } from '../utils/apiClient';
+import { formatBytes, formatRelativeAge, isPortalOffline } from '../utils/format';
 import { PortalCredentialsModal } from './PortalCredentialsModal';
 
 type Tab = 'keywords' | 'portals' | 'data';
@@ -24,7 +26,10 @@ interface SourcesScreenProps {
 
 const splitWords = (text: string) => text.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
 
-const inputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 placeholder:text-ink-muted';
+type DigestAlertCounts = Pick<
+  DigestSummary,
+  'closingSoonCount' | 'unacknowledgedCorrigendaCount' | 'newMatchesLast24hCount'
+>;
 
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return (
@@ -114,13 +119,13 @@ function KeywordsTab({ tracks, onSaveTrack, onDeleteTrack }: Pick<SourcesScreenP
         {editing && (
           <div className="space-y-4">
             <Field label="Domain name">
-              <input autoFocus value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} className={inputClass} />
+              <input autoFocus value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} className={FIELD_INPUT_CLASS} />
             </Field>
             <Field label="Words to look for" hint="Separate with commas.">
-              <textarea rows={3} value={editing.positive} onChange={e => setEditing({ ...editing, positive: e.target.value })} className={inputClass} />
+              <textarea rows={3} value={editing.positive} onChange={e => setEditing({ ...editing, positive: e.target.value })} className={FIELD_INPUT_CLASS} />
             </Field>
             <Field label="Ignore list" hint="Tenders containing these words are left out.">
-              <textarea rows={2} value={editing.negative} onChange={e => setEditing({ ...editing, negative: e.target.value })} className={inputClass} />
+              <textarea rows={2} value={editing.negative} onChange={e => setEditing({ ...editing, negative: e.target.value })} className={FIELD_INPUT_CLASS} />
             </Field>
           </div>
         )}
@@ -149,17 +154,8 @@ type PortalState = 'working' | 'verify' | 'offline';
 
 function portalState(p: PortalHealth): PortalState {
   if (p.status === 'hitl_required') return 'verify';
-  if (p.status === 'selector_broken' || p.status === 'error' || p.access_mode === 'offline_broken') return 'offline';
+  if (isPortalOffline(p)) return 'offline';
   return 'working';
-}
-
-function lastChecked(iso: string | null) {
-  if (!iso) return 'Never checked';
-  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-  if (mins < 1) return 'Checked just now';
-  if (mins < 60) return `Checked ${mins} min ago`;
-  if (mins < 1440) return `Checked ${Math.round(mins / 60)} h ago`;
-  return `Checked ${Math.round(mins / 1440)} days ago`;
 }
 
 function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal' | 'onAddPortal' | 'onDeletePortal' | 'onLaunchHitl' | 'onVerifyHitl' | 'onScanSinglePortal'>) {
@@ -199,20 +195,24 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
     setHealing(true);
     setHealMessage(null);
     try {
-      const res = await fetch(`/api/portals/${editing.portal_id}/heal`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl: form.website_url.trim() })
-      });
-      const data = await res.json();
-      if (res.ok && data.success && data.tendersUrl) {
-        setForm(prev => ({ ...prev, website_url: data.tendersUrl }));
+      const data = await apiMutate<{ tendersUrl?: string; message?: string }>(
+        `/api/portals/${editing.portal_id}/heal`,
+        'POST',
+        { baseUrl: form.website_url.trim() }
+      );
+      if (data.tendersUrl) {
+        setForm(prev => ({ ...prev, website_url: data.tendersUrl! }));
         setHealMessage(data.message || `Found tender page: ${data.tendersUrl}`);
       } else {
         setHealMessage(data.message || 'Could not auto-detect tender page from this address.');
       }
-    } catch {
-      setHealMessage('Auto-discovery request failed.');
+    } catch (err) {
+      const errData = (err as { data?: { message?: string } } | null)?.data;
+      setHealMessage(
+        errData !== undefined
+          ? errData?.message || 'Could not auto-detect tender page from this address.'
+          : 'Auto-discovery request failed.'
+      );
     } finally {
       setHealing(false);
     }
@@ -223,27 +223,30 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
     setResetting(true);
     setHealMessage(null);
     try {
-      const res = await fetch(`/api/portals/${editing.portal_id}/reset-default`, {
-        method: 'POST'
+      const data = await apiMutate<{
+        portal_name?: string;
+        tenders_url?: string;
+        base_url?: string;
+        message?: string;
+      }>(`/api/portals/${editing.portal_id}/reset-default`, 'POST');
+      setForm({
+        portal_name: data.portal_name || form.portal_name,
+        website_url: data.tenders_url || form.website_url
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setForm({
-          portal_name: data.portal_name || form.portal_name,
-          website_url: data.tenders_url || form.website_url
-        });
-        setHealMessage(data.message || 'Restored official default URL.');
-        props.onUpdatePortal(editing.portal_id, {
-          tenders_url: data.tenders_url,
-          base_url: data.base_url,
-          status: 'online',
-          last_error_message: null
-        });
-      } else {
-        setHealMessage(data.message || 'Could not reset portal to default URL.');
-      }
-    } catch {
-      setHealMessage('Failed to reset default URL.');
+      setHealMessage(data.message || 'Restored official default URL.');
+      props.onUpdatePortal(editing.portal_id, {
+        tenders_url: data.tenders_url,
+        base_url: data.base_url,
+        status: 'online',
+        last_error_message: null
+      });
+    } catch (err) {
+      const errData = (err as { data?: { message?: string } } | null)?.data;
+      setHealMessage(
+        errData !== undefined
+          ? errData?.message || 'Could not reset portal to default URL.'
+          : 'Failed to reset default URL.'
+      );
     } finally {
       setResetting(false);
     }
@@ -272,7 +275,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
           <span className="font-semibold text-ink">{portals.filter(p => p.status === 'online').length} of {portals.length}</span> sources checked successfully
           {(() => {
             const latestSuccess = portals.map(p => p.last_success_at).filter((x): x is string => Boolean(x)).sort().reverse()[0];
-            return latestSuccess ? <span> · Last success {lastChecked(latestSuccess)}</span> : null;
+            return latestSuccess ? <span> · {formatRelativeAge(latestSuccess, { prefix: 'Last success' })}</span> : null;
           })()}
         </div>
       </div>
@@ -310,7 +313,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                       <span className="font-mono text-[12px] font-medium text-danger">⚠️ Missing website address</span>
                     )}
                     <span className="text-ink-muted">
-                      · {p.category} · {lastChecked(p.last_scan_at)}
+                      · {p.category} · {formatRelativeAge(p.last_scan_at, { prefix: 'Checked', empty: 'Never checked' })}
                       {p.last_items_found > 0 ? ` · ${p.last_items_found} matched` : ''}
                     </span>
                   </div>
@@ -411,7 +414,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
             <input
               value={form.portal_name}
               onChange={e => setForm({ ...form, portal_name: e.target.value })}
-              className={inputClass}
+              className={FIELD_INPUT_CLASS}
               placeholder="e.g. Punjab PPRA"
             />
           </Field>
@@ -419,7 +422,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
             <input
               value={form.website_url}
               onChange={e => setForm({ ...form, website_url: e.target.value })}
-              className={`${inputClass} font-mono text-[13px]`}
+              className={`${FIELD_INPUT_CLASS} font-mono text-[13px]`}
               placeholder="https://..."
             />
           </Field>
@@ -473,17 +476,13 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                       login_url: addForm.login_url.trim() || undefined
                     });
                   } else {
-                    await fetch('/api/portals', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        portal_name: addForm.portal_name.trim(),
-                        tenders_url: addForm.website_url.trim(),
-                        category: addForm.category,
-                        tier: addForm.tier,
-                        access_mode: addForm.access_mode,
-                        login_url: addForm.login_url.trim() || undefined
-                      })
+                    await apiMutate('/api/portals', 'POST', {
+                      portal_name: addForm.portal_name.trim(),
+                      tenders_url: addForm.website_url.trim(),
+                      category: addForm.category,
+                      tier: addForm.tier,
+                      access_mode: addForm.access_mode,
+                      login_url: addForm.login_url.trim() || undefined
                     });
                   }
                   setAdding(false);
@@ -511,7 +510,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
               autoFocus
               value={addForm.portal_name}
               onChange={e => setAddForm({ ...addForm, portal_name: e.target.value })}
-              className={inputClass}
+              className={FIELD_INPUT_CLASS}
               placeholder="e.g. Sindh Irrigation Department"
             />
           </Field>
@@ -519,7 +518,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
             <input
               value={addForm.website_url}
               onChange={e => setAddForm({ ...addForm, website_url: e.target.value })}
-              className={`${inputClass} font-mono text-[13px]`}
+              className={`${FIELD_INPUT_CLASS} font-mono text-[13px]`}
               placeholder="https://example.gov.pk/tenders"
             />
           </Field>
@@ -528,7 +527,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
               <select
                 value={addForm.category}
                 onChange={e => setAddForm({ ...addForm, category: e.target.value })}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               >
                 <option value="Federal">Federal</option>
                 <option value="Provincial">Provincial</option>
@@ -543,7 +542,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
               <select
                 value={addForm.access_mode}
                 onChange={e => setAddForm({ ...addForm, access_mode: e.target.value })}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               >
                 <option value="public">Public / Open</option>
                 <option value="login_required">Login Required</option>
@@ -556,7 +555,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
               <input
                 value={addForm.login_url}
                 onChange={e => setAddForm({ ...addForm, login_url: e.target.value })}
-                className={`${inputClass} font-mono text-[13px]`}
+                className={`${FIELD_INPUT_CLASS} font-mono text-[13px]`}
                 placeholder="https://example.gov.pk/login"
               />
             </Field>
@@ -583,7 +582,7 @@ function PortalsTab(props: Pick<SourcesScreenProps, 'portals' | 'onUpdatePortal'
                   if (props.onDeletePortal) {
                     await props.onDeletePortal(deleting.portal_id);
                   } else {
-                    await fetch(`/api/portals/${deleting.portal_id}`, { method: 'DELETE' });
+                    await apiMutate(`/api/portals/${deleting.portal_id}`, 'DELETE');
                   }
                 }
                 setDeleting(null);
@@ -644,19 +643,8 @@ interface Storage {
       withinHours: number;
       lastSentDatePkt: string | null;
     };
-    summary: {
-      closingSoonCount: number;
-      unacknowledgedCorrigendaCount: number;
-      newMatchesLast24hCount: number;
-    };
+    summary: DigestAlertCounts;
   };
-}
-
-function bytes(n: number) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 function DataSection({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
@@ -692,11 +680,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
     webhookUrl: '',
     withinHours: 48
   });
-  const [digestSummary, setDigestSummary] = useState<{
-    closingSoonCount: number;
-    unacknowledgedCorrigendaCount: number;
-    newMatchesLast24hCount: number;
-  } | null>(null);
+  const [digestSummary, setDigestSummary] = useState<DigestAlertCounts | null>(null);
   const [digestSaving, setDigestSaving] = useState(false);
   const [digestRefreshing, setDigestRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -705,31 +689,31 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
 
   const load = useCallback(async () => {
     try {
-      const [b, s] = await Promise.all([fetch('/api/backups'), fetch('/api/storage')]);
-      if (b.ok) setBackups(await b.json());
-      if (s.ok) {
-        const sData = await s.json();
-        setStorage(sData);
-        if (sData.ingest_budgets) {
-          setBudgetsForm({
-            upfrontTimeBudgetSec: sData.ingest_budgets.upfrontTimeBudgetSec,
-            maxFileMb: sData.ingest_budgets.maxFileMb,
-            visionCallsPerScan: sData.ingest_budgets.visionCallsPerScan,
-            visionCallsPerDay: sData.ingest_budgets.visionCallsPerDay,
-            aiTextCallsPerDay: sData.ingest_budgets.aiTextCallsPerDay ?? 150
-          });
-        }
-        if (Array.isArray(sData.session_logs)) {
-          setSessionLogs(sData.session_logs);
-        }
-        if (sData.digest) {
-          setDigestForm({
-            enabled: Boolean(sData.digest.settings.enabled),
-            webhookUrl: sData.digest.settings.webhookUrl ?? '',
-            withinHours: sData.digest.settings.withinHours ?? 48
-          });
-          setDigestSummary(sData.digest.summary);
-        }
+      const [bData, sData] = await Promise.all([
+        apiJson<Backup[]>('/api/backups'),
+        apiJson<Storage>('/api/storage')
+      ]);
+      setBackups(bData);
+      setStorage(sData);
+      if (sData.ingest_budgets) {
+        setBudgetsForm({
+          upfrontTimeBudgetSec: sData.ingest_budgets.upfrontTimeBudgetSec,
+          maxFileMb: sData.ingest_budgets.maxFileMb,
+          visionCallsPerScan: sData.ingest_budgets.visionCallsPerScan,
+          visionCallsPerDay: sData.ingest_budgets.visionCallsPerDay,
+          aiTextCallsPerDay: sData.ingest_budgets.aiTextCallsPerDay ?? 150
+        });
+      }
+      if (Array.isArray(sData.session_logs)) {
+        setSessionLogs(sData.session_logs);
+      }
+      if (sData.digest) {
+        setDigestForm({
+          enabled: Boolean(sData.digest.settings.enabled),
+          webhookUrl: sData.digest.settings.webhookUrl ?? '',
+          withinHours: sData.digest.settings.withinHours ?? 48
+        });
+        setDigestSummary(sData.digest.summary);
       }
     } catch (err) {
       console.error('Failed to load data settings:', err);
@@ -741,15 +725,11 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const viewLog = async (filename: string) => {
     setLoadingLog(true);
     try {
-      const res = await fetch(`/api/system/logs/${filename}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSelectedLog(data);
-      } else {
-        setMessage('Could not load session log content.');
-      }
-    } catch {
-      setMessage('Failed to fetch session log.');
+      const data = await apiJson<{ filename: string; content: string }>(`/api/system/logs/${filename}`);
+      setSelectedLog(data);
+    } catch (err) {
+      const isHttpError = (err as { name?: string } | null)?.name === 'ApiError';
+      setMessage(isHttpError ? 'Could not load session log content.' : 'Failed to fetch session log.');
     } finally {
       setLoadingLog(false);
     }
@@ -760,19 +740,16 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const saveAiKey = async (keyToSave: string) => {
     setAiSaving(true);
     try {
-      const res = await fetch('/api/ai/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: keyToSave.trim() })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setStorage(prev => prev ? { ...prev, ai_configured: Boolean(data.configured), ai_masked_key: data.maskedKey } : prev);
-        setAiKeyInput('');
-        setMessage(data.message || 'Google AI Studio settings updated.');
-      } else {
-        setMessage('Could not save API key.');
-      }
+      const data = await apiMutate<{ configured?: boolean; maskedKey?: string | null; message?: string }>(
+        '/api/ai/config',
+        'POST',
+        { apiKey: keyToSave.trim() }
+      );
+      setStorage(prev =>
+        prev ? { ...prev, ai_configured: Boolean(data.configured), ai_masked_key: data.maskedKey } : prev
+      );
+      setAiKeyInput('');
+      setMessage(data.message || 'Google AI Studio settings updated.');
     } catch {
       setMessage('Could not save API key.');
     } finally {
@@ -783,8 +760,10 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const backUp = async () => {
     setBusy(true);
     try {
-      const res = await fetch('/api/backups', { method: 'POST' });
-      setMessage(res.ok ? 'Backup created.' : 'Backup failed. Please try again.');
+      await apiMutate('/api/backups', 'POST');
+      setMessage('Backup created.');
+    } catch {
+      setMessage('Backup failed. Please try again.');
     } finally {
       setBusy(false);
       void load();
@@ -793,11 +772,10 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
 
   const prune = async () => {
     closeConfirm();
-    const res = await fetch('/api/dossiers/prune-passed', { method: 'POST' });
-    if (res.ok) {
-      const r = await res.json();
-      setMessage(`Deleted files for ${r.tenders} passed ${r.tenders === 1 ? 'tender' : 'tenders'} and freed ${bytes(r.freed_bytes)}.`);
-    } else {
+    try {
+      const r = await apiMutate<{ tenders: number; freed_bytes: number }>('/api/dossiers/prune-passed', 'POST');
+      setMessage(`Deleted files for ${r.tenders} passed ${r.tenders === 1 ? 'tender' : 'tenders'} and freed ${formatBytes(r.freed_bytes)}.`);
+    } catch {
       setMessage('Could not delete the files.');
     }
     void load();
@@ -810,19 +788,12 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const saveRetentionSettings = async (newSettings: { autoClean: boolean }) => {
     setRetentionSaving(true);
     try {
-      const res = await fetch('/api/system/retention/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSettings)
-      });
-      if (res.ok) {
-        setMessage('Retention settings saved.');
-        void load();
-      } else {
-        setMessage('Failed to save retention settings.');
-      }
-    } catch {
-      setMessage('Error updating retention settings.');
+      await apiMutate('/api/system/retention/settings', 'POST', newSettings);
+      setMessage('Retention settings saved.');
+      void load();
+    } catch (err) {
+      const isHttpError = (err as { name?: string } | null)?.name === 'ApiError';
+      setMessage(isHttpError ? 'Failed to save retention settings.' : 'Error updating retention settings.');
     } finally {
       setRetentionSaving(false);
     }
@@ -831,16 +802,14 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const runRetentionCleanup = async () => {
     setRetentionRunning(true);
     try {
-      const res = await fetch('/api/system/retention/run', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(`Retention cycle complete: slimmed ${data.summary.slimmed} passed tenders, deleted ${data.summary.expiredUnreviewed} expired unreviewed tenders, and purged ${data.summary.agedOutPassed} aged-out records.`);
-        void load();
-      } else {
-        setMessage('Failed to execute retention cycle.');
-      }
-    } catch {
-      setMessage('Error executing retention cycle.');
+      const data = await apiMutate<{
+        summary: { slimmed: number; expiredUnreviewed: number; agedOutPassed: number };
+      }>('/api/system/retention/run', 'POST');
+      setMessage(`Retention cycle complete: slimmed ${data.summary.slimmed} passed tenders, deleted ${data.summary.expiredUnreviewed} expired unreviewed tenders, and purged ${data.summary.agedOutPassed} aged-out records.`);
+      void load();
+    } catch (err) {
+      const isHttpError = (err as { name?: string } | null)?.name === 'ApiError';
+      setMessage(isHttpError ? 'Failed to execute retention cycle.' : 'Error executing retention cycle.');
     } finally {
       setRetentionRunning(false);
     }
@@ -849,16 +818,14 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
   const runReconcileFiles = async () => {
     setReconciling(true);
     try {
-      const res = await fetch('/api/system/dossiers/reconcile', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(`File reconciliation complete: removed ${data.reconciliation.orphanFoldersDeleted} orphan folders, pruned ${data.reconciliation.missingMetadataPruned} missing DB records, cleaned ${data.reconciliation.trashPurged} trash items.`);
-        void load();
-      } else {
-        setMessage('Failed to reconcile dossier files.');
-      }
-    } catch {
-      setMessage('Error reconciling dossier files.');
+      const data = await apiMutate<{
+        reconciliation: { orphanFoldersDeleted: number; missingMetadataPruned: number; trashPurged: number };
+      }>('/api/system/dossiers/reconcile', 'POST');
+      setMessage(`File reconciliation complete: removed ${data.reconciliation.orphanFoldersDeleted} orphan folders, pruned ${data.reconciliation.missingMetadataPruned} missing DB records, cleaned ${data.reconciliation.trashPurged} trash items.`);
+      void load();
+    } catch (err) {
+      const isHttpError = (err as { name?: string } | null)?.name === 'ApiError';
+      setMessage(isHttpError ? 'Failed to reconcile dossier files.' : 'Error reconciling dossier files.');
     } finally {
       setReconciling(false);
     }
@@ -894,7 +861,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                   value={aiKeyInput}
                   onChange={e => setAiKeyInput(e.target.value)}
                   placeholder={storage?.ai_configured ? 'Enter a new key to replace current key…' : 'Paste AIzaSy… key from aistudio.google.com'}
-                  className={`${inputClass} font-mono text-[13px]`}
+                  className={`${FIELD_INPUT_CLASS} font-mono text-[13px]`}
                 />
               </Field>
             </div>
@@ -937,7 +904,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 max={3600}
                 value={budgetsForm.upfrontTimeBudgetSec}
                 onChange={e => setBudgetsForm(f => ({ ...f, upfrontTimeBudgetSec: Number(e.target.value) }))}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               />
             </Field>
             <Field label="Max file size (MB)">
@@ -947,7 +914,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 max={200}
                 value={budgetsForm.maxFileMb}
                 onChange={e => setBudgetsForm(f => ({ ...f, maxFileMb: Number(e.target.value) }))}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               />
             </Field>
             <Field label="Vision calls per scan">
@@ -957,7 +924,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 max={500}
                 value={budgetsForm.visionCallsPerScan}
                 onChange={e => setBudgetsForm(f => ({ ...f, visionCallsPerScan: Number(e.target.value) }))}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               />
             </Field>
             <Field label="Vision calls per day">
@@ -967,7 +934,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 max={5000}
                 value={budgetsForm.visionCallsPerDay}
                 onChange={e => setBudgetsForm(f => ({ ...f, visionCallsPerDay: Number(e.target.value) }))}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               />
             </Field>
             <Field label="AI-text calls per day">
@@ -977,7 +944,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 max={5000}
                 value={budgetsForm.aiTextCallsPerDay}
                 onChange={e => setBudgetsForm(f => ({ ...f, aiTextCallsPerDay: Number(e.target.value) }))}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               />
             </Field>
           </div>
@@ -987,17 +954,9 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
             onClick={async () => {
               setBudgetsSaving(true);
               try {
-                const res = await fetch('/api/system/ingest-budgets', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(budgetsForm)
-                });
-                if (res.ok) {
-                  setMessage('Document ingest budgets saved.');
-                  void load();
-                } else {
-                  setMessage('Could not save ingest budgets.');
-                }
+                await apiMutate('/api/system/ingest-budgets', 'POST', budgetsForm);
+                setMessage('Document ingest budgets saved.');
+                void load();
               } catch {
                 setMessage('Could not save ingest budgets.');
               } finally {
@@ -1047,7 +1006,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                 max={336}
                 value={digestForm.withinHours}
                 onChange={e => setDigestForm(f => ({ ...f, withinHours: Number(e.target.value) }))}
-                className={inputClass}
+                className={FIELD_INPUT_CLASS}
               />
             </Field>
             <div className="sm:col-span-2">
@@ -1057,7 +1016,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                   placeholder="https://hooks.slack.com/services/..."
                   value={digestForm.webhookUrl}
                   onChange={e => setDigestForm(f => ({ ...f, webhookUrl: e.target.value }))}
-                  className={inputClass}
+                  className={FIELD_INPUT_CLASS}
                 />
               </Field>
             </div>
@@ -1070,17 +1029,9 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
               onClick={async () => {
                 setDigestSaving(true);
                 try {
-                  const res = await fetch('/api/system/digest/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(digestForm)
-                  });
-                  if (res.ok) {
-                    setMessage('Daily digest settings saved.');
-                    void load();
-                  } else {
-                    setMessage('Could not save daily digest settings.');
-                  }
+                  await apiMutate('/api/system/digest/settings', 'POST', digestForm);
+                  setMessage('Daily digest settings saved.');
+                  void load();
                 } catch {
                   setMessage('Could not save daily digest settings.');
                 } finally {
@@ -1096,21 +1047,22 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
               onClick={async () => {
                 setDigestRefreshing(true);
                 try {
-                  const res = await fetch(`/api/system/digest?hours=${digestForm.withinHours}`);
-                  if (res.ok) {
-                    const data = await res.json();
-                    setDigestSummary({
-                      closingSoonCount: data.closingSoonCount ?? 0,
-                      unacknowledgedCorrigendaCount: data.unacknowledgedCorrigendaCount ?? 0,
-                      newMatchesLast24hCount: data.newMatchesLast24hCount ?? 0
-                    });
-                    if (data.settings) {
-                      setDigestForm({
-                        enabled: Boolean(data.settings.enabled),
-                        webhookUrl: data.settings.webhookUrl ?? '',
-                        withinHours: data.settings.withinHours ?? 48
-                      });
+                  const data = await apiJson<
+                    DigestAlertCounts & {
+                      settings?: { enabled?: boolean; webhookUrl?: string; withinHours?: number };
                     }
+                  >(`/api/system/digest?hours=${digestForm.withinHours}`);
+                  setDigestSummary({
+                    closingSoonCount: data.closingSoonCount ?? 0,
+                    unacknowledgedCorrigendaCount: data.unacknowledgedCorrigendaCount ?? 0,
+                    newMatchesLast24hCount: data.newMatchesLast24hCount ?? 0
+                  });
+                  if (data.settings) {
+                    setDigestForm({
+                      enabled: Boolean(data.settings.enabled),
+                      webhookUrl: data.settings.webhookUrl ?? '',
+                      withinHours: data.settings.withinHours ?? 48
+                    });
                   }
                 } catch {
                   setMessage('Could not refresh digest status.');
@@ -1150,7 +1102,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
             backups.map(b => (
               <div key={b.name} className="flex items-center justify-between px-4 py-2.5">
                 <span>{new Date(b.created_at).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}</span>
-                <span className="font-mono text-[13px] text-ink-muted">{bytes(b.size_bytes)}</span>
+                <span className="font-mono text-[13px] text-ink-muted">{formatBytes(b.size_bytes)}</span>
               </div>
             ))
           )}
@@ -1182,7 +1134,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
                       )}
                     </div>
                     <div className="text-xs text-ink-muted">
-                      {new Date(log.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })} · {bytes(log.sizeBytes)}
+                      {new Date(log.createdAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })} · {formatBytes(log.sizeBytes)}
                     </div>
                   </div>
                 </div>
@@ -1207,12 +1159,12 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
 
       <DataSection
         title="Saved documents"
-        description={storage ? `${bytes(storage.total_bytes)} used across ${storage.tenders_with_documents} tenders.` : 'Checking…'}
+        description={storage ? `${formatBytes(storage.total_bytes)} used across ${storage.tenders_with_documents} tenders.` : 'Checking…'}
       >
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-3">
             <Button onClick={() => setConfirm('prune')} disabled={!storage || storage.passed_bytes === 0}>
-              Delete files for passed tenders{storage && storage.passed_bytes > 0 ? ` (${bytes(storage.passed_bytes)})` : ''}
+              Delete files for passed tenders{storage && storage.passed_bytes > 0 ? ` (${formatBytes(storage.passed_bytes)})` : ''}
             </Button>
             <Button
               variant="ghost"
@@ -1331,7 +1283,7 @@ function DataTab({ onClearInbox, onEraseAll }: Pick<SourcesScreenProps, 'onClear
         }
       >
         <p className="mb-3">Every tender and note will be removed. Type <span className="font-mono font-bold">CLEAR</span> to confirm.</p>
-        <input value={typed} onChange={e => setTyped(e.target.value)} aria-label="Type CLEAR to confirm" className={`${inputClass} font-mono`} />
+        <input value={typed} onChange={e => setTyped(e.target.value)} aria-label="Type CLEAR to confirm" className={`${FIELD_INPUT_CLASS} font-mono`} />
       </Dialog>
 
       <Dialog

@@ -13,7 +13,8 @@ import {
 import { InboxScreen } from './components/InboxScreen';
 import { PipelineScreen } from './components/PipelineScreen';
 import { SourcesScreen } from './components/SourcesScreen';
-import { Tender, DomainTrack, PortalHealth, CorrigendumLog, ScanStatus, OpportunityStatus, NetworkStatus } from '../shared/types';
+import { Tender, DomainTrack, PortalHealth, CorrigendumLog, ScanStatus, OpportunityStatus, NetworkStatus, KpiStats } from '../shared/types';
+import { apiJson, apiMutate } from './utils/apiClient';
 
 function isValidNetworkStatus(data: unknown): data is NetworkStatus {
   if (!data || typeof data !== 'object') return false;
@@ -66,7 +67,7 @@ export default function App() {
   const [tracks, setTracks] = useState<DomainTrack[]>([]);
   const [portals, setPortals] = useState<PortalHealth[]>([]);
   const [corrigenda, setCorrigenda] = useState<CorrigendumLog[]>([]);
-  const [kpiStats, setKpiStats] = useState({
+  const [kpiStats, setKpiStats] = useState<KpiStats>({
     totalTracked: 0,
     closingSoon: 0,
     inPipeline: 0,
@@ -142,15 +143,12 @@ export default function App() {
         if (corrigendumOnly) params.append('corrigendumOnly', 'true');
       }
 
-      const res = await fetch(`/api/tenders?${params.toString()}`, {
+      const data = await apiJson<Tender[]>(`/api/tenders?${params.toString()}`, {
         signal: abortControllerRef.current.signal
       });
-      if (res.ok) {
-        const data = await res.json();
-        setTenders(data);
-      }
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
+      setTenders(data);
+    } catch (err: unknown) {
+      if ((err as { name?: string } | null)?.name !== 'AbortError') {
         console.error('Failed to fetch tenders:', err);
       }
     }
@@ -158,11 +156,7 @@ export default function App() {
 
   const fetchTracks = useCallback(async () => {
     try {
-      const res = await fetch('/api/tracks');
-      if (res.ok) {
-        const data = await res.json();
-        setTracks(data);
-      }
+      setTracks(await apiJson<DomainTrack[]>('/api/tracks'));
     } catch (err) {
       console.error('Failed to fetch tracks:', err);
     }
@@ -170,11 +164,7 @@ export default function App() {
 
   const fetchPortals = useCallback(async () => {
     try {
-      const res = await fetch('/api/portals');
-      if (res.ok) {
-        const data = await res.json();
-        setPortals(data);
-      }
+      setPortals(await apiJson<PortalHealth[]>('/api/portals'));
     } catch (err) {
       console.error('Failed to fetch portals:', err);
     }
@@ -182,11 +172,7 @@ export default function App() {
 
   const fetchCorrigenda = useCallback(async () => {
     try {
-      const res = await fetch('/api/corrigenda');
-      if (res.ok) {
-        const data = await res.json();
-        setCorrigenda(data);
-      }
+      setCorrigenda(await apiJson<CorrigendumLog[]>('/api/corrigenda'));
     } catch (err) {
       console.error('Failed to fetch corrigenda:', err);
     }
@@ -194,11 +180,7 @@ export default function App() {
 
   const fetchKpis = useCallback(async () => {
     try {
-      const res = await fetch('/api/kpis');
-      if (res.ok) {
-        const data = await res.json();
-        setKpiStats(data);
-      }
+      setKpiStats(await apiJson<KpiStats>('/api/kpis'));
     } catch (err) {
       console.error('Failed to fetch KPIs:', err);
     }
@@ -206,13 +188,10 @@ export default function App() {
 
   const fetchNetworkStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/system/network');
-      if (res.ok) {
-        const data = await res.json();
-        if (isValidNetworkStatus(data)) {
-          networkStatusRef.current = data;
-          setNetworkStatus(data);
-        }
+      const data = await apiJson<unknown>('/api/system/network');
+      if (isValidNetworkStatus(data)) {
+        networkStatusRef.current = data;
+        setNetworkStatus(data);
       }
     } catch {
       // Best-effort background network poll
@@ -224,18 +203,15 @@ export default function App() {
     checkingNetworkRef.current = true;
     setCheckingNetwork(true);
     try {
-      const res = await fetch('/api/system/network/check', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        if (isValidNetworkStatus(data)) {
-          const prevState = networkStatusRef.current?.state;
-          networkStatusRef.current = data;
-          setNetworkStatus(data);
-          if (data.state === 'online' && prevState && prevState !== 'online') {
-            fetchTenders();
-            fetchPortals();
-            fetchKpis();
-          }
+      const data = await apiMutate<unknown>('/api/system/network/check', 'POST');
+      if (isValidNetworkStatus(data)) {
+        const prevState = networkStatusRef.current?.state;
+        networkStatusRef.current = data;
+        setNetworkStatus(data);
+        if (data.state === 'online' && prevState && prevState !== 'online') {
+          fetchTenders();
+          fetchPortals();
+          fetchKpis();
         }
       }
     } catch {
@@ -341,19 +317,13 @@ export default function App() {
   const handleRunScan = async (portalId?: string, depth?: 'quick' | 'deep') => {
     try {
       setScanStatus(prev => ({ ...prev, isScanning: true }));
-      const res = await fetch('/api/scan/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ portalId, ...(depth ? { depth } : {}) })
+      const status = await apiMutate<ScanStatus>('/api/scan/start', 'POST', {
+        portalId,
+        ...(depth ? { depth } : {})
       });
-      if (res.ok) {
-        const status = await res.json();
-        setScanStatus(status);
-        if (!status.isScanning && status.pausedReason) {
-          fetchNetworkStatus();
-        }
-      } else {
-        setScanStatus(prev => ({ ...prev, isScanning: false }));
+      setScanStatus(status);
+      if (!status.isScanning && status.pausedReason) {
+        fetchNetworkStatus();
       }
     } catch (err) {
       console.error('Failed to trigger scan:', err);
@@ -363,19 +333,13 @@ export default function App() {
 
   const handleUpdateStatus = async (tenderId: string, newStatus: OpportunityStatus) => {
     try {
-      const res = await fetch(`/api/tenders/${tenderId}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus })
-      });
-      if (res.ok) {
-        setTenders(prev =>
-          prev.map(t => (t.id === tenderId ? { ...t, pipeline_status: newStatus } : t))
-        );
-        fetchKpis();
-        // Re-query so a tender that changed stage leaves the list it no longer belongs to.
-        fetchTenders();
-      }
+      await apiMutate(`/api/tenders/${tenderId}/status`, 'PATCH', { status: newStatus });
+      setTenders(prev =>
+        prev.map(t => (t.id === tenderId ? { ...t, pipeline_status: newStatus } : t))
+      );
+      fetchKpis();
+      // Re-query so a tender that changed stage leaves the list it no longer belongs to.
+      fetchTenders();
     } catch (err) {
       console.error('Failed to update status:', err);
     }
@@ -383,13 +347,10 @@ export default function App() {
 
   const handleToggleBookmark = async (tenderId: string) => {
     try {
-      const res = await fetch(`/api/tenders/${tenderId}/bookmark`, { method: 'PATCH' });
-      if (res.ok) {
-        const data = await res.json();
-        setTenders(prev =>
-          prev.map(t => (t.id === tenderId ? { ...t, is_bookmarked: data.is_bookmarked } : t))
-        );
-      }
+      const data = await apiMutate<{ is_bookmarked: number }>(`/api/tenders/${tenderId}/bookmark`, 'PATCH');
+      setTenders(prev =>
+        prev.map(t => (t.id === tenderId ? { ...t, is_bookmarked: data.is_bookmarked } : t))
+      );
     } catch (err) {
       console.error('Failed to toggle bookmark:', err);
     }
@@ -398,25 +359,14 @@ export default function App() {
   const handleMarkViewed = async (tenderId: string) => {
     setTenders(prev => prev.map(t => (t.id === tenderId ? { ...t, viewed: 1 } : t)));
     try {
-      await fetch(`/api/tenders/${tenderId}/viewed`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ viewed: true })
-      });
+      await apiMutate(`/api/tenders/${tenderId}/viewed`, 'PATCH', { viewed: true });
     } catch {
       // Best-effort read state persistence
     }
   };
 
   const handleSaveNotes = async (tenderId: string, notes: string): Promise<void> => {
-    const res = await fetch(`/api/tenders/${tenderId}/notes`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ notes })
-    });
-    if (!res.ok) {
-      throw new Error(`Failed to save notes: HTTP ${res.status}`);
-    }
+    await apiMutate(`/api/tenders/${tenderId}/notes`, 'PATCH', { notes });
     setTenders(prev =>
       prev.map(t => (t.id === tenderId ? { ...t, status_notes: notes } : t))
     );
@@ -424,14 +374,8 @@ export default function App() {
 
   const handleSetResultDate = async (tenderId: string, date: string | null) => {
     try {
-      const res = await fetch(`/api/tenders/${tenderId}/result-date`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date })
-      });
-      if (res.ok) {
-        setTenders(prev => prev.map(t => (t.id === tenderId ? { ...t, result_expected_date: date } : t)));
-      }
+      await apiMutate(`/api/tenders/${tenderId}/result-date`, 'PATCH', { date });
+      setTenders(prev => prev.map(t => (t.id === tenderId ? { ...t, result_expected_date: date } : t)));
     } catch (err) {
       console.error('Failed to set result date:', err);
     }
@@ -439,12 +383,10 @@ export default function App() {
 
   const handleAcknowledgeCorrigendum = async (logId: string) => {
     try {
-      const res = await fetch(`/api/corrigenda/${logId}/acknowledge`, { method: 'POST' });
-      if (res.ok) {
-        fetchCorrigenda();
-        fetchKpis();
-        fetchTenders();
-      }
+      await apiMutate(`/api/corrigenda/${logId}/acknowledge`, 'POST');
+      fetchCorrigenda();
+      fetchKpis();
+      fetchTenders();
     } catch (err) {
       console.error('Failed to acknowledge corrigendum:', err);
     }
@@ -452,8 +394,10 @@ export default function App() {
 
   const handleLaunchHitl = async (portalId: string) => {
     try {
-      const res = await fetch(`/api/portals/${portalId}/hitl-launch`, { method: 'POST' });
-      const data = await res.json();
+      const data = await apiMutate<{ isHeadlessFallback?: boolean; portalUrl?: string }>(
+        `/api/portals/${portalId}/hitl-launch`,
+        'POST'
+      );
       if (data.isHeadlessFallback && data.portalUrl) {
         window.open(data.portalUrl, '_blank');
       }
@@ -464,7 +408,7 @@ export default function App() {
 
   const handleVerifyHitl = async (portalId: string) => {
     try {
-      await fetch(`/api/portals/${portalId}/hitl-verify`, { method: 'POST' });
+      await apiMutate(`/api/portals/${portalId}/hitl-verify`, 'POST');
       fetchPortals();
       fetchKpis();
     } catch (err) {
@@ -474,15 +418,9 @@ export default function App() {
 
   const handleSaveTrack = async (track: { id?: string; name: string; positive_keywords: string[]; negative_keywords: string[] }) => {
     try {
-      const res = await fetch('/api/tracks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(track)
-      });
-      if (res.ok) {
-        fetchTracks();
-        fetchTenders();
-      }
+      await apiMutate('/api/tracks', 'POST', track);
+      fetchTracks();
+      fetchTenders();
     } catch (err) {
       console.error('Failed to save track:', err);
     }
@@ -491,14 +429,12 @@ export default function App() {
   const handleDeleteTrack = async (id: string) => {
     try {
       const deletedTrack = tracks.find(t => t.id === id);
-      const res = await fetch(`/api/tracks/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchTracks();
-        if (deletedTrack && selectedTrack === deletedTrack.name) {
-          setSelectedTrack('All');
-        }
-        fetchTenders();
+      await apiMutate(`/api/tracks/${id}`, 'DELETE');
+      fetchTracks();
+      if (deletedTrack && selectedTrack === deletedTrack.name) {
+        setSelectedTrack('All');
       }
+      fetchTenders();
     } catch (err) {
       console.error('Failed to delete track:', err);
     }
@@ -506,16 +442,10 @@ export default function App() {
 
   const handleClearDatabase = async (unreviewedOnly: boolean) => {
     try {
-      const res = await fetch('/api/tenders/clear', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ unreviewedOnly })
-      });
-      if (res.ok) {
-        fetchTenders();
-        fetchKpis();
-        fetchCorrigenda();
-      }
+      await apiMutate('/api/tenders/clear', 'POST', { unreviewedOnly });
+      fetchTenders();
+      fetchKpis();
+      fetchCorrigenda();
     } catch (err) {
       console.error('Failed to clear database:', err);
     }
@@ -523,17 +453,10 @@ export default function App() {
 
   const handleAddPortal = async (portal: { portal_name: string; tenders_url: string; base_url?: string; category?: string; tier?: string; access_mode?: string; login_url?: string }) => {
     try {
-      const res = await fetch('/api/portals', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(portal)
-      });
-      if (res.ok) {
-        fetchPortals();
-        fetchKpis();
-        return true;
-      }
-      return false;
+      await apiMutate('/api/portals', 'POST', portal);
+      fetchPortals();
+      fetchKpis();
+      return true;
     } catch (err) {
       console.error('Failed to add portal:', err);
       return false;
@@ -542,15 +465,10 @@ export default function App() {
 
   const handleDeletePortal = async (portalId: string) => {
     try {
-      const res = await fetch(`/api/portals/${portalId}`, {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        fetchPortals();
-        fetchKpis();
-        return true;
-      }
-      return false;
+      await apiMutate(`/api/portals/${portalId}`, 'DELETE');
+      fetchPortals();
+      fetchKpis();
+      return true;
     } catch (err) {
       console.error('Failed to delete portal:', err);
       return false;
@@ -559,14 +477,8 @@ export default function App() {
 
   const handleUpdatePortal = async (portalId: string, updates: Partial<PortalHealth>) => {
     try {
-      const res = await fetch(`/api/portals/${portalId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates)
-      });
-      if (res.ok) {
-        fetchPortals();
-      }
+      await apiMutate(`/api/portals/${portalId}`, 'PUT', updates);
+      fetchPortals();
     } catch (err) {
       console.error('Failed to update portal:', err);
     }
@@ -574,9 +486,7 @@ export default function App() {
 
   const handleSelectTenderById = async (tenderId: string) => {
     try {
-      const res = await fetch(`/api/tenders/${tenderId}`);
-      if (!res.ok) return;
-      const tender: Tender = await res.json();
+      const tender = await apiJson<Tender>(`/api/tenders/${tenderId}`);
       handleNavigate(tender.pipeline_status === 'New Opportunity' ? 'inbox' : 'pipeline');
       setFocusTenderId(tenderId);
     } catch (err) {

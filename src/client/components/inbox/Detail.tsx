@@ -14,9 +14,14 @@ import {
   Upload
 } from 'lucide-react';
 import { Tender, CorrigendumLog, DocumentQueueStatus } from '../../../shared/types';
-import { Button, Chip } from '../../ui';
+import { isDirectDocumentUrl } from '../../../shared/documentUtils';
+import { Button, Chip, FIELD_INPUT_CLASS } from '../../ui';
+import { apiMutate } from '../../utils/apiClient';
+import { asList, fileToBase64 } from '../../utils/format';
 import { DeleteTenderModal } from './DeleteTenderModal';
 import { HighlightedDescription } from './HighlightedDescription';
+
+export { asList };
 
 function formatCountdown(closingDate: string | null) {
   if (!closingDate) return null;
@@ -30,29 +35,16 @@ function formatCountdown(closingDate: string | null) {
   return d > 0 ? `${d}d ${clock}` : clock;
 }
 
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      const base64 = result.includes(',') ? result.split(',')[1] : result;
-      resolve(base64);
-    };
-    reader.onerror = () => reject(new Error('Failed to read file'));
-    reader.readAsDataURL(file);
-  });
-}
-
-/** Older rows may hold these fields as JSON text. */
-export function asList<T>(value: unknown): T[] {
-  if (typeof value === 'string') {
-    try {
-      return JSON.parse(value || '[]');
-    } catch {
-      return [];
-    }
-  }
-  return (value as T[]) || [];
+function buildEditForm(t: Tender) {
+  return {
+    title: t.title || '',
+    organization: t.organization || '',
+    reference_no: t.reference_no || '',
+    closing_date: t.closing_date ? t.closing_date.slice(0, 10) : '',
+    estimated_value: t.estimated_value || '',
+    direct_url: t.direct_url || '',
+    description: t.description || '',
+  };
 }
 
 /** Re-renders its caller once per interval and returns the current timestamp cleanly. */
@@ -135,7 +127,6 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-ink-muted">{children}</h3>;
 }
 
-const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
 
 interface TenderDocProcessingState {
   kind: 'processing' | 'queued' | 'failed' | 'complete' | 'listing_only';
@@ -265,6 +256,7 @@ function hasAutoFetchableDocuments(t: Tender): boolean {
   const attUrls = asList<string>(t.attachment_urls);
   if (attUrls.some(u => typeof u === 'string' && /^https?:\/\//i.test(u))) return true;
   const directUrl = t.direct_url || '';
+  if (isDirectDocumentUrl(directUrl)) return true;
   if (/epms\.ppra\.gov\.pk\/public\/tenders\/tender-details\//i.test(directUrl)) return true;
   if (/fde\.gov\.pk\/download\/[^/?#]+/i.test(directUrl) && !/\/download-category\//i.test(directUrl)) return true;
   return false;
@@ -313,15 +305,7 @@ export function Detail({
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [editForm, setEditForm] = useState({
-    title: tender.title || '',
-    organization: tender.organization || '',
-    reference_no: tender.reference_no || '',
-    closing_date: tender.closing_date ? tender.closing_date.slice(0, 10) : '',
-    estimated_value: tender.estimated_value || '',
-    direct_url: tender.direct_url || '',
-    description: tender.description || '',
-  });
+  const [editForm, setEditForm] = useState(() => buildEditForm(tender));
 
   useEffect(() => {
     setCurrentTender(tender);
@@ -339,15 +323,7 @@ export function Detail({
       setEditingDetails(false);
       setPreviewPdfIndex(null);
       setCopiedSummary(false);
-      setEditForm({
-        title: tender.title || '',
-        organization: tender.organization || '',
-        reference_no: tender.reference_no || '',
-        closing_date: tender.closing_date ? tender.closing_date.slice(0, 10) : '',
-        estimated_value: tender.estimated_value || '',
-        direct_url: tender.direct_url || '',
-        description: tender.description || '',
-      });
+      setEditForm(buildEditForm(tender));
     } else if (notesRef.current === lastSavedNotesRef.current) {
       // Same tender refreshed via SSE: preserve unsaved operator notes while keeping clean sync
       setNotes(tender.status_notes || '');
@@ -496,90 +472,97 @@ export function Detail({
     onTenderDeleted?.(currentTender.id);
   };
 
-  const handleFetchDocuments = async () => {
-    setFetchingDocs(true);
+  type TenderMutationPayload = {
+    expired?: boolean;
+    tender?: Tender;
+    message?: string;
+    newlyFetched?: number;
+    aiExtracted?: boolean;
+    error?: string;
+  };
+
+  const readMutationError = (err: unknown, apiFallback: string, networkFallback = apiFallback): string => {
+    const data = (err as { data?: { error?: string; message?: string } } | null)?.data;
+    if (data !== undefined) {
+      return data?.error || data?.message || apiFallback;
+    }
+    return networkFallback;
+  };
+
+  const runTenderPostAction = async (
+    endpoint: string,
+    setBusy: (busy: boolean) => void,
+    successText: (data: TenderMutationPayload) => string,
+    apiFallback: string,
+    networkFallback = apiFallback,
+  ) => {
+    setBusy(true);
     setAiStatusMessage(null);
     try {
-      const res = await fetch(`/api/tenders/${currentTender.id}/fetch-documents`, { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.expired) {
+      const data = await apiMutate<TenderMutationPayload>(
+        `/api/tenders/${currentTender.id}/${endpoint}`,
+        'POST'
+      );
+      if (data.expired) {
         handleTenderExpired(data.message);
-      } else if (res.ok && data.tender) {
+      } else if (data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
-        setAiStatusMessage({ text: data.message || `Fetched ${data.newlyFetched} document(s) from portal.` });
+        setAiStatusMessage({ text: successText(data) });
       } else {
-        setAiStatusMessage({ text: data.error || 'Failed to fetch documents from portal.', isError: true });
+        setAiStatusMessage({ text: data.error || apiFallback, isError: true });
       }
-    } catch {
-      setAiStatusMessage({ text: 'Error connecting to document fetch service.', isError: true });
+    } catch (err) {
+      setAiStatusMessage({ text: readMutationError(err, apiFallback, networkFallback), isError: true });
     } finally {
-      setFetchingDocs(false);
+      setBusy(false);
     }
   };
 
-  const handleAnalyzeWithAi = async () => {
-    setAnalyzing(true);
-    setAiStatusMessage(null);
-    try {
-      const res = await fetch(`/api/tenders/${currentTender.id}/analyze`, { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.expired) {
-        handleTenderExpired(data.message);
-      } else if (res.ok && data.tender) {
-        setCurrentTender(data.tender);
-        onTenderUpdated?.(data.tender);
-        setAiStatusMessage({ text: data.message || 'Tender summary extracted with AI.' });
-      } else {
-        setAiStatusMessage({ text: data.error || 'Could not analyze tender with AI.', isError: true });
-      }
-    } catch {
-      setAiStatusMessage({ text: 'Failed to reach AI extraction service.', isError: true });
-    } finally {
-      setAnalyzing(false);
-    }
-  };
+  const handleFetchDocuments = () =>
+    runTenderPostAction(
+      'fetch-documents',
+      setFetchingDocs,
+      data => data.message || `Fetched ${data.newlyFetched} document(s) from portal.`,
+      'Failed to fetch documents from portal.',
+      'Error connecting to document fetch service.'
+    );
 
-  const handleRefreshTender = async () => {
-    setRefreshing(true);
-    setAiStatusMessage(null);
-    try {
-      const res = await fetch(`/api/tenders/${currentTender.id}/refresh`, { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.expired) {
-        handleTenderExpired(data.message);
-      } else if (res.ok && data.tender) {
-        setCurrentTender(data.tender);
-        onTenderUpdated?.(data.tender);
-        setAiStatusMessage({ text: data.message || 'Tender information refreshed from portal.' });
-      } else {
-        setAiStatusMessage({ text: data.error || 'Could not refresh tender from portal.', isError: true });
-      }
-    } catch {
-      setAiStatusMessage({ text: 'Failed to refresh tender from portal.', isError: true });
-    } finally {
-      setRefreshing(false);
-    }
-  };
+  const handleAnalyzeWithAi = () =>
+    runTenderPostAction(
+      'analyze',
+      setAnalyzing,
+      data => data.message || 'Tender summary extracted with AI.',
+      'Could not analyze tender with AI.',
+      'Failed to reach AI extraction service.'
+    );
+
+  const handleRefreshTender = () =>
+    runTenderPostAction(
+      'refresh',
+      setRefreshing,
+      data => data.message || 'Tender information refreshed from portal.',
+      'Could not refresh tender from portal.',
+      'Failed to refresh tender from portal.'
+    );
 
   const handleFileUpload = async (file: File) => {
     setUploadingFile(true);
     setAiStatusMessage(null);
     try {
       const dataBase64 = await fileToBase64(file);
-      const res = await fetch(`/api/tenders/${currentTender.id}/attachments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await apiMutate<TenderMutationPayload>(
+        `/api/tenders/${currentTender.id}/attachments`,
+        'POST',
+        {
           filename: file.name,
           mimeType: file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'),
           dataBase64,
           label: file.name,
           runAi: true,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && data.tender) {
+        }
+      );
+      if (data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
         setAiStatusMessage({
@@ -590,8 +573,8 @@ export function Detail({
       } else {
         setAiStatusMessage({ text: data.error || 'Failed to upload file.', isError: true });
       }
-    } catch {
-      setAiStatusMessage({ text: 'Failed to upload file.', isError: true });
+    } catch (err) {
+      setAiStatusMessage({ text: readMutationError(err, 'Failed to upload file.'), isError: true });
     } finally {
       setUploadingFile(false);
     }
@@ -601,21 +584,16 @@ export function Detail({
     setSavingDetails(true);
     setAiStatusMessage(null);
     try {
-      const res = await fetch(`/api/tenders/${currentTender.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: editForm.title,
-          organization: editForm.organization,
-          reference_no: editForm.reference_no,
-          closing_date: editForm.closing_date || null,
-          estimated_value: editForm.estimated_value || null,
-          direct_url: editForm.direct_url,
-          description: editForm.description,
-        }),
+      const data = await apiMutate<TenderMutationPayload>(`/api/tenders/${currentTender.id}`, 'PATCH', {
+        title: editForm.title,
+        organization: editForm.organization,
+        reference_no: editForm.reference_no,
+        closing_date: editForm.closing_date || null,
+        estimated_value: editForm.estimated_value || null,
+        direct_url: editForm.direct_url,
+        description: editForm.description,
       });
-      const data = await res.json();
-      if (res.ok && data.tender) {
+      if (data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
         setEditingDetails(false);
@@ -623,8 +601,8 @@ export function Detail({
       } else {
         setAiStatusMessage({ text: data.error || 'Could not save details.', isError: true });
       }
-    } catch {
-      setAiStatusMessage({ text: 'Could not save details.', isError: true });
+    } catch (err) {
+      setAiStatusMessage({ text: readMutationError(err, 'Could not save details.'), isError: true });
     } finally {
       setSavingDetails(false);
     }
@@ -636,21 +614,18 @@ export function Detail({
   const handleConfirmReview = async () => {
     setReviewBusy(true);
     try {
-      const res = await fetch(`/api/tenders/${currentTender.id}/review`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'confirm' })
+      const data = await apiMutate<TenderMutationPayload>(`/api/tenders/${currentTender.id}/review`, 'PATCH', {
+        action: 'confirm',
       });
-      const data = await res.json();
-      if (res.ok && data.tender) {
+      if (data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
         setAiStatusMessage({ text: 'Review confirmed.' });
       } else {
         setAiStatusMessage({ text: data.error || 'Could not confirm review.', isError: true });
       }
-    } catch {
-      setAiStatusMessage({ text: 'Could not confirm review.', isError: true });
+    } catch (err) {
+      setAiStatusMessage({ text: readMutationError(err, 'Could not confirm review.'), isError: true });
     } finally {
       setReviewBusy(false);
     }
@@ -659,17 +634,19 @@ export function Detail({
   const handleRetryDocuments = async () => {
     setRetryingDocs(true);
     try {
-      const res = await fetch(`/api/tenders/${currentTender.id}/retry-documents`, { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.tender) {
+      const data = await apiMutate<TenderMutationPayload>(
+        `/api/tenders/${currentTender.id}/retry-documents`,
+        'POST'
+      );
+      if (data.tender) {
         setCurrentTender(data.tender);
         onTenderUpdated?.(data.tender);
         setAiStatusMessage({ text: data.message || 'Retrying document download.' });
       } else {
         setAiStatusMessage({ text: data.error || 'Could not retry documents.', isError: true });
       }
-    } catch {
-      setAiStatusMessage({ text: 'Could not retry documents.', isError: true });
+    } catch (err) {
+      setAiStatusMessage({ text: readMutationError(err, 'Could not retry documents.'), isError: true });
     } finally {
       setRetryingDocs(false);
     }
@@ -679,10 +656,10 @@ export function Detail({
   const docState = getTenderDocProcessingState(currentTender, docQueue, fetchingDocs);
 
   const confirmDeleteTender = async (tenderId: string) => {
-    const res = await fetch(`/api/tenders/${tenderId}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to delete tender');
+    try {
+      await apiMutate(`/api/tenders/${tenderId}`, 'DELETE');
+    } catch (err) {
+      throw new Error(readMutationError(err, 'Failed to delete tender'));
     }
     onTenderDeleted?.(tenderId);
   };
@@ -907,15 +884,7 @@ export function Detail({
                 size="sm"
                 variant="ghost"
                 onClick={() => {
-                  setEditForm({
-                    title: currentTender.title || '',
-                    organization: currentTender.organization || '',
-                    reference_no: currentTender.reference_no || '',
-                    closing_date: currentTender.closing_date ? currentTender.closing_date.slice(0, 10) : '',
-                    estimated_value: currentTender.estimated_value || '',
-                    direct_url: currentTender.direct_url || '',
-                    description: currentTender.description || '',
-                  });
+                  setEditForm(buildEditForm(currentTender));
                   setEditingDetails(v => !v);
                 }}
               >
@@ -932,7 +901,7 @@ export function Detail({
                 <input
                   value={editForm.title}
                   onChange={e => setEditForm({ ...editForm, title: e.target.value })}
-                  className={fieldInputClass}
+                  className={FIELD_INPUT_CLASS}
                 />
               </label>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -941,7 +910,7 @@ export function Detail({
                   <input
                     value={editForm.organization}
                     onChange={e => setEditForm({ ...editForm, organization: e.target.value })}
-                    className={fieldInputClass}
+                    className={FIELD_INPUT_CLASS}
                   />
                 </label>
                 <label className="block">
@@ -949,7 +918,7 @@ export function Detail({
                   <input
                     value={editForm.reference_no}
                     onChange={e => setEditForm({ ...editForm, reference_no: e.target.value })}
-                    className={`${fieldInputClass} font-mono`}
+                    className={`${FIELD_INPUT_CLASS} font-mono`}
                   />
                 </label>
                 <label className="block">
@@ -958,7 +927,7 @@ export function Detail({
                     type="date"
                     value={editForm.closing_date}
                     onChange={e => setEditForm({ ...editForm, closing_date: e.target.value })}
-                    className={`${fieldInputClass} font-mono`}
+                    className={`${FIELD_INPUT_CLASS} font-mono`}
                   />
                 </label>
                 <label className="block">
@@ -967,7 +936,7 @@ export function Detail({
                     value={editForm.estimated_value}
                     onChange={e => setEditForm({ ...editForm, estimated_value: e.target.value })}
                     placeholder="e.g. PKR 25,000,000"
-                    className={fieldInputClass}
+                    className={FIELD_INPUT_CLASS}
                   />
                 </label>
               </div>
@@ -978,7 +947,7 @@ export function Detail({
                   value={editForm.description}
                   onChange={e => setEditForm({ ...editForm, description: e.target.value })}
                   placeholder="Enter tender scope, eligibility requirements, or summary bullets…"
-                  className={fieldInputClass}
+                  className={FIELD_INPUT_CLASS}
                 />
               </label>
               <div className="flex justify-end gap-2">

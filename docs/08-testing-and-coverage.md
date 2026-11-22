@@ -20,7 +20,7 @@ tests/
   db/                     # SQLite repositories, durable document_ingest_jobs queue, triggers, and audit logging
   scraper/                # Offline crawler engine, portal-contracts, ingest-queue, URL healer, Playwright, auth, and Gemini OCR tests
   api/                    # Supertest HTTP integration tests against createApp()
-  ui/                     # React Testing Library component tests
+  ui/                     # React Testing Library component & helper tests (including ui-primitives, client-utils)
   fixtures/
     portals/              # Sanitized static HTML fixtures (<= 50 KB each) + expected.json contracts
     documents/            # Programmatic synthetic PDF and .docx builders (buildFixtures.ts)

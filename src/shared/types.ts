@@ -48,6 +48,16 @@ export type ScraperErrorCode =
 
 export type ScanDepth = 'quick' | 'deep';
 
+export interface KpiStats {
+  totalTracked: number;
+  closingSoon: number;
+  inPipeline: number;
+  unackCorrigenda: number;
+  totalPortals: number;
+  onlinePortals: number;
+  hitlRequiredCount: number;
+}
+
 export interface DigestAlertItem {
   id: string;
   reference_no: string | null;

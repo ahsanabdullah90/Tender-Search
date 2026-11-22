@@ -1,21 +1,14 @@
 import React from 'react';
 import { AlertTriangle, ExternalLink, AlertOctagon } from 'lucide-react';
-import { CorrigendumLog, PortalHealth } from '../../shared/types';
+import { CorrigendumLog, PortalHealth, KpiStats } from '../../shared/types';
+import { isPortalOffline } from '../utils/format';
 
 /*
   Alert banners and the KPI strip. Navigation, scan and theme controls now
   live in the sidebar (AppShell).
 */
 interface KpiHeaderProps {
-  stats: {
-    totalTracked: number;
-    closingSoon: number;
-    inPipeline: number;
-    unackCorrigenda: number;
-    totalPortals: number;
-    onlinePortals: number;
-    hitlRequiredCount: number;
-  };
+  stats: KpiStats;
   corrigenda: CorrigendumLog[];
   portals: PortalHealth[];
   onAcknowledgeCorrigendum: (id: string) => void;
@@ -34,7 +27,7 @@ export const KpiHeader: React.FC<KpiHeaderProps> = ({
   onOpenSources,
 }) => {
   const hitlPortals = portals.filter(p => p.status === 'hitl_required');
-  const brokenPortals = portals.filter(p => p.status === 'selector_broken' || p.status === 'error' || p.access_mode === 'offline_broken');
+  const brokenPortals = portals.filter(isPortalOffline);
 
   return (
     <header className="border-b border-line bg-surface">

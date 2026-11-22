@@ -7,6 +7,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if (-not $PSBoundParameters.ContainsKey('Port')) {
+  $parsedEnvPort = 0
+  if ($env:PORT -and [int]::TryParse($env:PORT.Trim(), [ref]$parsedEnvPort) -and $parsedEnvPort -gt 0) {
+    $Port = $parsedEnvPort
+  }
+}
+
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $script:ProjectRoot = Split-Path -Parent $scriptDir
 $script:Port = $Port
@@ -23,37 +30,26 @@ if ($DataDir -and $DataDir.Trim()) {
 $script:ProfileDir = Join-Path $script:EffectiveDataDir 'app-profile'
 
 function Resolve-StandaloneBrowser {
-  $edgeCandidates = @()
-  if (${env:ProgramFiles(x86)}) {
-    $edgeCandidates += (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe')
-  }
-  if ($env:ProgramFiles) {
-    $edgeCandidates += (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
-  }
-  if ($env:LocalAppData) {
-    $edgeCandidates += (Join-Path $env:LocalAppData 'Microsoft\Edge\Application\msedge.exe')
-  }
-
-  foreach ($candidate in $edgeCandidates) {
-    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-      return @{ Engine = 'edge'; Path = $candidate }
+  $browsers = @(
+    @{
+      Engine = 'edge'
+      RelativePath = 'Microsoft\Edge\Application\msedge.exe'
+      Roots = @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LocalAppData)
+    },
+    @{
+      Engine = 'chrome'
+      RelativePath = 'Google\Chrome\Application\chrome.exe'
+      Roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LocalAppData)
     }
-  }
+  )
 
-  $chromeCandidates = @()
-  if ($env:ProgramFiles) {
-    $chromeCandidates += (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe')
-  }
-  if (${env:ProgramFiles(x86)}) {
-    $chromeCandidates += (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe')
-  }
-  if ($env:LocalAppData) {
-    $chromeCandidates += (Join-Path $env:LocalAppData 'Google\Chrome\Application\chrome.exe')
-  }
-
-  foreach ($candidate in $chromeCandidates) {
-    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-      return @{ Engine = 'chrome'; Path = $candidate }
+  foreach ($browser in $browsers) {
+    foreach ($root in $browser.Roots) {
+      if (-not $root) { continue }
+      $candidate = Join-Path $root $browser.RelativePath
+      if (Test-Path -LiteralPath $candidate) {
+        return @{ Engine = $browser.Engine; Path = $candidate }
+      }
     }
   }
 
@@ -449,10 +445,15 @@ $openBrowserItem.Add_Click({ Open-DefaultBrowser })
 
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
-$quickScanItem = New-Object System.Windows.Forms.ToolStripMenuItem('Run Quick Scan')
-$quickScanItem.Add_Click({
+function Start-TrayScan {
+  param(
+    [ValidateSet('quick', 'deep')][string]$Depth,
+    [string]$StartedMessage,
+    [string]$FailedMessage
+  )
   try {
-    $resp = Invoke-RestMethod -Uri "$script:BaseUrl/api/scan/start" -Method Post -ContentType 'application/json' -Body '{"depth":"quick"}' -TimeoutSec 4
+    $body = (@{ depth = $Depth } | ConvertTo-Json -Compress)
+    $resp = Invoke-RestMethod -Uri "$script:BaseUrl/api/scan/start" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 4
     if ($resp -and (-not [bool]$resp.isScanning) -and -not [string]::IsNullOrWhiteSpace([string]$resp.pausedReason)) {
       Show-TrayBalloon -Title 'Tender Tracker' -Message ([string]$resp.pausedReason) -Icon ([System.Windows.Forms.ToolTipIcon]::Warning)
       $null = Update-NetworkState
@@ -460,34 +461,24 @@ $quickScanItem.Add_Click({
     }
     $script:TrayStartedScan = $true
     $script:WasScanning = $true
-    if ($null -ne $statusTimer -and $statusTimer.Interval -ne 10000) {
-      $statusTimer.Interval = 10000
+    if ($null -ne $script:StatusTimer -and $script:StatusTimer.Interval -ne 10000) {
+      $script:StatusTimer.Interval = 10000
     }
-    Show-TrayBalloon -Title 'Tender Tracker' -Message 'Quick scan started in the background.'
+    Show-TrayBalloon -Title 'Tender Tracker' -Message $StartedMessage
   } catch {
-    Show-TrayBalloon -Title 'Tender Tracker' -Message 'Could not start quick scan.' -Icon ([System.Windows.Forms.ToolTipIcon]::Warning)
+    Show-TrayBalloon -Title 'Tender Tracker' -Message $FailedMessage -Icon ([System.Windows.Forms.ToolTipIcon]::Warning)
   }
+}
+
+$quickScanItem = New-Object System.Windows.Forms.ToolStripMenuItem('Run Quick Scan')
+$quickScanItem.Add_Click({
+  Start-TrayScan -Depth 'quick' -StartedMessage 'Quick scan started in the background.' -FailedMessage 'Could not start quick scan.'
 })
 [void]$menu.Items.Add($quickScanItem)
 
 $deepScanItem = New-Object System.Windows.Forms.ToolStripMenuItem('Run Deep Scan')
 $deepScanItem.Add_Click({
-  try {
-    $resp = Invoke-RestMethod -Uri "$script:BaseUrl/api/scan/start" -Method Post -ContentType 'application/json' -Body '{"depth":"deep"}' -TimeoutSec 4
-    if ($resp -and (-not [bool]$resp.isScanning) -and -not [string]::IsNullOrWhiteSpace([string]$resp.pausedReason)) {
-      Show-TrayBalloon -Title 'Tender Tracker' -Message ([string]$resp.pausedReason) -Icon ([System.Windows.Forms.ToolTipIcon]::Warning)
-      $null = Update-NetworkState
-      return
-    }
-    $script:TrayStartedScan = $true
-    $script:WasScanning = $true
-    if ($null -ne $statusTimer -and $statusTimer.Interval -ne 10000) {
-      $statusTimer.Interval = 10000
-    }
-    Show-TrayBalloon -Title 'Tender Tracker' -Message 'Deep multi-page scan started in the background.'
-  } catch {
-    Show-TrayBalloon -Title 'Tender Tracker' -Message 'Could not start deep scan.' -Icon ([System.Windows.Forms.ToolTipIcon]::Warning)
-  }
+  Start-TrayScan -Depth 'deep' -StartedMessage 'Deep multi-page scan started in the background.' -FailedMessage 'Could not start deep scan.'
 })
 [void]$menu.Items.Add($deepScanItem)
 
@@ -506,7 +497,7 @@ $recheckNetItem.Add_Click({
       $script:StatusItem.Text = "Status: $prefix | $($summary.MenuTag)"
       $script:NotifyIcon.Text = Format-TrayTooltip $summary.Tooltip
     } else {
-      $script:StatusItem.Text = "Status: $prefix | $($summary.MenuTag)"
+      $script:StatusItem.Text = "Status: $prefix"
       $script:NotifyIcon.Text = Format-TrayTooltip "Tender Tracker - $prefix"
     }
   }
@@ -591,6 +582,7 @@ $sessionEndingHandler = [Microsoft.Win32.SessionEndingEventHandler]{
 [Microsoft.Win32.SystemEvents]::add_SessionEnding($sessionEndingHandler)
 
 $statusTimer = New-Object System.Windows.Forms.Timer
+$script:StatusTimer = $statusTimer
 $statusTimer.Interval = 60000
 $statusTimer.Add_Tick({
   if ($script:Stopping -or $script:Restarting) { return }
@@ -696,13 +688,13 @@ $digestTimer.Add_Tick({
 })
 $digestTimer.Start()
 
-if ($StartMinimized) {
-  Show-TrayBalloon -Title 'Tender Tracker' -Message 'Running quietly in the Windows system tray.'
-} else {
-  Open-StandaloneWindow
-}
-
 try {
+  if ($StartMinimized) {
+    Show-TrayBalloon -Title 'Tender Tracker' -Message 'Running quietly in the Windows system tray.'
+  } else {
+    Open-StandaloneWindow
+  }
+
   [System.Windows.Forms.Application]::Run()
 } finally {
   $script:Stopping = $true

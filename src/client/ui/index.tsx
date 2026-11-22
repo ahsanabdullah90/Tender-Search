@@ -1,7 +1,9 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { RotateCw, X } from 'lucide-react';
 
 /* Shared building blocks. Every screen uses these, so the look stays consistent. */
+
+export const FIELD_INPUT_CLASS = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
 
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 
@@ -41,6 +43,36 @@ export function Chip({ tone = 'neutral', children, className = '' }: { tone?: Ch
   return (
     <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${chipTones[tone]} ${className}`}>
       {children}
+    </span>
+  );
+}
+
+export function DocStatusChip({
+  kind,
+  shortLabel,
+  title,
+  testId,
+}: {
+  kind: 'processing' | 'queued' | 'failed' | 'complete' | 'listing_only';
+  shortLabel: string;
+  title: string;
+  testId?: string;
+}) {
+  if (kind !== 'processing' && kind !== 'queued' && kind !== 'failed') return null;
+  const toneClass =
+    kind === 'processing'
+      ? 'bg-accent-soft text-accent'
+      : kind === 'failed'
+        ? 'bg-warn-soft text-warn'
+        : 'bg-surface-2 text-ink-muted';
+  return (
+    <span
+      data-testid={testId}
+      title={title}
+      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ${toneClass}`}
+    >
+      {kind === 'processing' && <RotateCw aria-hidden="true" className="h-3 w-3 motion-safe:animate-spin" />}
+      {shortLabel}
     </span>
   );
 }
@@ -128,12 +160,16 @@ export function Dialog({
   open,
   onClose,
   title,
+  subtitle,
+  icon,
   children,
   footer,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
+  subtitle?: string;
+  icon?: React.ReactNode;
   children: React.ReactNode;
   footer?: React.ReactNode;
 }) {
@@ -145,7 +181,13 @@ export function Dialog({
       <div className="absolute inset-0 bg-ink/40" onClick={onClose} aria-hidden="true" />
       <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="relative w-full max-w-md rounded-xl border border-line bg-surface shadow-xl">
         <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <h2 id={titleId} className="text-base font-bold">{title}</h2>
+          <div className="flex items-center gap-3 min-w-0">
+            {icon && <div className="shrink-0">{icon}</div>}
+            <div className="min-w-0">
+              <h2 id={titleId} className="text-base font-bold">{title}</h2>
+              {subtitle && <p className="truncate text-xs text-ink-muted">{subtitle}</p>}
+            </div>
+          </div>
           <button aria-label="Close" onClick={onClose} className="cursor-pointer rounded-md p-1 text-ink-muted hover:bg-surface-2">
             <X className="h-4 w-4" />
           </button>
@@ -193,10 +235,12 @@ export function Popover({
   trigger,
   children,
   align = 'start',
+  panelClassName = 'min-w-56',
 }: {
   trigger: (p: { open: boolean; toggle: () => void }) => React.ReactNode;
   children: (close: () => void) => React.ReactNode;
   align?: 'start' | 'end';
+  panelClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -221,7 +265,7 @@ export function Popover({
     <div ref={ref} className="relative inline-block">
       {trigger({ open, toggle: () => setOpen(o => !o) })}
       {open && (
-        <div className={`absolute z-40 mt-2 min-w-56 rounded-xl border border-line bg-surface p-2 shadow-lg ${align === 'end' ? 'right-0' : 'left-0'}`}>
+        <div className={`absolute z-40 mt-2 rounded-xl border border-line bg-surface p-2 shadow-lg ${panelClassName} ${align === 'end' ? 'right-0' : 'left-0'}`}>
           {children(() => setOpen(false))}
         </div>
       )}

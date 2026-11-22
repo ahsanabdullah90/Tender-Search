@@ -1,22 +1,9 @@
 import { useState } from 'react';
 import { Sparkles, X } from 'lucide-react';
 import { Tender } from '../../../shared/types';
-import { Button, Dialog } from '../../ui';
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      const base64 = result.includes(',') ? result.split(',')[1] : result;
-      resolve(base64);
-    };
-    reader.onerror = () => reject(new Error('Failed to read file'));
-    reader.readAsDataURL(file);
-  });
-}
-
-const fieldInputClass = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm placeholder:text-ink-muted';
+import { Button, Dialog, FIELD_INPUT_CLASS } from '../../ui';
+import { apiMutate } from '../../utils/apiClient';
+import { fileToBase64 } from '../../utils/format';
 
 interface AddTenderModalProps {
   open: boolean;
@@ -79,13 +66,12 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
     setExtractingManualAi(true);
     setManualError(null);
     try {
-      const res = await fetch('/api/ai/extract-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataBase64: manualFile.dataBase64, mimeType: manualFile.mimeType }),
-      });
-      const data = await res.json();
-      if (res.ok && data.extracted) {
+      const data = await apiMutate<{ extracted?: { title?: string; organization?: string; referenceNo?: string; closingDate?: string; estimatedValue?: string; summaryScope?: string } }>(
+        '/api/ai/extract-file',
+        'POST',
+        { dataBase64: manualFile.dataBase64, mimeType: manualFile.mimeType }
+      );
+      if (data.extracted) {
         const ext = data.extracted;
         setManualForm(prev => ({
           ...prev,
@@ -97,10 +83,10 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
           description: ext.summaryScope || prev.description,
         }));
       } else {
-        setManualError(data.error || 'Could not extract fields from file.');
+        setManualError('Could not extract fields from file.');
       }
-    } catch {
-      setManualError('Failed to reach AI extraction service.');
+    } catch (err: any) {
+      setManualError(err?.message && !/^HTTP \d+$/.test(err.message) ? err.message : 'Failed to reach AI extraction service.');
     } finally {
       setExtractingManualAi(false);
     }
@@ -111,26 +97,21 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
     setCreatingManual(true);
     setManualError(null);
     try {
-      const res = await fetch('/api/tenders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...manualForm,
-          fileBase64: manualFile?.dataBase64,
-          filename: manualFile?.filename,
-          mimeType: manualFile?.mimeType,
-        }),
+      const data = await apiMutate<{ tender?: Tender }>('/api/tenders', 'POST', {
+        ...manualForm,
+        fileBase64: manualFile?.dataBase64,
+        filename: manualFile?.filename,
+        mimeType: manualFile?.mimeType,
       });
-      const data = await res.json();
-      if (res.ok && data.tender) {
+      if (data.tender) {
         onTenderCreated?.(data.tender);
         resetForm();
         onClose();
       } else {
-        setManualError(data.error || 'Failed to create tender.');
+        setManualError('Failed to create tender.');
       }
-    } catch {
-      setManualError('Failed to create tender.');
+    } catch (err: any) {
+      setManualError(err?.message && !/^HTTP \d+$/.test(err.message) ? err.message : 'Failed to create tender.');
     } finally {
       setCreatingManual(false);
     }
@@ -192,7 +173,7 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
             value={manualForm.title}
             onChange={e => setManualForm({ ...manualForm, title: e.target.value })}
             placeholder="e.g. Procurement of Solar PV System for DHQ Hospital"
-            className={fieldInputClass}
+            className={FIELD_INPUT_CLASS}
           />
         </label>
 
@@ -203,7 +184,7 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
               value={manualForm.organization}
               onChange={e => setManualForm({ ...manualForm, organization: e.target.value })}
               placeholder="Procuring agency"
-              className={fieldInputClass}
+              className={FIELD_INPUT_CLASS}
             />
           </label>
           <label className="block">
@@ -212,7 +193,7 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
               value={manualForm.reference_no}
               onChange={e => setManualForm({ ...manualForm, reference_no: e.target.value })}
               placeholder="e.g. PPRA-2026-104"
-              className={`${fieldInputClass} font-mono`}
+              className={`${FIELD_INPUT_CLASS} font-mono`}
             />
           </label>
           <label className="block">
@@ -221,7 +202,7 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
               type="date"
               value={manualForm.closing_date}
               onChange={e => setManualForm({ ...manualForm, closing_date: e.target.value })}
-              className={`${fieldInputClass} font-mono`}
+              className={`${FIELD_INPUT_CLASS} font-mono`}
             />
           </label>
           <label className="block">
@@ -230,7 +211,7 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
               value={manualForm.estimated_value}
               onChange={e => setManualForm({ ...manualForm, estimated_value: e.target.value })}
               placeholder="e.g. PKR 25,000,000"
-              className={fieldInputClass}
+              className={FIELD_INPUT_CLASS}
             />
           </label>
         </div>
@@ -241,7 +222,7 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
             value={manualForm.direct_url}
             onChange={e => setManualForm({ ...manualForm, direct_url: e.target.value })}
             placeholder="https://..."
-            className={fieldInputClass}
+            className={FIELD_INPUT_CLASS}
           />
         </label>
 
@@ -252,7 +233,7 @@ export function AddTenderModal({ open, onClose, onTenderCreated }: AddTenderModa
             value={manualForm.description}
             onChange={e => setManualForm({ ...manualForm, description: e.target.value })}
             placeholder="Enter tender scope, requirements…"
-            className={fieldInputClass}
+            className={FIELD_INPUT_CLASS}
           />
         </label>
 

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Archive, ExternalLink, Paperclip, RotateCw, TriangleAlert } from 'lucide-react';
+import { Archive, ExternalLink, Paperclip, TriangleAlert } from 'lucide-react';
 import { Tender, CorrigendumLog, OpportunityStatus, DocumentQueueStatus } from '../../shared/types';
-import { Button, Chip, DeadlineChip, EmptyState, Panel, SlideOver, Tabs } from '../ui';
-import { Detail, deadlineProvenance, getTenderDocProcessingState, useTick } from './InboxScreen';
+import { Button, Chip, DeadlineChip, DocStatusChip, EmptyState, Panel, SlideOver, Tabs } from '../ui';
+import { Detail, deadlineProvenance, getTenderDocProcessingState, useTick } from './inbox';
 import { PassConfirmModal } from './pipeline/PassConfirmModal';
 
 type View = 'board' | 'gantt';
@@ -59,22 +59,12 @@ function Card({ tender, docQueue, onOpen }: { tender: Tender; docQueue?: Documen
         <div className="flex flex-wrap items-center gap-1.5">
           {tender.pipeline_status === 'Won' ? <Chip tone="ok">Won</Chip> : <DeadlineChip closingDate={tender.closing_date} />}
           {Boolean(tender.needs_review) && <Chip tone="danger">Review</Chip>}
-          {(docState.kind === 'processing' || docState.kind === 'queued' || docState.kind === 'failed') && (
-            <span
-              data-testid="card-doc-status"
-              title={docState.bannerTitle}
-              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ${
-                docState.kind === 'processing'
-                  ? 'bg-accent-soft text-accent'
-                  : docState.kind === 'failed'
-                    ? 'bg-warn-soft text-warn'
-                    : 'bg-surface-2 text-ink-muted'
-              }`}
-            >
-              {docState.kind === 'processing' && <RotateCw aria-hidden="true" className="h-3 w-3 motion-safe:animate-spin" />}
-              {docState.shortLabel}
-            </span>
-          )}
+          <DocStatusChip
+            kind={docState.kind}
+            shortLabel={docState.shortLabel}
+            title={docState.bannerTitle}
+            testId="card-doc-status"
+          />
           {provenance.tone !== 'neutral' && (
             <span title={provenance.title}>
               <Chip tone={provenance.tone}>{provenance.label}</Chip>
