@@ -288,7 +288,7 @@ Validates whether active session cookies exist in `data/sessions/` after HITL co
 ## 5. Crawling & Scanning
 
 ### `POST /api/scan/start`
-Initiates a crawl across all portals or a targeted portal. Multi-portal scans run HTTP portals concurrently (pool of 3) and Playwright portals sequentially (pool of 1).
+Initiates a crawl across all portals or a targeted portal. Multi-portal scans follow Two-Phase Scan Execution: Phase 1 crawls the 7-board statutory regulatory backbone to completion before Phase 2 crawls individual procurement agencies (within each phase, HTTP portals run concurrently with pool of 3 and Playwright portals sequentially with pool of 1).
 - **Request Body**:
   - `portalId` *(optional)*: Scan a single portal rather than all active portals.
   - `depth` *(optional, `'quick' | 'deep'`, default `'quick'`)*: Controls pagination budgets (`quickMaxPages` with DB early-stop vs `deepMaxPages`).
@@ -305,7 +305,7 @@ Returns immediate snapshot of crawler status.
     "scanDepth": "quick",
     "progressPercent": 45,
     "completedPortals": 8,
-    "totalPortals": 18,
+    "totalPortals": 19,
     "newTendersFound": 12,
     "corrigendaFound": 2,
     "heldForScope": 3,

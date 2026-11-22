@@ -103,5 +103,5 @@ db.transaction(() => {
   }
 })();
 
-console.log('Seeded successfully: 20 tenders, clean runway distribution across all 18 portals.');
+console.log('Seeded successfully: 20 tenders, clean runway distribution across all 19 portals.');
 console.log('Database path:', path.resolve(sampleDir, 'tender_tracker.db'));

@@ -1,6 +1,6 @@
 /**
  * Probe Portals CLI Tool
- * Checks connectivity and HTTP status of all 18 configured portals.
+ * Checks connectivity and HTTP status of all 19 configured portals.
  *
  * Run: npm run probe:portals
  */

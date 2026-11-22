@@ -61,6 +61,6 @@ npm run lint
 # Build production client and server bundles
 npm run build
 
-# Probe live connectivity against all 18 government procurement portals
+# Probe live connectivity against all 19 government procurement portals
 npm run probe:portals
 ```

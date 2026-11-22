@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-21 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, Standalone Desktop Window & System Tray, and Network Health Monitor & Anti-Corruption Safeguards).
+**Last updated:** 2026-11-22 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, Standalone Desktop Window & System Tray, and Network Health Monitor & Anti-Corruption Safeguards; Master Plan Workstreams A–G completed for 7-Statutory Backbone, Two-Phase Scan Priority & Cross-Portal Dedup).
 
 This document tracks **active operational items and approved non-breaking feature plans**. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 
@@ -96,7 +96,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
   2. Add cross-portal deduplication tests for dated-vs-undated pairs in `tests/unit/deduplicator.test.ts`.
   3. Synchronize documentation (`docs/02`, `docs/03`, `docs/04`, `docs/05`, `docs/08`, `docs/12`, `docs/14`, `README.md`).
   4. Run `npm run verify` to achieve 0 TypeScript errors, passing test suites, and clean builds.
-- **Status:** `QUEUED`.
+- **Status:** `COMPLETED (2026-11-22)` — Added offline contract and dedup suites (`tests/scraper/kp-api.test.ts`, `tests/scraper/ajk-ppra.test.ts`, `tests/scraper/portal-contracts.test.ts`, `tests/unit/deduplicator.test.ts`), finished 19-portal audit across `docs/` and `scripts/`, and passed full `npm run verify`.
 
 ---
 
@@ -198,7 +198,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
 
 - **Item 7 (Direct Tests for Re-scan & Governance `ID-1`, `DL-3`, `DL-4`, `GOV-6`)**: Proven by dedicated test suites: `tests/scraper/rescan-pipeline.test.ts`, `tests/scraper/healer-rules.test.ts`, `tests/unit/referenceNo.test.ts`, and `tests/unit/trackMatcher.test.ts`.
 
-- **Item 8 (Automated Documentation Check `QA-4`)**: Proven by `tests/unit/docs-consistency.test.ts` verifying all file paths, canonical portal count (18), and table schemas.
+- **Item 8 (Automated Documentation Check `QA-4`)**: Proven by `tests/unit/docs-consistency.test.ts` verifying all file paths, canonical portal count (19), and table schemas.
 
 - **Item 9 (Measure Line Coverage `QA-2`)**: Measured baseline at 84.62% lines (82.84% statements, 81.67% functions, 73.59% branches) with per-submodule coverage exceeding 90% in repositories, deduplication, date parsing, and scrapers. Enforced via thresholds in `vitest.config.ts`.
 

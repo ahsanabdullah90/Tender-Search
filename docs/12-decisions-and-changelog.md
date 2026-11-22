@@ -115,6 +115,8 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Workstream G — Governance, Test Coverage & System Synchronization (November 22, 2026)**:
+  - Completed the final 19-portal synchronization audit across CLI scripts (`scripts/probe-portals.ts`, `scripts/seed-sample.ts`) and operational documentation (`docs/04-api-reference.md` Two-Phase Scan Execution note and 19-portal status payload, `docs/08-testing-and-coverage.md`, `docs/12-decisions-and-changelog.md`, `docs/14-active-backlog.md`), backed by hermetic offline contract and deduplication suites (`tests/scraper/kp-api.test.ts`, `tests/scraper/ajk-ppra.test.ts`, `tests/scraper/portal-contracts.test.ts`, `tests/unit/deduplicator.test.ts`) and full `npm run verify` gate.
 - **Workstream F — Domain Track Organization Watchlist (November 22, 2026)**:
   - Configured `track-priority-orgs` (*"Priority Education & Skills Organizations"*) in `./data/tender_tracker.db` targeting 21 priority education, PPP, and TVET authorities (`PEF`, `Punjab Education Foundation`, `PEIMA`, `Sindh Education Foundation`, `SEF`, `PSDF`, `NAVTTC`, `TEVTA`, `STEVTA`, `KPTEVTA`, `BTEVTA`, `KPITB`, `Elementary & Secondary Education`, `School Education Department`, `BEF`, `NCHD`, `FDE`, `MOFEPT`, `Ignite`, `PSEB`, `HEC`) with strict supply/purchase/civil/solar/gas/uniforms/vehicles/catering exclusions, backfilled its 384-D `all-MiniLM-L6-v2` embedding (`backfillModelEmbeddings`), re-scored live tenders (`44` $\rightarrow$ `46` `ready` Inbox opportunities, `0` demoted, `10` watchlist matches), and added unit coverage in `tests/unit/trackMatcher.test.ts`.
 - **Workstream E — Two-Phase Scan Execution & Anti-Duplication Protection (November 22, 2026)**:
