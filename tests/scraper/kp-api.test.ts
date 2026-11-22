@@ -8,6 +8,7 @@ import {
 } from '../../src/server/scrapers/kpApi.js';
 import { PORTAL_DEFINITIONS } from '../../src/server/scrapers/portalList.js';
 import { scrapePortal } from '../../src/server/scrapers/crawlerEngine.js';
+import { sslTolerantDispatcher } from '../../src/server/scrapers/baseScraper.js';
 import { db, initDatabase } from '../../src/server/db/index.js';
 
 describe('Khyber Pakhtunkhwa (kppra) Official JSON API scraper', () => {
@@ -211,7 +212,7 @@ describe('Khyber Pakhtunkhwa (kppra) Official JSON API scraper', () => {
     expect(singlePage.lastPage).toBe(20);
     expect(global.fetch).toHaveBeenCalledWith(
       `${KP_TENDERS_API_URL}?domain=&page=1&search=`,
-      expect.objectContaining({ method: 'GET' })
+      expect.objectContaining({ method: 'GET', dispatcher: sslTolerantDispatcher })
     );
 
     // Quick scan stops at quickMaxPages (8)

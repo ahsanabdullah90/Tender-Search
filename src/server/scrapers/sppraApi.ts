@@ -3,6 +3,7 @@ import { PortalDefinition } from './portalList.js';
 import { normalizeExtractedDate, formatClosingDate } from './dateParser.js';
 import { maxFileBytes } from '../services/ingestBudget.js';
 import { reportNetworkOutcome, PASSIVE_SLOW_DOC_MS } from '../services/networkMonitor.js';
+import { createSslTolerantDispatcher } from './baseScraper.js';
 
 export const SPPRA_API_BASE = 'https://apiprd.eprocure.gov.pk';
 export const SPPRA_LIST_URL = `${SPPRA_API_BASE}/websiteportal/publicportal/1.0.0/api/v1/publicportal/getallpublictenders`;
@@ -11,6 +12,133 @@ export const SPPRA_DOWNLOAD_URL = `${SPPRA_API_BASE}/documentmanagementsystem/dm
 export const SPPRA_PORTAL_ORIGIN = 'https://portalsindh.eprocure.gov.pk';
 export const SPPRA_OFFICE_ID = 31640;
 export const SPPRA_DEFAULT_PAGE_SIZE = 50;
+export const SPPRA_MAX_ATTEMPTS = 6;
+export const SPPRA_RETRY_DELAYS_MS = [100, 200, 400, 800, 1200] as const;
+
+let sppraDispatcher = createSslTolerantDispatcher();
+
+/**
+ * Returns the active Undici dispatcher pool used by SPPRA API requests.
+ */
+export function getSppraDispatcher() {
+  return sppraDispatcher;
+}
+
+function rotateSppraDispatcher(failedDispatcher: typeof sppraDispatcher): void {
+  if (sppraDispatcher !== failedDispatcher) return;
+  sppraDispatcher = createSslTolerantDispatcher();
+  void failedDispatcher.close().catch(() => {});
+}
+
+export interface SppraRetryOptions {
+  maxAttempts?: number;
+  retryDelaysMs?: readonly number[];
+}
+
+function isRetryableSppraStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal, abortMessage: string = 'Request aborted'): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error(abortMessage));
+  }
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error(abortMessage));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function fetchSppraJson<T = any>(
+  url: string,
+  payload: Record<string, unknown>,
+  formatHttpError: (status: number) => string,
+  opts?: SppraRetryOptions & { timeoutMs?: number; signal?: AbortSignal; abortMessage?: string }
+): Promise<T> {
+  const maxAttempts = Math.max(1, opts?.maxAttempts ?? SPPRA_MAX_ATTEMPTS);
+  const retryDelays = opts?.retryDelaysMs ?? SPPRA_RETRY_DELAYS_MS;
+  const timeoutMs = opts?.timeoutMs ?? 20000;
+  const abortMessage = opts?.abortMessage ?? 'Request aborted';
+
+  if (opts?.signal?.aborted) {
+    throw new Error(abortMessage);
+  }
+
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (opts?.signal?.aborted) {
+      throw new Error(abortMessage);
+    }
+
+    const attemptDispatcher = sppraDispatcher;
+    const controller = new AbortController();
+    const onParentAbort = () => controller.abort();
+    if (opts?.signal) {
+      opts.signal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: SPPRA_PUBLIC_HEADERS,
+        signal: controller.signal,
+        dispatcher: attemptDispatcher,
+        body: JSON.stringify(payload)
+      } as any);
+
+      if (!res.ok) {
+        // Drain error body so Undici recycles/closes the socket cleanly on transient WSO2 500s.
+        if (typeof (res as any).text === 'function') {
+          await (res as any).text().catch(() => '');
+        }
+        const err: any = new Error(formatHttpError(res.status));
+        err.statusCode = res.status;
+        lastError = err;
+
+        if (!isRetryableSppraStatus(res.status) || attempt >= maxAttempts || opts?.signal?.aborted) {
+          throw err;
+        }
+      } else {
+        return (await res.json()) as T;
+      }
+    } catch (err: any) {
+      if (opts?.signal?.aborted) {
+        throw new Error(abortMessage);
+      }
+      if (typeof err?.statusCode === 'number' && !isRetryableSppraStatus(err.statusCode)) {
+        throw err;
+      }
+      lastError = err;
+      if (attempt >= maxAttempts) {
+        throw err;
+      }
+    } finally {
+      clearTimeout(timer);
+      if (opts?.signal) {
+        opts.signal.removeEventListener('abort', onParentAbort);
+      }
+    }
+
+    rotateSppraDispatcher(attemptDispatcher);
+    const delayIdx = Math.min(attempt - 1, Math.max(0, retryDelays.length - 1));
+    const delayMs = retryDelays.length > 0 ? retryDelays[delayIdx] : 0;
+    await sleepWithAbort(delayMs, opts?.signal, abortMessage);
+  }
+
+  throw lastError;
+}
 
 export const SPPRA_PUBLIC_HEADERS: Record<string, string> = {
   accept: 'application/json, text/plain, */*',
@@ -217,52 +345,43 @@ export function mapSppraRecordToScrapedTender(record: SppraTenderRecord): RawScr
 export async function fetchSppraTendersPage(
   pageNumber: number = 1,
   pageSize: number = SPPRA_DEFAULT_PAGE_SIZE,
-  timeoutMs: number = 20000
+  timeoutMs: number = 20000,
+  retryOptions?: SppraRetryOptions
 ): Promise<{ totalRecords: number; records: SppraTenderRecord[] }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(SPPRA_LIST_URL, {
-      method: 'POST',
-      headers: SPPRA_PUBLIC_HEADERS,
-      signal: controller.signal,
-      body: JSON.stringify({
-        pagination: {
-          pageNumber: String(pageNumber),
-          pageSize: String(pageSize),
-          orderBy: '',
-          orderByColumnName: '',
-          approvalStatusID: 0,
-          refTypeID: 0
-        },
-        filter: {
-          sortOrder: '',
-          activityStatus: null,
-          keywords: '',
-          tenderNo: '',
-          departmentName: null,
-          dateOfAdvertisement: null,
-          closingDate: null,
-          selectedWorth: null
-        },
-        loggedInUserID: 1,
-        loggedInUserOfficeID: SPPRA_OFFICE_ID
-      })
-    });
-
-    if (!res.ok) {
-      const err: any = new Error(`SPPRA API HTTP ${res.status} on page ${pageNumber}`);
-      err.statusCode = res.status;
-      throw err;
+  const json = await fetchSppraJson(
+    SPPRA_LIST_URL,
+    {
+      pagination: {
+        pageNumber: String(pageNumber),
+        pageSize: String(pageSize),
+        orderBy: '',
+        orderByColumnName: '',
+        approvalStatusID: 0,
+        refTypeID: 0
+      },
+      filter: {
+        sortOrder: '',
+        activityStatus: null,
+        keywords: '',
+        tenderNo: '',
+        departmentName: null,
+        dateOfAdvertisement: null,
+        closingDate: null,
+        selectedWorth: null
+      },
+      loggedInUserID: 1,
+      loggedInUserOfficeID: SPPRA_OFFICE_ID
+    },
+    (status) => `SPPRA API HTTP ${status} on page ${pageNumber}`,
+    {
+      timeoutMs,
+      maxAttempts: retryOptions?.maxAttempts,
+      retryDelaysMs: retryOptions?.retryDelaysMs
     }
-
-    const json: any = await res.json();
-    const records: SppraTenderRecord[] = Array.isArray(json?.data?.records) ? json.data.records : [];
-    const totalRecords = Number(json?.data?.totalRecords ?? records.length) || records.length;
-    return { totalRecords, records };
-  } finally {
-    clearTimeout(timer);
-  }
+  );
+  const records: SppraTenderRecord[] = Array.isArray(json?.data?.records) ? json.data.records : [];
+  const totalRecords = Number(json?.data?.totalRecords ?? records.length) || records.length;
+  return { totalRecords, records };
 }
 
 /**
@@ -275,6 +394,8 @@ export async function scrapeSppraPortal(
     depth?: 'quick' | 'deep';
     knownMap?: Map<string, { closing_date?: string | null; title?: string | null }> | null;
     timeoutMs?: number;
+    maxAttempts?: number;
+    retryDelaysMs?: readonly number[];
   }
 ): Promise<ScrapeResult> {
   const depth = options?.depth === 'deep' ? 'deep' : 'quick';
@@ -289,7 +410,20 @@ export async function scrapeSppraPortal(
   let pagesScanned = 0;
 
   for (let page = 1; page <= maxPages; page++) {
-    const { records } = await fetchSppraTendersPage(page, SPPRA_DEFAULT_PAGE_SIZE, options?.timeoutMs ?? 20000);
+    let records: SppraTenderRecord[];
+    try {
+      const pageData = await fetchSppraTendersPage(page, SPPRA_DEFAULT_PAGE_SIZE, options?.timeoutMs ?? 20000, {
+        maxAttempts: options?.maxAttempts,
+        retryDelaysMs: options?.retryDelaysMs
+      });
+      records = pageData.records;
+    } catch (err: any) {
+      if (pagesScanned > 0) {
+        console.warn(`[SPPRA] Stopping pagination on page ${page} after collecting ${allItems.length} item(s): ${err?.message || err}`);
+        break;
+      }
+      throw err;
+    }
     pagesScanned++;
     if (records.length === 0) break;
 
@@ -334,50 +468,43 @@ export async function scrapeSppraPortal(
  */
 export async function fetchSppraPublishedDocuments(
   publishedDocumentId: number,
-  timeoutMs: number = 15000
+  timeoutMs: number = 15000,
+  retryOptions?: SppraRetryOptions
 ): Promise<string[]> {
   if (!Number.isFinite(publishedDocumentId) || publishedDocumentId <= 0) return [];
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(SPPRA_DOCS_URL, {
-      method: 'POST',
-      headers: SPPRA_PUBLIC_HEADERS,
-      signal: controller.signal,
-      body: JSON.stringify({
-        Id: publishedDocumentId,
-        loggedInUserID: 1,
-        loggedInUserOfficeID: 1
-      })
-    });
-    if (!res.ok) {
-      const err: any = new Error(`SPPRA published docs HTTP ${res.status} for pdid=${publishedDocumentId}`);
-      err.statusCode = res.status;
-      throw err;
+  const json = await fetchSppraJson(
+    SPPRA_DOCS_URL,
+    {
+      Id: publishedDocumentId,
+      loggedInUserID: 1,
+      loggedInUserOfficeID: 1
+    },
+    (status) => `SPPRA published docs HTTP ${status} for pdid=${publishedDocumentId}`,
+    {
+      timeoutMs,
+      maxAttempts: retryOptions?.maxAttempts,
+      retryDelaysMs: retryOptions?.retryDelaysMs
     }
-    const json: any = await res.json();
-    const list: SppraPublishedDocRecord[] = Array.isArray(json?.data) ? json.data : [];
-    const urls: string[] = [];
-    const seen = new Set<string>();
-    for (const item of list) {
-      const fileId = Number(item.dmS_FileID);
-      const guid = (item.dmS_FileGUID || '').trim();
-      if (!Number.isFinite(fileId) || fileId <= 0 || !guid) continue;
-      const isCorr = item.isCorrigendum === 1 || item.isCorrigendum === true;
-      const rawLabel = (item.displayName || item.documentTemplateName || '').trim();
-      const label = isCorr
-        ? (rawLabel && /corrigendum/i.test(rawLabel) ? rawLabel : 'Corrigendum')
-        : (rawLabel || 'Standard Bidding Document');
-      const u = buildSppraDownloadUrl(fileId, guid, label);
-      if (!seen.has(u)) {
-        seen.add(u);
-        urls.push(u);
-      }
+  );
+  const list: SppraPublishedDocRecord[] = Array.isArray(json?.data) ? json.data : [];
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const fileId = Number(item.dmS_FileID);
+    const guid = (item.dmS_FileGUID || '').trim();
+    if (!Number.isFinite(fileId) || fileId <= 0 || !guid) continue;
+    const isCorr = item.isCorrigendum === 1 || item.isCorrigendum === true;
+    const rawLabel = (item.displayName || item.documentTemplateName || '').trim();
+    const label = isCorr
+      ? (rawLabel && /corrigendum/i.test(rawLabel) ? rawLabel : 'Corrigendum')
+      : (rawLabel || 'Standard Bidding Document');
+    const u = buildSppraDownloadUrl(fileId, guid, label);
+    if (!seen.has(u)) {
+      seen.add(u);
+      urls.push(u);
     }
-    return urls;
-  } finally {
-    clearTimeout(timer);
   }
+  return urls;
 }
 
 /**
@@ -387,7 +514,13 @@ export async function fetchSppraPublishedDocuments(
  */
 export async function downloadSppraFileBuffer(
   rawUrl: string,
-  options?: { signal?: AbortSignal; maxBytes?: number; timeoutMs?: number }
+  options?: {
+    signal?: AbortSignal;
+    maxBytes?: number;
+    timeoutMs?: number;
+    maxAttempts?: number;
+    retryDelaysMs?: readonly number[];
+  }
 ): Promise<Buffer> {
   const params = parseSppraDownloadUrl(rawUrl);
   if (!params) {
@@ -399,60 +532,46 @@ export async function downloadSppraFileBuffer(
 
   const timeoutMs = options?.timeoutMs ?? 45000;
   const limitBytes = options?.maxBytes ?? maxFileBytes();
-  const controller = new AbortController();
-  const onParentAbort = () => controller.abort();
-  if (options?.signal) {
-    options.signal.addEventListener('abort', onParentAbort, { once: true });
-  }
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
 
-  try {
-    const res = await fetch(SPPRA_DOWNLOAD_URL, {
-      method: 'POST',
-      headers: SPPRA_PUBLIC_HEADERS,
-      signal: controller.signal,
-      body: JSON.stringify({
-        loggedInUserOfficeID: SPPRA_OFFICE_ID,
-        loggedInUserID: 1,
-        ID: params.fileId,
-        idsList: params.guid
-      })
-    });
-
-    if (!res.ok) {
-      const err: any = new Error(`SPPRA file download HTTP ${res.status}`);
-      err.statusCode = res.status;
-      throw err;
+  const json = await fetchSppraJson(
+    SPPRA_DOWNLOAD_URL,
+    {
+      loggedInUserOfficeID: SPPRA_OFFICE_ID,
+      loggedInUserID: 1,
+      ID: params.fileId,
+      idsList: params.guid
+    },
+    (status) => `SPPRA file download HTTP ${status}`,
+    {
+      timeoutMs,
+      signal: options?.signal,
+      maxAttempts: options?.maxAttempts,
+      retryDelaysMs: options?.retryDelaysMs,
+      abortMessage: 'File download aborted'
     }
+  );
 
-    const json: any = await res.json();
-    const base64Bytes = json?.data?.bytes;
-    if (typeof base64Bytes !== 'string' || base64Bytes.length < 16) {
-      throw new Error(`SPPRA DMS returned empty file payload for file ID ${params.fileId}`);
-    }
-
-    const buf = Buffer.from(base64Bytes, 'base64');
-    if (buf.length > limitBytes) {
-      throw new Error(`File too large (${(buf.length / 1024 / 1024).toFixed(1)} MB)`);
-    }
-
-    reportNetworkOutcome('apiprd.eprocure.gov.pk', true, {
-      durationMs: Date.now() - startedAt,
-      slowThresholdMs: PASSIVE_SLOW_DOC_MS
-    });
-
-    const contentType = (json?.data?.contentType || 'application/pdf').trim();
-    const fileName = (json?.data?.fileName || '').trim();
-    (buf as any).contentType = contentType;
-    if (fileName) {
-      (buf as any).contentDisposition = `attachment; filename="${fileName.replace(/"/g, '')}"`;
-    }
-    return buf;
-  } finally {
-    clearTimeout(timer);
-    if (options?.signal) {
-      options.signal.removeEventListener('abort', onParentAbort);
-    }
+  const base64Bytes = json?.data?.bytes;
+  if (typeof base64Bytes !== 'string' || base64Bytes.length < 16) {
+    throw new Error(`SPPRA DMS returned empty file payload for file ID ${params.fileId}`);
   }
+
+  const buf = Buffer.from(base64Bytes, 'base64');
+  if (buf.length > limitBytes) {
+    throw new Error(`File too large (${(buf.length / 1024 / 1024).toFixed(1)} MB)`);
+  }
+
+  reportNetworkOutcome('apiprd.eprocure.gov.pk', true, {
+    durationMs: Date.now() - startedAt,
+    slowThresholdMs: PASSIVE_SLOW_DOC_MS
+  });
+
+  const contentType = (json?.data?.contentType || 'application/pdf').trim();
+  const fileName = (json?.data?.fileName || '').trim();
+  (buf as any).contentType = contentType;
+  if (fileName) {
+    (buf as any).contentDisposition = `attachment; filename="${fileName.replace(/"/g, '')}"`;
+  }
+  return buf;
 }

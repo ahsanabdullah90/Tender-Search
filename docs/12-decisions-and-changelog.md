@@ -115,6 +115,9 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Sindh SPPRA TLS-Tolerant Fetch Dispatchers & Bounded 5xx Pool Rotation (November 22, 2026)**:
+  - Exported `createSslTolerantDispatcher()` and singleton `sslTolerantDispatcher` (`UndiciAgent({ connect: { rejectUnauthorized: false } })`) in `src/server/scrapers/baseScraper.ts` and wired them into `src/server/scrapers/portalAuth.ts`, `src/server/scrapers/kpApi.ts`, and `src/server/scrapers/sppraApi.ts` so native `fetch()` API connectors tolerate expired or self-signed `.gov.pk` certificates consistently.
+  - Added `fetchSppraJson` and `getSppraDispatcher` in `src/server/scrapers/sppraApi.ts` with keep-alive socket draining on error responses, up to 6 retry attempts (`[100, 200, 400, 800, 1200]` ms backoff) rotating to a fresh Undici dispatcher on transient `429`/`5xx` WSO2 `900900 peer not authenticated` failures to break sticky TCP node affinity (rejecting `4xx` and caller aborts immediately without rotation), and partial-page preservation on page 2+ pagination failures, backed by tests in `tests/unit/base-scraper.test.ts`, `tests/scraper/kp-api.test.ts`, and `tests/unit/sppra-api.test.ts`.
 - **Workstream G — Governance, Test Coverage & System Synchronization (November 22, 2026)**:
   - Completed the final 19-portal synchronization audit across CLI scripts (`scripts/probe-portals.ts`, `scripts/seed-sample.ts`) and operational documentation (`docs/04-api-reference.md` Two-Phase Scan Execution note and 19-portal status payload, `docs/08-testing-and-coverage.md`, `docs/12-decisions-and-changelog.md`, `docs/14-active-backlog.md`), backed by hermetic offline contract and deduplication suites (`tests/scraper/kp-api.test.ts`, `tests/scraper/ajk-ppra.test.ts`, `tests/scraper/portal-contracts.test.ts`, `tests/unit/deduplicator.test.ts`) and full `npm run verify` gate.
 - **Workstream F — Domain Track Organization Watchlist (November 22, 2026)**:

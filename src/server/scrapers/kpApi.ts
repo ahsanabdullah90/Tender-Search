@@ -3,6 +3,7 @@ import { PortalDefinition } from './portalList.js';
 import { parseDateString, formatClosingDate } from './dateParser.js';
 import { isValidReferenceNo } from '../services/referenceNo.js';
 import { reportNetworkOutcome, PASSIVE_SLOW_HTML_MS } from '../services/networkMonitor.js';
+import { sslTolerantDispatcher } from './baseScraper.js';
 
 export const KP_API_BASE = 'https://mgn1.kp.gov.pk';
 export const KP_TENDERS_API_URL = `${KP_API_BASE}/api/tenders`;
@@ -290,8 +291,9 @@ export async function fetchKpTendersPage(
     const res = await fetch(url, {
       method: 'GET',
       headers: KP_API_HEADERS,
-      signal: controller.signal
-    });
+      signal: controller.signal,
+      dispatcher: sslTolerantDispatcher
+    } as any);
 
     if (!res.ok) {
       const err: any = new Error(`KP API HTTP ${res.status} on page ${pageNumber}`);

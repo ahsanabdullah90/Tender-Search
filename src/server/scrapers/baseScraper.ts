@@ -1,4 +1,5 @@
 import https from 'https';
+import { Agent as UndiciAgent } from 'undici';
 
 /**
  * Generates a randomized human-like reading pause between 4.0s and 8.5s
@@ -33,6 +34,22 @@ export const legacySslTolerantAgent = new https.Agent({
   keepAlive: false,
   timeout: 90000
 });
+
+/**
+ * Creates a fresh Undici dispatcher for native fetch()-based API scrapers,
+ * tolerating self-signed or expired public procurement TLS certificates while keeping
+ * keep-alive pooling enabled.
+ */
+export function createSslTolerantDispatcher(): UndiciAgent {
+  return new UndiciAgent({
+    connect: { rejectUnauthorized: false }
+  });
+}
+
+/**
+ * Shared Undici dispatcher singleton for native fetch()-based API scrapers and portal auth.
+ */
+export const sslTolerantDispatcher = createSslTolerantDispatcher();
 
 /**
  * Returns true when an HTTPS error indicates a TLS handshake or record-layer cipher mismatch

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, LEGACY_TLS_CIPHERS, isTlsFallbackError, HUMAN_CHROME_HEADERS } from '../../src/server/scrapers/baseScraper.js';
+import { getHumanJitterDelay, sleep, sslTolerantAgent, legacySslTolerantAgent, sslTolerantDispatcher, createSslTolerantDispatcher, LEGACY_TLS_CIPHERS, isTlsFallbackError, HUMAN_CHROME_HEADERS } from '../../src/server/scrapers/baseScraper.js';
 
 describe('baseScraper utility module', () => {
   afterEach(() => {
@@ -60,6 +60,18 @@ describe('baseScraper utility module', () => {
       expect(LEGACY_TLS_CIPHERS).toContain('!ECDHE-RSA-AES256-SHA384');
       expect(LEGACY_TLS_CIPHERS).toContain('!ECDHE-RSA-AES256-GCM-SHA384');
       expect((legacySslTolerantAgent as any).options.minVersion).toBe('TLSv1');
+
+      expect(sslTolerantDispatcher).toBeDefined();
+      expect(typeof (sslTolerantDispatcher as any).dispatch).toBe('function');
+
+      const d1 = createSslTolerantDispatcher();
+      const d2 = createSslTolerantDispatcher();
+      expect(d1).not.toBe(d2);
+      expect(d1).not.toBe(sslTolerantDispatcher);
+      expect(typeof (d1 as any).dispatch).toBe('function');
+      expect(typeof (d1 as any).close).toBe('function');
+      void d1.close();
+      void d2.close();
     });
   });
 

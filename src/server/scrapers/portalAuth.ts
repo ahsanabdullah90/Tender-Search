@@ -1,5 +1,4 @@
-import { Agent as UndiciAgent } from 'undici';
-const sslTolerantDispatcher = new UndiciAgent({ connect: { rejectUnauthorized: false } });
+import { sslTolerantDispatcher } from './baseScraper.js';
 import fs from 'fs';
 import path from 'path';
 import { updatePortalHealth, SESSIONS_DIR } from '../db/index.js';

@@ -5,9 +5,13 @@ import {
   isSppraDownloadUrl,
   extractSppraPublishedDocId,
   mapSppraRecordToScrapedTender,
+  fetchSppraTendersPage,
   scrapeSppraPortal,
   fetchSppraPublishedDocuments,
   downloadSppraFileBuffer,
+  getSppraDispatcher,
+  SPPRA_LIST_URL,
+  SPPRA_DOCS_URL,
   SPPRA_DOWNLOAD_URL
 } from '../../src/server/scrapers/sppraApi.js';
 import { deriveDossierLabel } from '../../src/server/services/dossierManager.js';
@@ -248,5 +252,214 @@ describe('Sindh SPPRA EPADS API module', () => {
       fetchHtmlSpy.mockRestore();
       fetchBufSpy.mockRestore();
     }
+  });
+
+  it('passes active TLS-tolerant dispatcher across list, published docs, and DMS download calls', async () => {
+    const samplePdf = Buffer.from('%PDF-1.6\nSPPRA TLS Dispatcher Test\n%%EOF', 'utf8');
+    const expectedDispatcher = getSppraDispatcher();
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === SPPRA_LIST_URL) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { totalRecords: 0, records: [] } })
+        };
+      }
+      if (url === SPPRA_DOCS_URL) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [] })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            fileName: 'nit.pdf',
+            contentType: 'application/pdf',
+            bytes: samplePdf.toString('base64')
+          }
+        })
+      };
+    });
+    global.fetch = fetchMock as any;
+
+    await fetchSppraTendersPage(1, 50, 5000, { retryDelaysMs: [0] });
+    await fetchSppraPublishedDocuments(717150, 5000, { retryDelaysMs: [0] });
+    await downloadSppraFileBuffer(buildSppraDownloadUrl(101, 'guid-tls', 'Tender Notice'), {
+      retryDelaysMs: [0]
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init.dispatcher).toBe(expectedDispatcher);
+    }
+  });
+
+  it('rotates dispatcher on transient HTTP 500 WSO2 auth failures, drains error bodies, and rejects 4xx without rotating', async () => {
+    let attempts = 0;
+    const drainText = vi.fn().mockResolvedValue('{"code":"900900","message":"Unclassified Authentication Failure","description":"peer not authenticated"}');
+    const retryMock = vi.fn().mockImplementation(async () => {
+      attempts++;
+      if (attempts <= 3) {
+        return {
+          ok: false,
+          status: 500,
+          text: drainText
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            totalRecords: 1,
+            records: [
+              {
+                publishedDocumentID: 717150,
+                name: 'Procurement of Lab Equipment for University of Sindh',
+                tenderNumbers: 'EPADS-S-26119999999',
+                departmentName: 'University of Sindh',
+                statusName: 'In-Progress',
+                lastSubmissionDate: '2026-12-28T11:30:00'
+              }
+            ]
+          }
+        })
+      };
+    });
+    global.fetch = retryMock as any;
+
+    const spPortal = PORTAL_DEFINITIONS.find(p => p.id === 'sppra')!;
+    const res = await scrapeSppraPortal(
+      { ...spPortal, pagination: { kind: 'api', maxPages: 1, quickMaxPages: 1, deepMaxPages: 1 } },
+      { depth: 'quick', maxAttempts: 6, retryDelaysMs: [0, 0, 0, 0, 0] }
+    );
+    expect(retryMock).toHaveBeenCalledTimes(4);
+    expect(drainText).toHaveBeenCalledTimes(3);
+    const seenDispatchers = retryMock.mock.calls.map(([, init]) => init.dispatcher);
+    expect(new Set(seenDispatchers).size).toBe(4);
+    expect(getSppraDispatcher()).toBe(seenDispatchers[3]);
+    expect(res.pagesScanned).toBe(1);
+    expect(res.items).toHaveLength(1);
+
+    const before400Dispatcher = getSppraDispatcher();
+    const clientErrorMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: vi.fn().mockResolvedValue('Bad Request')
+    });
+    global.fetch = clientErrorMock as any;
+
+    await expect(
+      fetchSppraTendersPage(1, 50, 5000, { maxAttempts: 6, retryDelaysMs: [0] })
+    ).rejects.toThrow('SPPRA API HTTP 400 on page 1');
+    expect(clientErrorMock).toHaveBeenCalledTimes(1);
+    expect(getSppraDispatcher()).toBe(before400Dispatcher);
+  });
+
+  it('preserves already-scraped pages if page 2 exhausts retries, but throws when page 1 fails', async () => {
+    const spPortal = PORTAL_DEFINITIONS.find(p => p.id === 'sppra')!;
+    const makeRec = (n: number) => ({
+      publishedDocumentID: 710000 + n,
+      name: `Sindh Water Supply Scheme Package ${n}`,
+      tenderNumbers: `EPADS-S-2611100${n}`,
+      departmentName: 'Public Health Engineering Dept',
+      statusName: 'In-Progress',
+      lastSubmissionDate: '2026-12-30T11:00:00'
+    });
+
+    const partialMock = vi.fn().mockImplementation(async (_url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      const page = Number(body.pagination.pageNumber);
+      if (page === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              totalRecords: 100,
+              records: Array.from({ length: 50 }, (_, i) => makeRec(i + 1))
+            }
+          })
+        };
+      }
+      return {
+        ok: false,
+        status: 500,
+        text: async () => '{"code":"900900"}'
+      };
+    });
+    global.fetch = partialMock as any;
+
+    const partialRes = await scrapeSppraPortal(
+      { ...spPortal, pagination: { kind: 'api', maxPages: 2, quickMaxPages: 2, deepMaxPages: 2 } },
+      { depth: 'quick', maxAttempts: 3, retryDelaysMs: [0, 0] }
+    );
+    expect(partialRes.pagesScanned).toBe(1);
+    expect(partialRes.items).toHaveLength(50);
+    // 1 call for page 1 + 3 retry attempts for page 2
+    expect(partialMock).toHaveBeenCalledTimes(4);
+
+    const page1FailMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => '{"code":"900900"}'
+    });
+    global.fetch = page1FailMock as any;
+
+    await expect(
+      scrapeSppraPortal(
+        { ...spPortal, pagination: { kind: 'api', maxPages: 2, quickMaxPages: 2, deepMaxPages: 2 } },
+        { depth: 'quick', maxAttempts: 3, retryDelaysMs: [0, 0] }
+      )
+    ).rejects.toThrow('SPPRA API HTTP 500 on page 1');
+    expect(page1FailMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries transient HTTP 500 on downloadSppraFileBuffer and stops immediately on abort', async () => {
+    const samplePdf = Buffer.from('%PDF-1.6\nRetry Download Success\n%%EOF', 'utf8');
+    let dlCalls = 0;
+    const dlMock = vi.fn().mockImplementation(async () => {
+      dlCalls++;
+      if (dlCalls < 3) {
+        return {
+          ok: false,
+          status: 500,
+          text: async () => '{"code":"900900"}'
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            fileName: 'RetryDoc.pdf',
+            contentType: 'application/pdf',
+            bytes: samplePdf.toString('base64')
+          }
+        })
+      };
+    });
+    global.fetch = dlMock as any;
+
+    const url = buildSppraDownloadUrl(555, 'guid-retry', 'Tender Notice');
+    const buf = await downloadSppraFileBuffer(url, { maxAttempts: 5, retryDelaysMs: [0, 0] });
+    expect(dlMock).toHaveBeenCalledTimes(3);
+    expect(buf.toString('utf8')).toContain('Retry Download Success');
+
+    const controller = new AbortController();
+    const abortFetchMock = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException('The operation was aborted', 'AbortError');
+    });
+    global.fetch = abortFetchMock as any;
+
+    await expect(
+      downloadSppraFileBuffer(url, { signal: controller.signal, maxAttempts: 5, retryDelaysMs: [100] })
+    ).rejects.toThrow('File download aborted');
+    expect(abortFetchMock).toHaveBeenCalledTimes(1);
   });
 });
