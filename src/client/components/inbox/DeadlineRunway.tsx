@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { Calendar, X } from 'lucide-react';
 import { Tender } from '../../../shared/types';
+import { getPktDateKey } from '../../../shared/pktDate';
 
 interface DeadlineRunwayProps {
   tenders: Tender[];
@@ -21,27 +22,32 @@ interface DayBucket {
 
 export function DeadlineRunway({ tenders, selectedDate, onSelectDate }: DeadlineRunwayProps) {
   const runwayDays = useMemo(() => {
-    const now = new Date();
+    const nowMs = Date.now();
+    const todayPktKey = getPktDateKey(nowMs);
+    const [yearNum, monthNum, dayNum] = todayPktKey.split('-').map(Number);
     const days: DayBucket[] = [];
 
     for (let i = 0; i < 15; i++) {
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      const dateStr = `${year}-${month}-${day}`;
+      // Anchor at UTC noon of the PKT date so formatting with Asia/Karachi never shifts calendar day.
+      const noonMs = Date.UTC(yearNum, monthNum - 1, dayNum + i, 12, 0, 0);
+      const dateStr = getPktDateKey(noonMs);
+      const d = new Date(noonMs);
 
       let dayLabel = '';
       if (i === 0) dayLabel = 'Today';
       else if (i === 1) dayLabel = 'Tomorrow';
       else {
-        dayLabel = d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
+        dayLabel = d.toLocaleDateString('en-US', {
+          weekday: 'short',
+          day: 'numeric',
+          timeZone: 'Asia/Karachi'
+        });
       }
 
       days.push({
         dateStr,
         dayLabel,
-        dayNum: String(d.getDate()),
+        dayNum: dateStr.slice(8, 10).replace(/^0/, ''),
         isToday: i === 0,
         tenders: [],
         urgentCount: 0,
@@ -50,12 +56,11 @@ export function DeadlineRunway({ tenders, selectedDate, onSelectDate }: Deadline
       });
     }
 
-    // Populate tenders into buckets
-    const nowMs = Date.now();
+    // Populate tenders into PKT calendar-day buckets
     for (const tender of tenders) {
       if (!tender.closing_date) continue;
-      // Extract YYYY-MM-DD
-      const tenderDateStr = tender.closing_date.slice(0, 10);
+      const tenderDateStr = getPktDateKey(tender.closing_date);
+      if (!tenderDateStr) continue;
       const bucket = days.find(b => b.dateStr === tenderDateStr);
       if (bucket) {
         bucket.tenders.push(tender);

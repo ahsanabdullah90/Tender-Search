@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { asyncHandler } from './routeUtils.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -126,11 +127,11 @@ systemRouter.get('/export/csv', (req, res) => {
 // 3. Backups & Storage
 systemRouter.get('/backups', (_req, res) => res.json(listBackups()));
 
-systemRouter.post('/backups', async (_req, res) => {
+systemRouter.post('/backups', asyncHandler(async (_req, res) => {
   const backup = await backupNow();
   if (!backup) return res.status(500).json({ error: 'Backup failed' });
   res.json(backup);
-});
+}));
 
 systemRouter.get('/storage', (_req, res) => {
   const key = getGeminiApiKey();
@@ -204,7 +205,7 @@ systemRouter.post('/ai/config', (req, res) => {
   });
 });
 
-systemRouter.post('/ai/extract-file', async (req, res) => {
+systemRouter.post('/ai/extract-file', asyncHandler(async (req, res) => {
   const { base64Data, dataBase64, mimeType } = req.body || {};
   const rawBase64 = base64Data || dataBase64;
   if (!rawBase64) {
@@ -220,7 +221,7 @@ systemRouter.post('/ai/extract-file', async (req, res) => {
     return res.status(422).json({ error: 'Could not extract structured tender information from this file.' });
   }
   res.json({ success: true, extracted });
-});
+}));
 
 // 5. Local Hybrid Embedding Engine Status
 systemRouter.get('/system/embedding-status', (_req, res) => {
@@ -364,10 +365,10 @@ systemRouter.post('/system/shutdown', (req, res) => {
 });
 
 // 10. Network Connectivity Health Diagnostics
-systemRouter.get('/system/network', async (_req, res) => {
+systemRouter.get('/system/network', asyncHandler(async (_req, res) => {
   res.json(await checkNetworkHealth());
-});
+}));
 
-systemRouter.post('/system/network/check', async (_req, res) => {
+systemRouter.post('/system/network/check', asyncHandler(async (_req, res) => {
   res.json(await checkNetworkHealth({ force: true }));
-});
+}));

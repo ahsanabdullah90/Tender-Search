@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Archive, ExternalLink, Paperclip, RotateCw, TriangleAlert } from 'lucide-react';
 import { Tender, CorrigendumLog, OpportunityStatus, DocumentQueueStatus } from '../../shared/types';
 import { Button, Chip, DeadlineChip, EmptyState, Panel, SlideOver, Tabs } from '../ui';
@@ -17,6 +17,7 @@ interface PipelineScreenProps {
   onToggleBookmark: (tenderId: string) => void;
   onSetResultDate: (tenderId: string, date: string | null) => void;
   onTenderUpdated?: (tender: Tender) => void;
+  onTenderDeleted?: (tenderId: string) => void;
   focusId?: string | null;
 }
 
@@ -125,6 +126,54 @@ function Board({ tenders, docQueue, onOpen }: { tenders: Tender[]; docQueue?: Do
   );
 }
 
+const formatAxisLabel = (ms: number) =>
+  new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+
+interface GanttRowProps {
+  tender: Tender;
+  onOpen: (t: Tender) => void;
+  pct: (ms: number) => number;
+  inAxis: (ms: number) => boolean;
+}
+
+function GanttRow({ tender: t, onOpen, pct, inAxis }: GanttRowProps) {
+  const stage = stageOf(t.pipeline_status)!;
+  const from = new Date(t.publish_date || t.created_at).getTime();
+  const resultAt = t.result_expected_date ? new Date(t.result_expected_date).getTime() : null;
+  const closeAt = t.closing_date ? new Date(t.closing_date).getTime() : null;
+  return (
+    <div className="grid grid-cols-[240px_1fr] items-center border-b border-line last:border-b-0">
+      <button onClick={() => onOpen(t)} className="cursor-pointer px-4 py-3 text-left hover:bg-surface-2">
+        <div className="truncate text-sm font-semibold">{t.title}</div>
+        <div className="mt-0.5 flex items-center gap-2 text-xs text-ink-muted">
+          <span className={`h-2 w-2 rounded-full ${stage.bar}`} />
+          {stage.label}
+        </div>
+      </button>
+      <div className="relative h-12 border-l border-line">
+        {resultAt !== null && !Number.isNaN(resultAt) && resultAt >= from ? (
+          <div
+            className={`absolute top-1/2 h-3 -translate-y-1/2 rounded-full ${stage.bar} opacity-80`}
+            style={{ left: `${pct(from)}%`, width: `${Math.max(1, pct(resultAt) - pct(from))}%` }}
+            title={`${formatAxisLabel(from)} to ${formatAxisLabel(resultAt)}`}
+          />
+        ) : (
+          t.pipeline_status !== 'Won' && (
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-ink-muted">Result date not set</span>
+          )
+        )}
+        {closeAt !== null && inAxis(closeAt) && (
+          <span
+            className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rotate-45 border-2 border-surface bg-danger"
+            style={{ left: `${pct(closeAt)}%` }}
+            title={`Closes ${formatAxisLabel(closeAt)}`}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Gantt({ tenders, onOpen }: { tenders: Tender[]; onOpen: (t: Tender) => void }) {
   // Five weeks, starting on the Monday of the current week.
   const { start, weeks } = useMemo(() => {
@@ -142,46 +191,6 @@ function Gantt({ tenders, onOpen }: { tenders: Tender[]; onOpen: (t: Tender) => 
   const dated = active.filter(t => t.closing_date).sort((a, b) => new Date(a.closing_date!).getTime() - new Date(b.closing_date!).getTime());
   const undated = active.filter(t => !t.closing_date);
 
-  const label = (ms: number) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-
-  const Row = ({ t }: { t: Tender }) => {
-    const stage = stageOf(t.pipeline_status)!;
-    const from = new Date(t.publish_date || t.created_at).getTime();
-    const resultAt = t.result_expected_date ? new Date(t.result_expected_date).getTime() : null;
-    const closeAt = t.closing_date ? new Date(t.closing_date).getTime() : null;
-    return (
-      <div className="grid grid-cols-[240px_1fr] items-center border-b border-line last:border-b-0">
-        <button onClick={() => onOpen(t)} className="cursor-pointer px-4 py-3 text-left hover:bg-surface-2">
-          <div className="truncate text-sm font-semibold">{t.title}</div>
-          <div className="mt-0.5 flex items-center gap-2 text-xs text-ink-muted">
-            <span className={`h-2 w-2 rounded-full ${stage.bar}`} />
-            {stage.label}
-          </div>
-        </button>
-        <div className="relative h-12 border-l border-line">
-          {resultAt !== null && !Number.isNaN(resultAt) && resultAt >= from ? (
-            <div
-              className={`absolute top-1/2 h-3 -translate-y-1/2 rounded-full ${stage.bar} opacity-80`}
-              style={{ left: `${pct(from)}%`, width: `${Math.max(1, pct(resultAt) - pct(from))}%` }}
-              title={`${label(from)} to ${label(resultAt)}`}
-            />
-          ) : (
-            t.pipeline_status !== 'Won' && (
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-ink-muted">Result date not set</span>
-            )
-          )}
-          {closeAt !== null && inAxis(closeAt) && (
-            <span
-              className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rotate-45 border-2 border-surface bg-danger"
-              style={{ left: `${pct(closeAt)}%` }}
-              title={`Closes ${label(closeAt)}`}
-            />
-          )}
-        </div>
-      </div>
-    );
-  };
-
   if (active.length === 0) {
     return <Panel><EmptyState title="Nothing to chart yet" body="Tenders you track from the Inbox will show up here." /></Panel>;
   }
@@ -193,7 +202,7 @@ function Gantt({ tenders, onOpen }: { tenders: Tender[]; onOpen: (t: Tender) => 
         <div className="relative h-8">
           {Array.from({ length: weeks }, (_, i) => (
             <span key={i} className="absolute top-2 -translate-x-0 pl-2" style={{ left: `${(i / weeks) * 100}%` }}>
-              {label(start + i * 7 * DAY)}
+              {formatAxisLabel(start + i * 7 * DAY)}
             </span>
           ))}
         </div>
@@ -205,11 +214,11 @@ function Gantt({ tenders, onOpen }: { tenders: Tender[]; onOpen: (t: Tender) => 
             <span className="absolute -top-0 left-1 rounded bg-accent px-1 text-[11px] font-semibold text-accent-ink">Today</span>
           </div>
         </div>
-        {dated.map(t => <Row key={t.id} t={t} />)}
+        {dated.map(t => <GanttRow key={t.id} tender={t} onOpen={onOpen} pct={pct} inAxis={inAxis} />)}
         {undated.length > 0 && (
           <>
             <div className="border-b border-line bg-surface-2 px-4 py-1.5 text-xs font-bold uppercase tracking-wider text-ink-muted">No deadline stated</div>
-            {undated.map(t => <Row key={t.id} t={t} />)}
+            {undated.map(t => <GanttRow key={t.id} tender={t} onOpen={onOpen} pct={pct} inAxis={inAxis} />)}
           </>
         )}
       </div>
@@ -228,6 +237,12 @@ export function PipelineScreen(props: PipelineScreenProps) {
   const [showArchive, setShowArchive] = useState(false);
   const [passTarget, setPassTarget] = useState<Tender | null>(null);
   useTick(60_000);
+
+  useEffect(() => {
+    if (props.focusId) {
+      setOpenId(props.focusId);
+    }
+  }, [props.focusId]);
 
   const working = tenders.filter(t => stageOf(t.pipeline_status));
   const passed = tenders.filter(t => t.pipeline_status === 'Passed');
@@ -336,6 +351,10 @@ export function PipelineScreen(props: PipelineScreenProps) {
               onSaveNotes={props.onSaveNotes}
               onToggleBookmark={() => props.onToggleBookmark(open.id)}
               onTenderUpdated={props.onTenderUpdated}
+              onTenderDeleted={id => {
+                setOpenId(null);
+                props.onTenderDeleted?.(id);
+              }}
             />
           </div>
         )}

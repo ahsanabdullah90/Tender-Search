@@ -52,12 +52,22 @@ export function createSslTolerantDispatcher(): UndiciAgent {
 export const sslTolerantDispatcher = createSslTolerantDispatcher();
 
 /**
- * Returns true when an HTTPS error indicates a TLS handshake or record-layer cipher mismatch
- * that should be retried with legacySslTolerantAgent.
+ * Returns true when an HTTPS error specifically indicates a TLS handshake or record-layer cipher mismatch
+ * (not a transient socket reset), making the host eligible for TTL-bounded legacy TLS caching.
+ */
+export function isStrictTlsHandshakeError(err: any): boolean {
+  const info = `${err?.code || ''} ${err?.message || ''}`;
+  return /wrong version number|EPROTO|ERR_SSL|TLSV1|UNSUPPORTED_PROTOCOL/i.test(info);
+}
+
+/**
+ * Returns true when an HTTPS error indicates a TLS handshake mismatch or transient socket reset
+ * that should be retried once with legacySslTolerantAgent.
  */
 export function isTlsFallbackError(err: any): boolean {
+  if (isStrictTlsHandshakeError(err)) return true;
   const info = `${err?.code || ''} ${err?.message || ''}`;
-  return /wrong version number|EPROTO|ERR_SSL|TLSV1|UNSUPPORTED_PROTOCOL|ECONNRESET|socket hang up/i.test(info);
+  return /ECONNRESET|socket hang up/i.test(info);
 }
 
 export const HUMAN_CHROME_HEADERS = {

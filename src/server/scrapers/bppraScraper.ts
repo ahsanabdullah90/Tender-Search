@@ -219,6 +219,18 @@ export function fetchBppraDetailMetadata(bidId: number, timeoutMs: number = 1500
   const url = `${BPPRA_REPORT_API_BASE}/api/BiddingDocument/GetProc_NITItemsReportDataHTML?id=${bidId}`;
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finishResolve = (val: BppraDetailMeta | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
+    };
+    const finishReject = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
     const req = https.get(
       url,
       {
@@ -232,23 +244,25 @@ export function fetchBppraDetailMetadata(bidId: number, timeoutMs: number = 1500
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('error', finishReject);
+        res.on('aborted', () => finishReject(new Error(`BPPRA report API stream aborted for bidId=${bidId}`)));
         res.on('end', () => {
           if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            return resolve(null);
+            return finishResolve(null);
           }
           try {
             const rawText = Buffer.concat(chunks).toString('utf8');
-            if (!rawText || !rawText.trim().startsWith('{')) return resolve(null);
+            if (!rawText || !rawText.trim().startsWith('{')) return finishResolve(null);
             const parsed = JSON.parse(rawText);
-            resolve(parseBppraNitApiResponse(parsed));
+            finishResolve(parseBppraNitApiResponse(parsed));
           } catch {
-            resolve(null);
+            finishResolve(null);
           }
         });
       }
     );
 
-    req.on('error', reject);
+    req.on('error', finishReject);
     req.on('timeout', () => {
       req.destroy(new Error(`BPPRA report API timeout for bidId=${bidId}`));
     });

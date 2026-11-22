@@ -171,8 +171,10 @@ export function runRetentionCycle(options: { dryRun?: boolean; forceAll?: boolea
  */
 export function getRetentionStatus(): RetentionStatus {
   const enabled = getAppSetting('retention_auto_clean') !== 'false';
-  const graceDays = Math.max(1, parseInt(getAppSetting('retention_grace_days') || '2', 10));
-  const passedRetentionDays = Math.max(1, parseInt(getAppSetting('retention_passed_days') || '10', 10));
+  const rawGrace = parseInt(getAppSetting('retention_grace_days') || '2', 10);
+  const graceDays = Number.isFinite(rawGrace) ? Math.max(1, rawGrace) : 2;
+  const rawPassed = parseInt(getAppSetting('retention_passed_days') || '10', 10);
+  const passedRetentionDays = Number.isFinite(rawPassed) ? Math.max(1, rawPassed) : 10;
 
   const pendingSlim = getPassedTendersPendingSlim(2, 500);
   const expiredUnreviewed = getExpiredUnreviewedTenderIds(graceDays, 500);

@@ -10,6 +10,7 @@ import {
   X
 } from 'lucide-react';
 import { Tender, DomainTrack, CorrigendumLog, OpportunityStatus, PortalHealth, DocumentQueueStatus } from '../../shared/types';
+import { getPktDateKey } from '../../shared/pktDate';
 import { Button, EmptyState, Panel, Popover } from '../ui';
 import { DeadlineRunway, PortalPills, PortalSummaryItem, Detail, TenderRow, AddTenderModal, useTick } from './inbox';
 
@@ -74,22 +75,24 @@ export function InboxScreen(props: InboxScreenProps) {
 
   // Undo Toast state
   const [undoItem, setUndoItem] = useState<{ tender: Tender; status: OpportunityStatus } | null>(null);
-  const [, setUndoCountdown] = useState(6);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Manual Tender Modal state
   const [addingManual, setAddingManual] = useState(false);
 
-  useTick(30_000);
+  const now = useTick(30_000);
 
+  useEffect(() => {
+    if (props.focusId) {
+      setSelectedId(props.focusId);
+    }
+  }, [props.focusId]);
 
   useEffect(() => {
     return () => {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     };
   }, []);
 
@@ -111,7 +114,6 @@ export function InboxScreen(props: InboxScreenProps) {
   }, [tenders, deletedIds]);
 
   // Filter and sort tenders
-  const now = Date.now();
   // Closed = deadline passed, or undated and first published/seen over 90 days ago. Bookmarked
   // tenders are never treated as closed. Closed tenders are always hidden unless the operator
   // turns on "Show closed" (previously they were shown as normal whenever no open tender
@@ -181,8 +183,8 @@ export function InboxScreen(props: InboxScreenProps) {
         return false;
       }
 
-      // 3. Runway date filter
-      if (selectedRunwayDate !== null && t.closing_date?.slice(0, 10) !== selectedRunwayDate) {
+      // 3. Runway date filter (PKT calendar day)
+      if (selectedRunwayDate !== null && (!t.closing_date || getPktDateKey(t.closing_date) !== selectedRunwayDate)) {
         return false;
       }
 
@@ -226,17 +228,20 @@ export function InboxScreen(props: InboxScreenProps) {
     return list.sort((a, b) => rank(a) - rank(b));
   }, [displayTenders, sortBy, now]);
 
-  const withDeadline = sorted.filter(t => t.closing_date);
-  const noDeadline = sorted.filter(t => !t.closing_date);
-  const orderedBase = sortBy === 'urgency' ? [...withDeadline, ...noDeadline] : sorted;
   // Tenders flagged for review (e.g. a corrigendum moved the deadline earlier) always come first.
-  const ordered = [...orderedBase.filter(t => t.needs_review), ...orderedBase.filter(t => !t.needs_review)];
+  const { ordered, firstNoDeadlineId } = useMemo(() => {
+    const withDeadline = sorted.filter(t => t.closing_date);
+    const noDeadline = sorted.filter(t => !t.closing_date);
+    const orderedBase = sortBy === 'urgency' ? [...withDeadline, ...noDeadline] : sorted;
+    return {
+      ordered: [...orderedBase.filter(t => t.needs_review), ...orderedBase.filter(t => !t.needs_review)],
+      firstNoDeadlineId: sortBy === 'urgency' ? noDeadline[0]?.id : undefined
+    };
+  }, [sorted, sortBy]);
 
   const expiredTenders = useMemo(() => {
     return ordered.filter(t => t.closing_date && new Date(t.closing_date).getTime() <= now);
   }, [ordered, now]);
-
-  const firstNoDeadlineId = sortBy === 'urgency' ? noDeadline[0]?.id : undefined;
 
   // Maintain active selection
   const selected = ordered.find(t => t.id === selectedId) ?? null;
@@ -253,22 +258,8 @@ export function InboxScreen(props: InboxScreenProps) {
     markViewed(tender.id);
 
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
 
     setUndoItem({ tender, status });
-    setUndoCountdown(6);
-
-    countdownIntervalRef.current = setInterval(() => {
-      setUndoCountdown(c => {
-        if (c <= 1) {
-          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
-          setUndoItem(null);
-          return 0;
-        }
-        return c - 1;
-      });
-    }, 1000);
-
     undoTimerRef.current = setTimeout(() => {
       setUndoItem(null);
     }, 6000);
@@ -282,7 +273,6 @@ export function InboxScreen(props: InboxScreenProps) {
   const handleUndo = async () => {
     if (!undoItem) return;
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
 
     const revertedTender = undoItem.tender;
     setUndoItem(null);
@@ -633,6 +623,7 @@ export function InboxScreen(props: InboxScreenProps) {
                 if (bookmarkedOnly) props.onToggleBookmarked();
                 if (corrigendumOnly) props.onToggleCorrigendum();
                 if (unreadOnly) setUnreadOnly(false);
+                if (urgent48hOnly) setUrgent48hOnly(false);
                 if (searchQuery) props.onSearchChange('');
               }}
               className="ml-1 cursor-pointer text-xs font-semibold text-ink-muted underline hover:text-ink"
@@ -756,7 +747,7 @@ export function InboxScreen(props: InboxScreenProps) {
           className="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full border border-line bg-surface px-4 py-2.5 shadow-2xl animate-in fade-in slide-in-from-bottom-4"
         >
           <span className="text-xs font-semibold text-ink">
-            Moved to Passed: "{undoItem.tender.title.slice(0, 32)}..."
+            Moved to {undoItem.status}: "{undoItem.tender.title.slice(0, 32)}..."
           </span>
           <button
             type="button"

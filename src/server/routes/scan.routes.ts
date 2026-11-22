@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { asyncHandler } from './routeUtils.js';
 import { getAppSetting } from '../db/repositories/systemRepo.js';
 import { getDocumentQueueCounts } from '../db/index.js';
 import { ScanDepth, ScanStatus } from '../../shared/types.js';
@@ -50,13 +51,13 @@ function withLiveDocQueue(status: ScanStatus): ScanStatus {
   };
 }
 
-scanRouter.post('/start', async (req, res) => {
+scanRouter.post('/start', asyncHandler(async (req, res) => {
   const portalId = req.body?.portalId || (req.query?.portalId as string | undefined);
   const rawDepth = req.body?.depth || (req.query?.depth as string | undefined);
   const depth = rawDepth === 'deep' || rawDepth === 'quick' ? rawDepth : undefined;
   const status = await scanRouteDeps.startCrawlerScan(portalId, false, depth ? { depth } : undefined);
   res.json(status);
-});
+}));
 
 scanRouter.get('/status', (_req, res) => {
   const fullScanAt = getAppSetting('last_full_scan_at') || null;
@@ -70,13 +71,28 @@ const handleScanSse = (req: any, res: any) => {
   res.flushHeaders();
 
   const sendStatus = (status: ScanStatus, eventType: ScanProgressEventType = 'scan_progress') => {
-    res.write(`data: ${JSON.stringify({ type: eventType, status: withLiveDocQueue(status) })}\n\n`);
+    try {
+      res.write(`data: ${JSON.stringify({ type: eventType, status: withLiveDocQueue(status) })}\n\n`);
+    } catch {
+      removeProgressListener(sendStatus);
+    }
   };
 
   sendStatus(currentScanStatus, 'scan_progress');
   addProgressListener(sendStatus);
 
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      clearInterval(heartbeat);
+      removeProgressListener(sendStatus);
+    }
+  }, 30_000);
+  heartbeat.unref?.();
+
   req.on('close', () => {
+    clearInterval(heartbeat);
     removeProgressListener(sendStatus);
   });
 };

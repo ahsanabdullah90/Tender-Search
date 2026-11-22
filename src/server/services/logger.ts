@@ -350,7 +350,9 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
     const duration = Date.now() - start;
     const status = res.statusCode;
     const level: LogLevel = status >= 500 ? 'ERROR' : status >= 400 ? 'WARN' : 'HTTP';
-    const logLine = `[HTTP] ${req.method} ${url} ${status} (${duration}ms)`;
+    const logLine = level === 'HTTP'
+      ? `${req.method} ${url} ${status} (${duration}ms)`
+      : `[HTTP] ${req.method} ${url} ${status} (${duration}ms)`;
 
     if (level === 'ERROR') {
       sessionErrorCount++;

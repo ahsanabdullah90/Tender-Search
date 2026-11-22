@@ -225,7 +225,13 @@ portalsRouter.get('/:portalId/credentials', (req, res) => {
 
 portalsRouter.post('/:portalId/credentials', async (req, res) => {
   try {
-    const { username, password, loginUrl } = req.body;
+    const { username, password, loginUrl } = req.body || {};
+    if (typeof loginUrl === 'string' && loginUrl.trim()) {
+      const check = validateExternalHttpUrl(loginUrl.trim());
+      if (!check.valid) {
+        return res.status(400).json({ success: false, message: check.reason });
+      }
+    }
     savePortalCredentials(req.params.portalId, { username, password, loginUrl });
 
     if (username && password) {

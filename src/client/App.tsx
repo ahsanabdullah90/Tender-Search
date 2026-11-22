@@ -71,8 +71,8 @@ export default function App() {
     closingSoon: 0,
     inPipeline: 0,
     unackCorrigenda: 0,
-    totalPortals: 18,
-    onlinePortals: 18,
+    totalPortals: 19,
+    onlinePortals: 19,
     hitlRequiredCount: 0
   });
 
@@ -81,7 +81,7 @@ export default function App() {
     currentPortal: null,
     progressPercent: 0,
     completedPortals: 0,
-    totalPortals: 18,
+    totalPortals: 19,
     newTendersFound: 0,
     corrigendaFound: 0,
     lastScanTimestamp: null
@@ -101,7 +101,7 @@ export default function App() {
   const [section, setSection] = useState<Section>(readSection);
   // A tender to open when arriving from an alert banner.
   const [focusTenderId, setFocusTenderId] = useState<string | null>(null);
-  const [, setSourcesTab] = useState<'keywords' | 'portals' | 'data'>('keywords');
+  const [sourcesTab, setSourcesTab] = useState<'keywords' | 'portals' | 'data'>('keywords');
 
   const handleNavigate = (next: Section) => {
     setSection(next);
@@ -249,14 +249,31 @@ export default function App() {
   const handleRecheckNetworkRef = useRef(handleRecheckNetwork);
   handleRecheckNetworkRef.current = handleRecheckNetwork;
 
-  // Initial load (must stay above background network poll so fetchTenders() is first)
+  const fetchTendersRef = useRef(fetchTenders);
+  fetchTendersRef.current = fetchTenders;
+  const fetchPortalsRef = useRef(fetchPortals);
+  fetchPortalsRef.current = fetchPortals;
+  const fetchCorrigendaRef = useRef(fetchCorrigenda);
+  fetchCorrigendaRef.current = fetchCorrigenda;
+  const fetchKpisRef = useRef(fetchKpis);
+  fetchKpisRef.current = fetchKpis;
+  const fetchNetworkStatusRef = useRef(fetchNetworkStatus);
+  fetchNetworkStatusRef.current = fetchNetworkStatus;
+
+  // Fetch tenders on filter/view change when visible (must stay above metadata/network polls so fetchTenders() is first)
   useEffect(() => {
-    fetchTenders();
-    fetchTracks();
-    fetchPortals();
-    fetchCorrigenda();
-    fetchKpis();
-  }, [fetchTenders, fetchTracks, fetchPortals, fetchCorrigenda, fetchKpis]);
+    if (section !== 'sources') {
+      void fetchTenders();
+    }
+  }, [fetchTenders, section]);
+
+  // Initial metadata load (runs once on mount; filter changes do not re-fetch tracks/portals/corrigenda/kpis)
+  useEffect(() => {
+    void fetchTracks();
+    void fetchPortals();
+    void fetchCorrigenda();
+    void fetchKpis();
+  }, [fetchTracks, fetchPortals, fetchCorrigenda, fetchKpis]);
 
   // Network health monitor: poll every 60s, on focus, and on browser online/offline transitions
   useEffect(() => {
@@ -281,7 +298,7 @@ export default function App() {
     };
   }, [fetchNetworkStatus]);
 
-  // Server-Sent Events (SSE) Listener for Real-Time Scraper Telemetry
+  // Server-Sent Events (SSE) Listener for Real-Time Scraper Telemetry (stays mounted across filter/search changes)
   useEffect(() => {
     const eventSource = new EventSource('/api/scan/stream');
 
@@ -294,17 +311,17 @@ export default function App() {
 
         // Reload live datasets when scan finishes or background document fetch updates tenders
         if (payload.type === 'documents_updated') {
-          fetchTenders();
-          fetchKpis();
-          fetchCorrigenda();
+          void fetchTendersRef.current();
+          void fetchKpisRef.current();
+          void fetchCorrigendaRef.current();
         } else if (payload.type !== 'doc_queue_progress' && !statusData.isScanning && statusData.completedPortals > 0) {
-          fetchTenders();
-          fetchPortals();
-          fetchCorrigenda();
-          fetchKpis();
-          fetchNetworkStatus();
+          void fetchTendersRef.current();
+          void fetchPortalsRef.current();
+          void fetchCorrigendaRef.current();
+          void fetchKpisRef.current();
+          void fetchNetworkStatusRef.current();
         } else if (statusData.pausedReason) {
-          fetchNetworkStatus();
+          void fetchNetworkStatusRef.current();
         }
       } catch (err) {
         console.error('SSE JSON parse error:', err);
@@ -318,7 +335,7 @@ export default function App() {
     return () => {
       eventSource.close();
     };
-  }, [fetchTenders, fetchPortals, fetchCorrigenda, fetchKpis, fetchNetworkStatus]);
+  }, []);
 
   // Actions
   const handleRunScan = async (portalId?: string, depth?: 'quick' | 'deep') => {
@@ -567,6 +584,11 @@ export default function App() {
     }
   };
 
+  const handleTenderDeleted = useCallback((deletedId: string) => {
+    setTenders(prev => prev.filter(t => t.id !== deletedId));
+    void fetchKpis();
+  }, [fetchKpis]);
+
   return (
     <AppShell
       section={section}
@@ -613,6 +635,7 @@ export default function App() {
           focusId={focusTenderId}
           docQueue={scanStatus.docQueue}
           onTenderUpdated={updated => setTenders(prev => prev.map(t => (t.id === updated.id ? updated : t)))}
+          onTenderDeleted={handleTenderDeleted}
           onTenderCreated={created => {
             setTenders(prev => [created, ...prev]);
             fetchKpis();
@@ -629,11 +652,13 @@ export default function App() {
           onToggleBookmark={handleToggleBookmark}
           onSetResultDate={handleSetResultDate}
           onTenderUpdated={updated => setTenders(prev => prev.map(t => (t.id === updated.id ? updated : t)))}
+          onTenderDeleted={handleTenderDeleted}
           focusId={focusTenderId}
         />
       ) : (
         <main className="flex-1">
           <SourcesScreen
+            initialTab={sourcesTab}
             tracks={tracks}
             portals={portals}
             onSaveTrack={handleSaveTrack}

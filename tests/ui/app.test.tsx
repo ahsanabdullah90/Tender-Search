@@ -382,6 +382,8 @@ describe('App root component', () => {
     await waitFor(() => {
       expect(screen.getByText('Solar Power System')).toBeInTheDocument();
     });
+    const initialEventSource = lastEventSource;
+    expect(initialEventSource).not.toBeNull();
 
     const searchInput = screen.getByPlaceholderText(/Search tenders/i);
     await user.type(searchInput, 'inverter');
@@ -392,6 +394,9 @@ describe('App root component', () => {
         expect.anything()
       );
     }, { timeout: 2000 });
+
+    expect(lastEventSource).toBe(initialEventSource);
+    expect(initialEventSource.close).not.toHaveBeenCalled();
   });
 
   it('toggles theme preference between Light, Dark, and System', async () => {
@@ -700,7 +705,7 @@ describe('App root component', () => {
     });
   });
 
-  it('opens sources view when Review portals is clicked from outage banner', async () => {
+  it('opens sources view on the Portals tab when Review portals is clicked from outage banner', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -709,6 +714,7 @@ describe('App root component', () => {
 
     await waitFor(() => {
       expect(localStorage.getItem('tt_section')).toBe('sources');
+      expect(screen.getByRole('tab', { name: /Portals/i })).toHaveAttribute('aria-selected', 'true');
     });
   });
 

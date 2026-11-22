@@ -31,6 +31,7 @@ import {
   setDeepScanPending
 } from '../services/networkMonitor.js';
 import {
+  parseDateString,
   formatClosingDate,
   extractDatesFromText
 } from './dateParser.js';
@@ -253,8 +254,8 @@ export function getActivePortalsList(targetPortalId?: string): PortalDefinition[
       return {
         id: dbP.portal_id,
         name: dbP.portal_name || def?.name || dbP.portal_id,
-        category: (dbP.category as any) || def?.category || 'Federal',
-        tier: (dbP.tier as any) || def?.tier || 'cheerio',
+        category: (dbP.category as any) || def?.category || 'Federal/Regional',
+        tier: (dbP.tier as any) || def?.tier || 'http',
         baseUrl: dbP.base_url || def?.baseUrl || '',
         tendersUrl: dbP.tenders_url || def?.tendersUrl || '',
         loginUrl: dbP.login_url || def?.loginUrl,
@@ -443,57 +444,69 @@ async function scanSinglePortal(
  * Multi-portal scans run HTTP portals concurrently (up to HTTP_PORTAL_CONCURRENCY)
  * and Playwright portals sequentially (PLAYWRIGHT_PORTAL_CONCURRENCY) for stability.
  */
+let scanStarting = false;
+
 export async function startCrawlerScan(
   targetPortalId?: string,
   awaitCompletion: boolean = false,
   options?: { depth?: ScanDepth; forceOnDegraded?: boolean }
 ): Promise<ScanStatus> {
-  if (currentScanStatus.isScanning) {
+  if (currentScanStatus.isScanning || scanStarting) {
     return currentScanStatus;
   }
 
-  const depth: ScanDepth = options?.depth === 'deep' ? 'deep' : 'quick';
-  const net = await checkNetworkHealth();
+  scanStarting = true;
+  let depth: ScanDepth;
+  let degradedMode: boolean;
+  let effectiveHttpConcurrency: number;
+  let portalsToScan: PortalDefinition[];
+  try {
+    depth = options?.depth === 'deep' ? 'deep' : 'quick';
+    const net = await checkNetworkHealth();
 
-  if (!canRunLightNetworkTask(net)) {
-    if (!targetPortalId && depth === 'deep') {
-      setDeepScanPending(true);
+    if (!canRunLightNetworkTask(net)) {
+      if (!targetPortalId && depth === 'deep') {
+        setDeepScanPending(true);
+      }
+      currentScanStatus.pausedReason = net.reason || 'No internet connection detected — scan paused';
+      broadcastProgress();
+      return currentScanStatus;
     }
-    currentScanStatus.pausedReason = net.reason || 'No internet connection detected — scan paused';
+
+    if (!canRunHeavyNetworkTask(net) && !targetPortalId && depth === 'deep' && !options?.forceOnDegraded) {
+      setDeepScanPending(true);
+      currentScanStatus.pausedReason = 'Slow network detected — deep scan held until connection is healthy (Quick Scan remains available)';
+      broadcastProgress();
+      return currentScanStatus;
+    }
+
+    degradedMode = !canRunHeavyNetworkTask(net);
+    effectiveHttpConcurrency = degradedMode ? 1 : HTTP_PORTAL_CONCURRENCY;
+    const allPortals = getActivePortalsList(targetPortalId);
+    // In automated full scans, skip offline_broken portals unless explicitly triggered individually
+    portalsToScan = targetPortalId
+      ? allPortals
+      : allPortals.filter(p => p.accessMode !== 'offline_broken');
+
+    currentScanStatus = {
+      isScanning: true,
+      currentPortal: null,
+      activePortals: [],
+      scanDepth: depth,
+      progressPercent: 0,
+      completedPortals: 0,
+      totalPortals: portalsToScan.length,
+      newTendersFound: 0,
+      corrigendaFound: 0,
+      heldForScope: 0,
+      pausedReason: null,
+      lastScanTimestamp: currentScanStatus.lastScanTimestamp,
+      docQueue: currentScanStatus.docQueue
+    };
     broadcastProgress();
-    return currentScanStatus;
+  } finally {
+    scanStarting = false;
   }
-
-  if (!canRunHeavyNetworkTask(net) && !targetPortalId && depth === 'deep' && !options?.forceOnDegraded) {
-    setDeepScanPending(true);
-    currentScanStatus.pausedReason = 'Slow network detected — deep scan held until connection is healthy (Quick Scan remains available)';
-    broadcastProgress();
-    return currentScanStatus;
-  }
-
-  const degradedMode = !canRunHeavyNetworkTask(net);
-  const effectiveHttpConcurrency = degradedMode ? 1 : HTTP_PORTAL_CONCURRENCY;
-  const allPortals = getActivePortalsList(targetPortalId);
-  // In automated full scans, skip offline_broken portals unless explicitly triggered individually
-  const portalsToScan = targetPortalId
-    ? allPortals
-    : allPortals.filter(p => p.accessMode !== 'offline_broken');
-
-  currentScanStatus = {
-    isScanning: true,
-    currentPortal: null,
-    activePortals: [],
-    scanDepth: depth,
-    progressPercent: 0,
-    completedPortals: 0,
-    totalPortals: portalsToScan.length,
-    newTendersFound: 0,
-    corrigendaFound: 0,
-    heldForScope: 0,
-    pausedReason: null,
-    lastScanTimestamp: currentScanStatus.lastScanTimestamp
-  };
-  broadcastProgress();
 
   const scanExecution = async () => {
     // Per-scan document budget: time for upfront fetches and a Gemini Vision call cap (docs/13 §3.2).
@@ -591,8 +604,8 @@ export async function startCrawlerScan(
 function normalizeClosingDayForEarlyStop(value?: string | null): string {
   if (!value) return '';
   if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
-  const formatted = formatClosingDate(value);
-  return formatted && /^\d{4}-\d{2}-\d{2}/.test(formatted) ? formatted.slice(0, 10) : value.trim().toLowerCase();
+  const parsed = parseDateString(value);
+  return parsed && /^\d{4}-\d{2}-\d{2}/.test(parsed) ? parsed.slice(0, 10) : value.trim().toLowerCase();
 }
 
 /**

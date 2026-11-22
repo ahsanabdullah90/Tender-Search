@@ -38,6 +38,14 @@ export function resolvePortalUrl(href: string | undefined, portal: PortalDefinit
   }
 }
 
+function safeDecodeURIComponent(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 /**
  * Checks whether a title or filename represents a post-bid evaluation report, pre-bid meeting minutes,
  * annual procurement plan, or architectural/CAD drawing rather than an open tender opportunity.
@@ -45,7 +53,7 @@ export function resolvePortalUrl(href: string | undefined, portal: PortalDefinit
 export function isNonBidEvaluationOrPlanTitle(title: string, url?: string): boolean {
   const cleanTitle = (title || '').replace(/\s+/g, ' ').trim();
   const fileSlug = url
-    ? decodeURIComponent(url.split('/').pop() || '').replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim()
+    ? safeDecodeURIComponent(url.split('/').pop() || '').replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim()
     : '';
   const combined = `${cleanTitle} ${fileSlug}`;
 
@@ -512,7 +520,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const liText = stripLiteralHtmlTags(
         $(aEl).find('li').first().text().replace(/\s+/g, ' ').trim() || $(aEl).text().replace(/\s+/g, ' ').trim()
       );
-      const fileSlug = decodeURIComponent(fullUrl.split('/').pop() || '')
+      const fileSlug = safeDecodeURIComponent(fullUrl.split('/').pop() || '')
         .replace(/\.pdf$/i, '')
         .replace(/^(?:Tender[-_ ]Document[-_ ]|Bidding[-_ ]Document[-_ ])/i, '')
         .replace(/[-_]+/g, ' ')
@@ -1210,7 +1218,7 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const fullUrl = resolvePortalUrl(href, portal);
       if (seenUrls.has(fullUrl)) return;
 
-      const fileSlug = decodeURIComponent(fullUrl.split('/').pop() || '').replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim();
+      const fileSlug = safeDecodeURIComponent(fullUrl.split('/').pop() || '').replace(/\.pdf$/i, '').replace(/[-_]+/g, ' ').trim();
       const aText = $(aEl).text().replace(/\s+/g, ' ').trim();
       const title = (!aText || GENERIC_LINK_LABELS.test(aText)) ? fileSlug : aText;
       if (title.length <= 5) return;

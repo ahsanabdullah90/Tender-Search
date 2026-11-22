@@ -109,10 +109,11 @@ export async function launchLocalBrowserHITL(portalId: string): Promise<HitlLaun
 export function verifyAndResumePortal(portalId: string) {
   // If browser context is still open, attempt graceful close
   if (activeHitlContexts.has(portalId)) {
-    try {
-      activeHitlContexts.get(portalId).close();
-    } catch {}
+    const ctx = activeHitlContexts.get(portalId);
     activeHitlContexts.delete(portalId);
+    try {
+      Promise.resolve(ctx?.close?.()).catch(() => {});
+    } catch {}
   }
 
   updatePortalHealth(portalId, {

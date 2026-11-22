@@ -954,6 +954,20 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
   }
 
   // 4. Age out .trash/ contents older than 24 hours
+  const getPathSizeBytes = (targetPath: string): number => {
+    try {
+      const st = fs.statSync(targetPath);
+      if (!st.isDirectory()) return st.size || 0;
+      let total = 0;
+      for (const child of fs.readdirSync(targetPath)) {
+        total += getPathSizeBytes(path.resolve(targetPath, child));
+      }
+      return total;
+    } catch {
+      return 0;
+    }
+  };
+
   if (fs.existsSync(TRASH_DIR)) {
     try {
       const trashItems = fs.readdirSync(TRASH_DIR);
@@ -962,7 +976,7 @@ export function reconcileDossiers(options: { dryRun?: boolean; graceMinutes?: nu
         try {
           const stat = fs.statSync(itemPath);
           if (now - stat.mtimeMs > 24 * 60 * 60 * 1000) {
-            result.trashCleanedBytes += stat.size || 0;
+            result.trashCleanedBytes += getPathSizeBytes(itemPath);
             if (!options.dryRun) {
               fs.rmSync(itemPath, { recursive: true, force: true });
             }

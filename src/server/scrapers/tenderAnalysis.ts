@@ -80,11 +80,11 @@ export interface FetchDocumentsResult {
 }
 
 const inFlightDocFetches = new Map<string, Promise<FetchDocumentsResult>>();
-const activeDocFetchIds = new Set<string>();
+const activeDocFetchCounts = new Map<string, number>();
 
 /** Returns tender IDs currently undergoing an active on-demand/detail document fetch. */
 export function getInFlightDocFetchTenderIds(): string[] {
-  return Array.from(activeDocFetchIds);
+  return Array.from(activeDocFetchCounts.keys());
 }
 
 /**
@@ -144,7 +144,7 @@ async function runFetchDocumentsForTender(
     };
   }
 
-  activeDocFetchIds.add(tenderId);
+  activeDocFetchCounts.set(tenderId, (activeDocFetchCounts.get(tenderId) || 0) + 1);
   try {
     crawlerDeps.onDocFetchChange?.();
   } catch {}
@@ -283,6 +283,7 @@ async function runFetchDocumentsForTender(
       $('script, style, nav, header, footer, select, option, form, .job-search, .search-form, .filter-bar, aside').remove();
 
       let targetEl: any = $('body').get(0);
+      let skipListingAttachmentScrape = false;
 
       if (isListing) {
         let matchingContainer: cheerio.Cheerio<any> | null = null;
@@ -298,16 +299,20 @@ async function runFetchDocumentsForTender(
         });
         if (matchingContainer) {
           targetEl = (matchingContainer as any).get(0);
+        } else {
+          skipListingAttachmentScrape = true;
         }
       }
 
-      const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
-      if (discoveredUrls.length > 0) {
-        mergeTenderAttachmentUrls(tender.id, discoveredUrls);
-      }
-      for (let idx = 0; idx < discoveredUrls.slice(0, 5).length; idx++) {
-        if (dossiers.length >= 5) break;
-        await downloadAndAttachUrl(discoveredUrls[idx], dossiers.length + idx);
+      if (!skipListingAttachmentScrape) {
+        const discoveredUrls = collectRowAttachments($, targetEl, portalDef);
+        if (discoveredUrls.length > 0) {
+          mergeTenderAttachmentUrls(tender.id, discoveredUrls);
+        }
+        for (let idx = 0; idx < discoveredUrls.slice(0, 5).length; idx++) {
+          if (dossiers.length >= 5) break;
+          await downloadAndAttachUrl(discoveredUrls[idx], dossiers.length + idx);
+        }
       }
     } catch (err: any) {
       console.warn(`[FetchDocs] Could not fetch detail page for ${tender.id}:`, err.message);
@@ -387,7 +392,12 @@ async function runFetchDocumentsForTender(
     expired: false
   };
   } finally {
-    activeDocFetchIds.delete(tenderId);
+    const remaining = (activeDocFetchCounts.get(tenderId) || 1) - 1;
+    if (remaining <= 0) {
+      activeDocFetchCounts.delete(tenderId);
+    } else {
+      activeDocFetchCounts.set(tenderId, remaining);
+    }
     try {
       crawlerDeps.onDocFetchChange?.();
     } catch {}

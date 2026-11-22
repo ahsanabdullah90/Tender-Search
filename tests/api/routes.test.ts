@@ -369,9 +369,15 @@ describe('Server API Routes', () => {
       expect(getCredRes.body.loginUrl).toBe('https://epms.ppra.gov.pk/custom');
     });
 
-    it('returns 404 for unknown portal credentials', async () => {
+    it('returns 404 for unknown portal credentials and rejects unsafe loginUrl (SEC-5)', async () => {
       const res = await request(app).get('/api/portals/unknown_portal/credentials');
       expect(res.status).toBe(404);
+
+      const ssrfCredRes = await request(app)
+        .post('/api/portals/epms_ppra/credentials')
+        .send({ username: 'u', password: 'p', loginUrl: 'http://169.254.169.254/latest/meta-data/' });
+      expect(ssrfCredRes.status).toBe(400);
+      expect(ssrfCredRes.body.success).toBe(false);
     });
 
     it('supports HITL launch and verification routes', async () => {
@@ -1128,6 +1134,14 @@ describe('Server API Routes', () => {
       } finally {
         resetNetworkMonitorForTests();
       }
+    });
+  });
+
+  describe('API Fallback 404', () => {
+    it('returns JSON 404 for unknown /api endpoints', async () => {
+      const res = await request(app).get('/api/does-not-exist');
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'Endpoint not found' });
     });
   });
 });

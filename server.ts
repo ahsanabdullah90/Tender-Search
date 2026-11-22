@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import {
   initDatabase,
   reScoreTendersAgainstTracks,
-  db
+  closeDatabase
 } from './src/server/db/index.js';
 import { initStartupScheduler, stopStartupScheduler } from './src/server/services/scheduler.js';
 import { initEmbeddingModel } from './src/server/services/embeddingService.js';
@@ -27,6 +27,14 @@ export function createApp(): express.Express {
   // Mount modular API domain routers
   app.use('/api', apiRouter);
 
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (res.headersSent) return;
+    const status = typeof err?.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600
+      ? err.statusCode
+      : 500;
+    res.status(status).json({ error: err?.message || 'Internal server error' });
+  });
+
   return app;
 }
 
@@ -35,10 +43,14 @@ export async function startServer() {
   initSessionLogger();
   initDatabase();
   initStartupScheduler();
+
+  let isShuttingDown = false;
   void initEmbeddingModel().then(async () => {
+    if (isShuttingDown) return;
     // Upgrade legacy/fast vectors to MiniLM before re-scoring, so track matching compares
     // like with like.
     try { await backfillModelEmbeddings(1000); } catch (err) { console.warn('[Embedding Engine] Backfill failed:', err); }
+    if (isShuttingDown) return;
     try { reScoreTendersAgainstTracks(); } catch {}
   });
 
@@ -59,10 +71,7 @@ export async function startServer() {
   } else {
     const distPath = path.resolve(projectRoot, 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      if (req.path.startsWith('/api/')) {
-        return res.status(404).json({ error: 'Endpoint not found' });
-      }
+    app.get('*', (_req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
@@ -72,26 +81,30 @@ export async function startServer() {
   });
 
   // Graceful shutdown handling on Windows / Linux
-  let isShuttingDown = false;
   const handleExit = () => {
     if (isShuttingDown) return;
     isShuttingDown = true;
+    process.off('SIGINT', handleExit);
+    process.off('SIGTERM', handleExit);
     setShutdownHandler(null);
     console.log('\n[Tender Tracker] Shutting down cleanly...');
     stopStartupScheduler();
-    void terminateLocalOcrWorker();
-    try {
-      db.pragma('wal_checkpoint(TRUNCATE)');
-      db.close();
-      console.log('[Tender Tracker] Database closed cleanly.');
-    } catch {}
-    closeSessionLogger('Clean Shutdown');
-    server.close(() => {
-      process.exit(0);
+
+    const shutdownOcr = Promise.resolve(terminateLocalOcrWorker()).catch(() => {});
+    const ocrWait = Promise.race([shutdownOcr, new Promise<void>(resolve => setTimeout(resolve, 2000))]);
+    void ocrWait.finally(() => {
+      try {
+        closeDatabase();
+        console.log('[Tender Tracker] Database closed cleanly.');
+      } catch {}
+      closeSessionLogger('Clean Shutdown');
+      server.close(() => {
+        process.exit(0);
+      });
+      try {
+        server.closeAllConnections?.();
+      } catch {}
     });
-    try {
-      (server as any).closeAllConnections?.();
-    } catch {}
   };
 
   setShutdownHandler(handleExit);
@@ -111,5 +124,8 @@ const isDirectRun = Boolean(
 
 /* v8 ignore next 3 - direct execution branch is impossible by construction when imported by Vitest */
 if (isDirectRun) {
-  startServer();
+  startServer().catch(err => {
+    console.error('[Tender Tracker] Failed to start:', err);
+    process.exit(1);
+  });
 }

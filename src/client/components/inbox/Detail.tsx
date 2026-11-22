@@ -55,13 +55,14 @@ export function asList<T>(value: unknown): T[] {
   return (value as T[]) || [];
 }
 
-/** Re-renders its caller once per interval so countdowns stay current. */
-export function useTick(ms: number) {
-  const [, setTick] = useState(0);
+/** Re-renders its caller once per interval and returns the current timestamp cleanly. */
+export function useTick(ms: number): number {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setTick(t => t + 1), ms);
+    const timer = setInterval(() => setNow(Date.now()), ms);
     return () => clearInterval(timer);
   }, [ms]);
+  return now;
 }
 
 /** Where a tender's deadline came from, as a badge (docs/13 §4.1). */
@@ -290,8 +291,16 @@ export function Detail({
   notesRef.current = notes;
   const [noteState, setNoteState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
   const lastSavedNotesRef = useRef(tender.status_notes || '');
+  const hasPendingNotesRef = useRef(false);
   const prevTenderIdRef = useRef<string>(tender.id);
   const autoFetchedIdsRef = useRef<Set<string>>(new Set());
+  const onSaveNotesRef = useRef(onSaveNotes);
+  onSaveNotesRef.current = onSaveNotes;
+  const onTenderDeletedRef = useRef(onTenderDeleted);
+  onTenderDeletedRef.current = onTenderDeleted;
+  const onTenderUpdatedRef = useRef(onTenderUpdated);
+  onTenderUpdatedRef.current = onTenderUpdated;
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [fetchingDocs, setFetchingDocs] = useState(false);
@@ -317,7 +326,12 @@ export function Detail({
   useEffect(() => {
     setCurrentTender(tender);
     if (prevTenderIdRef.current !== tender.id) {
+      if (hasPendingNotesRef.current && notesRef.current !== lastSavedNotesRef.current) {
+        hasPendingNotesRef.current = false;
+        void Promise.resolve(onSaveNotesRef.current(prevTenderIdRef.current, notesRef.current)).catch(() => {});
+      }
       prevTenderIdRef.current = tender.id;
+      hasPendingNotesRef.current = false;
       setNotes(tender.status_notes || '');
       lastSavedNotesRef.current = tender.status_notes || '';
       setNoteState('idle');
@@ -342,6 +356,16 @@ export function Detail({
   }, [tender]);
 
   useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      if (hasPendingNotesRef.current && notesRef.current !== lastSavedNotesRef.current) {
+        hasPendingNotesRef.current = false;
+        void Promise.resolve(onSaveNotesRef.current(prevTenderIdRef.current, notesRef.current)).catch(() => {});
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!hasAutoFetchableDocuments(tender) || autoFetchedIdsRef.current.has(tender.id)) {
       return;
     }
@@ -361,10 +385,10 @@ export function Detail({
         if (controller.signal.aborted) return;
         if (data.expired) {
           setAiStatusMessage({ text: data.message || 'Deadline has passed: tender removed from the Inbox.' });
-          onTenderDeleted?.(tender.id);
+          onTenderDeletedRef.current?.(tender.id);
         } else if (data.tender) {
           setCurrentTender(data.tender);
-          onTenderUpdated?.(data.tender);
+          onTenderUpdatedRef.current?.(data.tender);
         }
       })
       .catch(() => {
@@ -388,10 +412,11 @@ export function Detail({
   const amendments = corrigenda.filter(c => c.tender_id === currentTender.id);
 
   const saveNotes = async (notesToSave: string = notes) => {
+    hasPendingNotesRef.current = false;
     if (notesToSave === lastSavedNotesRef.current) return;
     setNoteState('saving');
     try {
-      await onSaveNotes(currentTender.id, notesToSave);
+      await onSaveNotesRef.current(currentTender.id, notesToSave);
       lastSavedNotesRef.current = notesToSave;
       setNoteState('saved');
     } catch {
@@ -401,8 +426,25 @@ export function Detail({
 
   useEffect(() => {
     if (notes === lastSavedNotesRef.current) return;
+    const targetId = currentTender.id;
+    const pendingValue = notes;
     const timer = setTimeout(() => {
-      void saveNotes(notes);
+      hasPendingNotesRef.current = false;
+      void (async () => {
+        if (pendingValue === lastSavedNotesRef.current) return;
+        setNoteState('saving');
+        try {
+          await onSaveNotesRef.current(targetId, pendingValue);
+          if (prevTenderIdRef.current === targetId) {
+            lastSavedNotesRef.current = pendingValue;
+            setNoteState('saved');
+          }
+        } catch {
+          if (prevTenderIdRef.current === targetId) {
+            setNoteState('failed');
+          }
+        }
+      })();
     }, 700);
     return () => clearTimeout(timer);
   }, [notes, currentTender.id]);
@@ -439,7 +481,11 @@ export function Detail({
     try {
       await navigator.clipboard?.writeText(summaryLines);
       setCopiedSummary(true);
-      setTimeout(() => setCopiedSummary(false), 2000);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => {
+        copyTimerRef.current = null;
+        setCopiedSummary(false);
+      }, 2000);
     } catch {}
   };
 
@@ -1185,7 +1231,10 @@ export function Detail({
           </div>
           <textarea
             value={notes}
-            onChange={e => setNotes(e.target.value)}
+            onChange={e => {
+              hasPendingNotesRef.current = true;
+              setNotes(e.target.value);
+            }}
             onBlur={() => void saveNotes()}
             rows={4}
             placeholder="Bank guarantee, partner contacts, site visit dates…"

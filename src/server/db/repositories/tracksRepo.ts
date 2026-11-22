@@ -1,11 +1,10 @@
 import { db, safeJsonParse } from '../connection.js';
 import { DomainTrack, CorrigendumLog } from '../../../shared/types.js';
-import { containsKeyword, applyDocumentScopeToTracks } from '../../scrapers/trackMatcher.js';
+import { matchTracks, applyDocumentScopeToTracks } from '../../scrapers/trackMatcher.js';
 import {
   buildTrackEmbeddingText,
   buildTenderEmbeddingText,
   computeFastSemanticEmbedding,
-  computeTextSemanticSimilarity,
   serializeEmbedding,
   EMBEDDING_BLOB_BYTES,
   MINILM_BLOB_HEADER_HEX
@@ -104,15 +103,19 @@ export function deleteDomainTrack(id: string) {
 
 export function reScoreTendersAgainstTracks() {
   const rawTracks = db.prepare('SELECT * FROM domain_tracks WHERE is_active = 1 ORDER BY name ASC').all() as any[];
-  const tracks = rawTracks.map(r => ({
-    ...r,
-    positive_keywords: safeJsonParse<string[]>(r.positive_keywords, []),
-    negative_keywords: safeJsonParse<string[]>(r.negative_keywords, []),
-    trackText: buildTrackEmbeddingText({
-      name: r.name,
-      positive_keywords: safeJsonParse<string[]>(r.positive_keywords, [])
-    })
-  }));
+  const tracks = rawTracks.map(r => {
+    const pos = safeJsonParse<string[]>(r.positive_keywords, []);
+    const neg = safeJsonParse<string[]>(r.negative_keywords, []);
+    return {
+      ...r,
+      positive_keywords: pos,
+      negative_keywords: neg,
+      trackText: buildTrackEmbeddingText({
+        name: r.name,
+        positive_keywords: pos
+      })
+    };
+  });
 
   const tenders = db.prepare('SELECT id, title, description, organization, reference_no, extracted_text, embedding, portal_id, pipeline_status, is_bookmarked, ingestion_status FROM tenders').all() as any[];
 
@@ -122,51 +125,22 @@ export function reScoreTendersAgainstTracks() {
 
   const updateTx = db.transaction(() => {
     for (const tender of tenders) {
-      const combinedText = `${tender.title} ${tender.description || ''} ${tender.organization} ${tender.reference_no || ''}`.toLowerCase();
       const tenderSemanticText = buildTenderEmbeddingText(tender);
       const tenderEmbedBuf = tender.embedding || serializeEmbedding(computeFastSemanticEmbedding(tenderSemanticText));
 
-      const matchedTracks: string[] = [];
-      const exactKeywords: string[] = [];
-      const semanticTags: string[] = [];
-      const semanticDiscoveryScores: number[] = [];
-      let maxSemanticSim = 0;
-
-      for (const track of tracks) {
-        // Stage 1: Hard Negative Keyword Gate (AI never overrides negative keywords)
-        const hasNegative = track.negative_keywords.some((neg: string) => containsKeyword(combinedText, neg));
-        if (hasNegative) continue;
-
-        // Stage 2: Exact Positive Keyword Check
-        const hitKeywords = track.positive_keywords.filter((pos: string) => containsKeyword(combinedText, pos));
-
-        // Stage 3: Semantic Vector Similarity
-        const sim = track.positive_keywords.length > 0
-          ? computeTextSemanticSimilarity(tenderSemanticText, track.trackText, tenderEmbedBuf, track.embedding)
-          : 0;
-        if (sim > maxSemanticSim) maxSemanticSim = sim;
-
-        if (hitKeywords.length > 0) {
-          matchedTracks.push(track.name);
-          exactKeywords.push(...hitKeywords);
-        } else if (track.positive_keywords.length > 0 && sim >= 0.58) {
-          matchedTracks.push(track.name);
-          const pct = Math.round(sim * 100);
-          semanticTags.push(`✨ Semantic (${pct}%)`);
-          semanticDiscoveryScores.push(Math.min(85, Math.max(35, pct)));
-        }
-      }
-
-      let allMatchedKeywords = exactKeywords.length > 0
-        ? Array.from(new Set(exactKeywords))
-        : Array.from(new Set(semanticTags));
-
-      let matchScore = 30;
-      if (exactKeywords.length > 0) {
-        matchScore = Math.min(100, Math.max(30, exactKeywords.length * 20));
-      } else if (semanticDiscoveryScores.length > 0) {
-        matchScore = Math.max(...semanticDiscoveryScores);
-      }
+      const baseMatch = matchTracks(
+        {
+          title: tender.title,
+          organization: tender.organization,
+          description: tender.description || '',
+          referenceNo: tender.reference_no || ''
+        },
+        tracks,
+        { tenderEmbedding: tenderEmbedBuf }
+      );
+      const matchedTracks = [...baseMatch.matchedTracks];
+      let allMatchedKeywords = Array.from(new Set(baseMatch.matchedKeywords));
+      let matchScore = baseMatch.matchScore;
 
       if (tender.extracted_text && tender.extracted_text.trim()) {
         const rescored = applyDocumentScopeToTracks(
@@ -199,7 +173,7 @@ export function reScoreTendersAgainstTracks() {
         JSON.stringify(matchedTracks),
         JSON.stringify(allMatchedKeywords),
         matchScore,
-        Math.round(maxSemanticSim * 1000) / 1000,
+        baseMatch.semanticScore ?? 0,
         tenderEmbedBuf,
         nextIngestionStatus,
         tender.id

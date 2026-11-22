@@ -485,6 +485,29 @@ describe('Database and Repository Layer', () => {
       expect(docReady.ingestion_status).toBe('ready');
       expect(JSON.parse(docReady.domain_tracks)).toContain('Solar & Clean Energy');
     });
+
+    it('reScoreTendersAgainstTracks ignores generic default portal names and assigns match_score 0 when unmatched', () => {
+      db.prepare(`
+        INSERT INTO tenders (id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url, domain_tracks, matched_keywords, match_score, pipeline_status, is_bookmarked, ingestion_status)
+        VALUES
+          ('t-portal-org', 't-portal-org', 'fde', 'Federal Directorate of Education (FDE)', 'REF-FDE-9', 'Miscellaneous Unrelated Widget Calibration', 'Federal Directorate of Education (FDE)', 'https://example.com/fde', '[]', '[]', 50, 'New Opportunity', 0, 'ready'),
+          ('t-zero-match', 't-zero-match', 'epms_ppra', 'Federal PPRA (EPMS)', 'REF-ZERO-9', 'Miscellaneous Unrelated Widget Calibration', 'Generic Authority', 'https://example.com/zero', '[]', '[]', 40, 'New Opportunity', 0, 'ready')
+      `).run();
+
+      saveDomainTrack({
+        name: 'Education Portal Name Guard',
+        positive_keywords: ['education'],
+        negative_keywords: [],
+        is_active: 1
+      });
+
+      const fdeRow = getTenderById('t-portal-org');
+      const zeroRow = getTenderById('t-zero-match');
+      expect(fdeRow?.domain_tracks).toEqual([]);
+      expect(fdeRow?.match_score).toBe(0);
+      expect(zeroRow?.domain_tracks).toEqual([]);
+      expect(zeroRow?.match_score).toBe(0);
+    });
   });
 
   describe('Portal Health & Credentials', () => {

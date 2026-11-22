@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { asyncHandler } from './routeUtils.js';
 import {
   getAllTenders,
   getTenderById,
@@ -14,14 +15,14 @@ import {
   getPortalTenderSummary,
   clearTenderReviewFlag,
   requeueFailedJobs,
-  refreshTenderDocFetchStatus
+  refreshTenderDocFetchStatus,
+  getGeminiApiKey
 } from '../db/index.js';
 import { drainDocumentQueue } from '../services/ingestWorker.js';
 import { TENDER_STATUSES } from '../../shared/types.js';
 import { analyzeTenderById, fetchDocumentsForTender, matchTracks, parseDateString, formatClosingDate } from '../scrapers/crawlerEngine.js';
 import { saveManualDossier } from '../services/dossierManager.js';
 import { extractTenderFromImage } from '../services/ocrService.js';
-import { getGeminiApiKey } from '../db/index.js';
 
 export const tendersRouter = Router();
 
@@ -126,7 +127,7 @@ tendersRouter.post('/:id/viewed', handleViewedUpdate);
 // explicitly so the Inbox removes the row, rather than a 404 that left a ghost row behind.
 const EXPIRED_MESSAGE = 'Deadline has passed: tender removed from the Inbox.';
 
-tendersRouter.post('/:id/analyze', async (req, res) => {
+tendersRouter.post('/:id/analyze', asyncHandler(async (req, res) => {
   if (!getGeminiApiKey()) {
     return res.status(400).json({ error: 'Google AI Studio API key is not configured. Add it in Sources & Keywords > Data.' });
   }
@@ -134,9 +135,9 @@ tendersRouter.post('/:id/analyze', async (req, res) => {
   const tender = await analyzeTenderById(req.params.id);
   if (!tender) return res.json({ success: true, expired: true, id: req.params.id, message: EXPIRED_MESSAGE });
   res.json({ success: true, tender, message: 'Tender analyzed with Google AI.' });
-});
+}));
 
-tendersRouter.post('/:id/refresh', async (req, res) => {
+tendersRouter.post('/:id/refresh', asyncHandler(async (req, res) => {
   if (!getTenderById(req.params.id)) return res.status(404).json({ error: 'Tender not found' });
   const tender = await analyzeTenderById(req.params.id, { forceRefresh: true });
   if (!tender) return res.json({ success: true, expired: true, id: req.params.id, message: EXPIRED_MESSAGE });
@@ -147,7 +148,7 @@ tendersRouter.post('/:id/refresh', async (req, res) => {
       ? 'Tender information refreshed from portal and summarized with AI.'
       : 'Tender information refreshed from portal.'
   });
-});
+}));
 
 tendersRouter.post('/:id/fetch-documents', async (req, res) => {
   try {
@@ -185,7 +186,7 @@ tendersRouter.patch('/:id/review', (req, res) => {
 });
 
 // Re-queue a tender's failed document downloads and run the worker now.
-tendersRouter.post('/:id/retry-documents', async (req, res) => {
+tendersRouter.post('/:id/retry-documents', (req, res) => {
   const existing = getTenderById(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Tender not found' });
   const requeued = requeueFailedJobs(existing.id);
@@ -203,7 +204,7 @@ tendersRouter.post('/:id/retry-documents', async (req, res) => {
   });
 });
 
-tendersRouter.post('/:id/attachments', async (req, res) => {
+tendersRouter.post('/:id/attachments', asyncHandler(async (req, res) => {
   const existing = getTenderById(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Tender not found' });
 
@@ -240,7 +241,7 @@ tendersRouter.post('/:id/attachments', async (req, res) => {
 
   const tender = updateTenderFields(existing.id, fieldUpdates);
   res.json({ success: true, tender, attachment: doc, aiExtracted });
-});
+}));
 
 tendersRouter.patch('/:id', (req, res) => {
   const existing = getTenderById(req.params.id);
@@ -266,7 +267,7 @@ tendersRouter.patch('/:id', (req, res) => {
   res.json({ success: true, tender });
 });
 
-tendersRouter.post('/', async (req, res) => {
+tendersRouter.post('/', (req, res) => {
   const {
     title,
     organization,

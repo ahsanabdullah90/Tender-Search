@@ -14,3 +14,7 @@ apiRouter.use('/kpis', kpisRouter);
 apiRouter.use('/corrigenda', corrigendaRouter);
 apiRouter.use('/scan', scanRouter);
 apiRouter.use('/', systemRouter);
+
+apiRouter.use((_req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
+});

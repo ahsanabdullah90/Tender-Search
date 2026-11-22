@@ -45,7 +45,8 @@ export function containsKeyword(text: string, keyword: string): boolean {
  */
 export function matchTracks(
   item: MatchableItem,
-  activeTracks: any[]
+  activeTracks: any[],
+  options?: { tenderEmbedding?: Buffer | null }
 ): { matchedTracks: string[]; matchedKeywords: string[]; matchScore: number; semanticScore?: number } {
   // Exclude generic portal name from keyword matching to prevent 100% false-positive matches on education/skills portals
   const orgLower = (item.organization || '').toLowerCase();
@@ -77,7 +78,12 @@ export function matchTracks(
 
     // Stage 3: Semantic Vector Similarity
     const trackText = buildTrackEmbeddingText({ name: track.name, positive_keywords: posKeywords });
-    const sim = computeTextSemanticSimilarity(tenderSemanticText, trackText);
+    const sim = computeTextSemanticSimilarity(
+      tenderSemanticText,
+      trackText,
+      options?.tenderEmbedding,
+      track.embedding
+    );
     if (sim > maxSemanticSim) maxSemanticSim = sim;
 
     if (hitKeywords.length > 0) {
@@ -129,7 +135,8 @@ export function applyDocumentScopeToTracks(
 
   const withScope = matchTracks({ ...item, description: `${item.description || ''} ${scopeText}` }, activeTracks);
   const scopeLower = scopeText.toLowerCase();
-  const listingText = `${item.title} ${item.description || ''} ${item.organization || ''} ${item.referenceNo || ''}`.toLowerCase();
+  const orgForMatching = DEFAULT_PORTAL_NAMES.has((item.organization || '').toLowerCase()) ? '' : (item.organization || '');
+  const listingText = `${item.title} ${item.description || ''} ${orgForMatching} ${item.referenceNo || ''}`.toLowerCase();
 
   const tracks: string[] = [];
   const excludedBy: string[] = [];

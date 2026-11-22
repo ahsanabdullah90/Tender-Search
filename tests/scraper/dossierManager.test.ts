@@ -404,6 +404,40 @@ describe('dossierManager', () => {
       }
     });
 
+    it('retries transient ECONNRESET with legacyTls once without pinning the host in legacyTlsHosts', async () => {
+      const httpsGetSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, opts: any, cb: any) => {
+        const req = new EventEmitter() as any;
+        req.destroy = vi.fn();
+        if (opts.agent === sslTolerantAgent) {
+          setImmediate(() => {
+            const err: any = new Error('socket hang up');
+            err.code = 'ECONNRESET';
+            req.emit('error', err);
+          });
+        } else {
+          const res = new EventEmitter() as any;
+          res.statusCode = 200;
+          res.complete = true;
+          res.headers = { 'content-type': 'text/html; charset=utf-8' };
+          setImmediate(() => {
+            cb(res);
+            res.emit('data', Buffer.from('<html><body>Recovered</body></html>'));
+            res.emit('end');
+          });
+        }
+        return req;
+      });
+
+      try {
+        const host = 'transient-reset.example.gov.pk';
+        const res = await fetchHtmlWithMetadata(`https://${host}/ActiveTenders.aspx`);
+        expect(res.html).toContain('Recovered');
+        expect(isLegacyTlsHost(host)).toBe(false);
+      } finally {
+        httpsGetSpy.mockRestore();
+      }
+    });
+
     it('fetchFileBuffer retries HTTPS PDF downloads with legacySslTolerantAgent on ERR_SSL_WRONG_VERSION_NUMBER', async () => {
       const agentsUsed: any[] = [];
       const httpsSpy = vi.spyOn(https, 'get').mockImplementation((_url: any, opts: any, cb: any) => {

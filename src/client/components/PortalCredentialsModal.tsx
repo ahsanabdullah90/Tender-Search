@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { PortalHealth } from '../../shared/types';
 import { X, KeyRound, ExternalLink, Eye, EyeOff, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 
@@ -24,9 +24,21 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
   const [isFetching, setIsFetching] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isOpen || !portal) return;
+
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
 
     setErrorMsg(null);
     setSuccessMsg(null);
@@ -35,7 +47,10 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
 
     // Fetch existing credentials
     fetch(`/api/portals/${portal.portal_id}/credentials`)
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then(data => {
         setUsername(data.username || portal.auth_username || '');
         setLoginUrl(data.loginUrl || portal.login_url || (portal.portal_id === 'tender_services' ? 'https://tenderservice.pk/permits/login.php' : portal.tenders_url));
@@ -86,7 +101,9 @@ export const PortalCredentialsModal: React.FC<PortalCredentialsModalProps> = ({
 
       setSuccessMsg(data.message || 'Credentials authenticated and saved successfully!');
       setHasExistingPassword(true);
-      setTimeout(() => {
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = setTimeout(() => {
+        closeTimerRef.current = null;
         onSuccess();
         onClose();
       }, 1200);

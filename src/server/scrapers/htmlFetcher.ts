@@ -1,6 +1,6 @@
 import http from 'http';
 import https from 'https';
-import { HUMAN_CHROME_HEADERS, sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError } from './baseScraper.js';
+import { HUMAN_CHROME_HEADERS, sslTolerantAgent, legacySslTolerantAgent, isTlsFallbackError, isStrictTlsHandshakeError } from './baseScraper.js';
 import { isTransientNetworkError, reportNetworkOutcome, PASSIVE_SLOW_HTML_MS } from '../services/networkMonitor.js';
 
 export interface HtmlFetchResult {
@@ -9,14 +9,22 @@ export interface HtmlFetchResult {
   cookies?: string;
 }
 
-const legacyTlsHosts = new Set<string>();
+export const LEGACY_TLS_TTL_MS = 30 * 60 * 1000;
+const legacyTlsHosts = new Map<string, number>();
 
 export function resetLegacyTlsHostsForTests(): void {
   legacyTlsHosts.clear();
 }
 
 export function isLegacyTlsHost(hostname: string): boolean {
-  return legacyTlsHosts.has(hostname.toLowerCase());
+  const key = hostname.toLowerCase();
+  const cachedAt = legacyTlsHosts.get(key);
+  if (cachedAt === undefined) return false;
+  if (Date.now() - cachedAt > LEGACY_TLS_TTL_MS) {
+    legacyTlsHosts.delete(key);
+    return false;
+  }
+  return true;
 }
 
 function mergeCookies(existing?: string, setCookieHeaders?: string[]): string | undefined {
@@ -69,7 +77,8 @@ function requestHtmlWithMetadata(
       if (settled) return;
       settled = true;
       if (reportTopLevel && parsedUrlForTelemetry && isTransientNetworkError(err)) {
-        reportNetworkOutcome(parsedUrlForTelemetry.hostname, false, { isTimeout: true });
+        const isTimeout = /ETIMEDOUT|ESOCKETTIMEDOUT|timed?\s*out/i.test(`${err?.code || ''} ${err?.message || ''}`);
+        reportNetworkOutcome(parsedUrlForTelemetry.hostname, false, { isTimeout });
       }
       reject(err);
     };
@@ -88,7 +97,7 @@ function requestHtmlWithMetadata(
 
     const isHttps = parsedUrl.protocol === 'https:';
     const hostKey = parsedUrl.hostname.toLowerCase();
-    const effectiveUseLegacyTls = useLegacyTls || (isHttps && legacyTlsHosts.has(hostKey));
+    const effectiveUseLegacyTls = useLegacyTls || (isHttps && isLegacyTlsHost(hostKey));
     const client = isHttps ? https : http;
 
     const reqHeaders: Record<string, string> = { ...HUMAN_CHROME_HEADERS };
@@ -195,11 +204,14 @@ function requestHtmlWithMetadata(
       const msg = String(err?.message || '');
       // 1. Retry HTTPS TLS / cipher-record failures (including wrong version number) with legacySslTolerantAgent first
       if (isHttps && !effectiveUseLegacyTls && isTlsFallbackError(err)) {
+        const shouldCacheHost = isStrictTlsHandshakeError(err);
         return requestHtmlWithMetadata(url, {
           ...options,
           useLegacyTls: true
         }).then((res) => {
-          legacyTlsHosts.add(hostKey);
+          if (shouldCacheHost) {
+            legacyTlsHosts.set(hostKey, Date.now());
+          }
           finishResolve(res);
         }).catch(() => finishReject(err));
       }
