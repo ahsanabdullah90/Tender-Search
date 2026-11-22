@@ -134,7 +134,7 @@ export function isGenericListingUrl(url: string, portalDef?: PortalDefinition): 
       if (cleanUrl === cleanBase || cleanUrl === cleanTenders) return true;
     }
     const parsed = new URL(url);
-    return parsed.pathname === '' || parsed.pathname === '/' || /^\/(tenders?|active-tenders?|procurements?)$/i.test(parsed.pathname);
+    return parsed.pathname === '' || parsed.pathname === '/' || /^\/(tenders?|active-tenders?|procurements?|viewall)$/i.test(parsed.pathname);
   } catch {
     return false;
   }
@@ -308,20 +308,57 @@ const PUNJAB_LOCATION_PATTERNS: Array<[RegExp, string]> = [
   [/\bjauharabad\b/i, 'Jauharabad']
 ];
 
+const GB_LOCATION_PATTERNS: Array<[RegExp, string]> = [
+  [/\bskardu\b/i, 'Skardu'],
+  [/\bchilas\b/i, 'Chilas'],
+  [/\bnagar\b/i, 'Nagar'],
+  [/\bhunza\b/i, 'Hunza'],
+  [/\bghizer\b/i, 'Ghizer'],
+  [/\bshigar\b/i, 'Shigar'],
+  [/\bkharmang\b/i, 'Kharmang'],
+  [/\bghanchee?\b/i, 'Ghanche'],
+  [/\bastore?\b/i, 'Astore'],
+  [/\bdiamer\b/i, 'Diamer'],
+  [/\bdarel\b/i, 'Darel'],
+  [/\btangir\b/i, 'Tangir'],
+  [/\broun?du\b/i, 'Roundu'],
+  [/\bkhaplu\b/i, 'Khaplu'],
+  [/\bgupis\b/i, 'Gupis'],
+  [/\byasin\b/i, 'Yasin'],
+  [/\bgilgit\b(?!\s*[-–—]\s*baltistan)/i, 'Gilgit']
+];
+
+function extractLocationFromPatterns(
+  patterns: Array<[RegExp, string]>,
+  provinceLabel: string,
+  fallbackLocation: string,
+  deptText: string,
+  title?: string
+): string {
+  const candidates = title ? [deptText, title] : [deptText];
+  for (const source of candidates) {
+    if (!source) continue;
+    for (const [pattern, city] of patterns) {
+      if (pattern.test(source)) {
+        return `${city}, ${provinceLabel}`;
+      }
+    }
+  }
+  return fallbackLocation;
+}
+
 /**
  * Extracts a canonical Punjab city/district location from department text (or title fallback).
  */
 export function extractPunjabLocation(deptText: string, title?: string): string {
-  const candidates = title ? [deptText, title] : [deptText];
-  for (const source of candidates) {
-    if (!source) continue;
-    for (const [pattern, city] of PUNJAB_LOCATION_PATTERNS) {
-      if (pattern.test(source)) {
-        return `${city}, Punjab`;
-      }
-    }
-  }
-  return 'Punjab, Pakistan';
+  return extractLocationFromPatterns(PUNJAB_LOCATION_PATTERNS, 'Punjab', 'Punjab, Pakistan', deptText, title);
+}
+
+/**
+ * Extracts a canonical Gilgit-Baltistan district/city location from department text (or title fallback).
+ */
+export function extractGbLocation(deptText: string, title?: string): string {
+  return extractLocationFromPatterns(GB_LOCATION_PATTERNS, 'Gilgit-Baltistan', 'Gilgit-Baltistan, Pakistan', deptText, title);
 }
 
 /**
@@ -610,7 +647,18 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
 
   // 3c. Structured GBPPRA & Laravel Job/Procurement Cards (.job-post-item)
   if ($('.job-post-item').length > 0) {
+    const NON_BID_GB_BADGE_RE =
+      /\b(?:final\s+evaluation(?:\s+report)?|technical\s+evaluation(?:\s+report)?|financial\s+evaluation(?:\s+result|\s+report)?|evaluation\s+report|result|cancelled|canceled|postponed|auction|work\s+order|supply\s+order)\b/i;
+
     $('.job-post-item').each((_, el) => {
+      const badgeText = $(el)
+        .find('.badge-wrap .badge')
+        .map((__, b) => $(b).text().replace(/\s+/g, ' ').trim())
+        .get()
+        .filter(Boolean)
+        .join(' | ');
+      if (badgeText && NON_BID_GB_BADGE_RE.test(badgeText)) return;
+
       let refNo: string | undefined;
       const refMatch = $(el).text().match(/\[?(TSE-[\w\d]+)\]?/i);
       if (refMatch) refNo = refMatch[1];
@@ -634,9 +682,6 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
         if (orgText && orgText.length > 2) organization = orgText;
       }
 
-      const rowText = $(el).text().replace(/\s+/g, ' ').trim();
-      const { publishDate, closingDate } = extractDatesFromText(rowText);
-
       const attachmentUrls = collectRowAttachments($, el, portal);
       $(el).find('a[href*="proc_files"], a[href$=".pdf"]').each((__, aEl) => {
         const href = $(aEl).attr('href');
@@ -654,18 +699,35 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       const nonImageDoc = attachmentUrls.find(u => !/\.(jpe?g|png|webp)(\?|$)/i.test(u));
       const directUrl = detailUrl || nonImageDoc || portal.tendersUrl;
 
+      if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
+
+      const rowText = $(el).text().replace(/\s+/g, ' ').trim();
+      const rawSuccessDate = $(el).find('.text-success').first().text().replace(/\s+/g, ' ').trim();
+      const rawDangerDate = $(el).find('.text-danger').first().text().replace(/\s+/g, ' ').trim();
+      const directPublish = rawSuccessDate ? parseDateString(rawSuccessDate) : null;
+      const directClosing = rawDangerDate ? parseDateString(rawDangerDate) : null;
+      const fallbackDates = (!directPublish || !directClosing) ? extractDatesFromText(rowText) : { publishDate: null, closingDate: null };
+      const publishDate = directPublish || fallbackDates.publishDate;
+      const closingDate = directClosing || fallbackDates.closingDate;
+
+      const isCorrigendum =
+        /\b(?:corrigendum|addendum)\b/i.test(badgeText) ||
+        /\b(?:corrigendum|addendum)\b/i.test(title);
+
       items.push({
         referenceNo: refNo || extractRefFromText(rowText),
         title,
         organization,
+        location: extractGbLocation(organization, title),
         directUrl,
         publishDate: publishDate || undefined,
         closingDate,
-        description: '',
+        description: badgeText,
+        isCorrigendum: isCorrigendum || undefined,
         attachmentUrls
       });
     });
-    if (items.length > 0) return { items, hitlRequired: false };
+    return { items: sanitizeScrapedItems(items, portal), hitlRequired: false };
   }
 
   // 3d. Structured Sindh SPPRA EPADS Angular Cards (section.card with EPADS-S-... tender numbers)

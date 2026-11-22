@@ -73,6 +73,7 @@ describe('dossierStore', () => {
       expect(getPortalFileCode('sppra')).toBe('SPPRA');
       expect(getPortalFileCode('kppra')).toBe('KPPRA');
       expect(getPortalFileCode('bppra')).toBe('BPPRA');
+      expect(getPortalFileCode('gilgit')).toBe('GBPPRA');
       expect(getPortalFileCode('ndma')).toBe('NDMA');
       expect(getPortalFileCode('ungm')).toBe('UNGM');
       expect(getPortalFileCode('giz')).toBe('GIZ');

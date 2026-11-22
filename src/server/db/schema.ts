@@ -522,9 +522,16 @@ export function seedPortalHealth() {
             db.prepare('UPDATE portal_health SET base_url = ?, tenders_url = ? WHERE portal_id = ?')
               .run(p.baseUrl, p.tendersUrl, p.id);
           }
-          if (p.id === 'gilgit' && dbRow.access_mode !== p.accessMode) {
-            db.prepare("UPDATE portal_health SET base_url = ?, tenders_url = ?, access_mode = ?, status = 'error', verified_status = ? WHERE portal_id = ?")
-              .run(p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
+          if (
+            p.id === 'gilgit' &&
+            (String(dbRow.tenders_url).includes('gilgitbaltistan.gov.pk') ||
+              dbRow.tenders_url !== p.tendersUrl ||
+              dbRow.access_mode !== p.accessMode ||
+              dbRow.category !== p.category)
+          ) {
+            db.prepare(
+              "UPDATE portal_health SET portal_name = ?, category = ?, base_url = ?, tenders_url = ?, access_mode = ?, status = 'online', verified_status = ?, last_error_message = NULL, last_error_code = NULL WHERE portal_id = ?"
+            ).run(p.name, p.category, p.baseUrl, p.tendersUrl, p.accessMode, p.verifiedStatus, p.id);
           }
         }
       } catch {}

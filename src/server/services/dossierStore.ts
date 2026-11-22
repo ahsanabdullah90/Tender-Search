@@ -75,7 +75,7 @@ export const PORTAL_FILE_CODES: Record<string, string> = {
   ndma: 'NDMA',
   fde: 'FDE',
   mofept: 'MOFEPT',
-  gilgit: 'GB',
+  gilgit: 'GBPPRA',
   psdf: 'PSDF',
   psda: 'PSDA',
   peef: 'PEEF',

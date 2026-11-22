@@ -115,6 +115,9 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Workstream C — Gilgit-Baltistan PPRA (`gilgit`) Hardening (November 22, 2026)**:
+  - Repointed `gilgit` in `src/server/scrapers/portalList.ts`, `src/server/services/dossierStore.ts` (`GBPPRA` fileCode), and `src/server/db/schema.ts` to `https://gbppra.gov.pk/viewall` (`category: 'Regulatory'`, `accessMode: 'public'`, `quickMaxPages: 4` / `deepMaxPages: 12`), and restored `gilgit` in `./data/tender_tracker.db` (`13` active portals).
+  - Hardened Section 3c `.job-post-item` parsing in `src/server/scrapers/portalParsers.ts`: filtered non-biddable `.badge-wrap .badge` statuses (evaluation reports, results, cancelled, postponed, auction, work/supply orders) without leaking to generic table fallback, flagged `Corrigendum`/`Addendum`, read `.text-success` / `.text-danger` dates directly, added `extractGbLocation` across all GB districts, and added `tests/fixtures/portals/gilgit/page.html`.
 - **Workstream B — Khyber Pakhtunkhwa (`kppra`) Official JSON API Integration (November 22, 2026)**:
   - Created `src/server/scrapers/kpApi.ts` integrating the official KP Government / KPPRA public REST API (`https://mgn1.kp.gov.pk/api/tenders`, `quickMaxPages: 8` / `deepMaxPages: 15`, DB early-stop), mapping `uuid` detail URLs (`https://kp.gov.pk/tender/detail/<uuid>`), `tender_number` references, `department_name` organizations, `media`/`bidding_document`/`corrigenda` PDFs with automatic corrigendum deadline extension, auction/disposal skipping, and KP district location extraction (`extractKpLocation`).
   - Upgraded `kppra` in `src/server/scrapers/portalList.ts` and `src/server/db/schema.ts` to `tier: 'http'`, `accessMode: 'public'`, `tendersUrl: 'https://kp.gov.pk/tenders'`, dispatched `kppra` in `src/server/scrapers/crawlerEngine.ts`, restored `kppra` in `./data/tender_tracker.db`, and added hermetic unit/contract coverage in `tests/scraper/kp-api.test.ts`.

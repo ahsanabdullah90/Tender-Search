@@ -11,6 +11,7 @@ import {
   getTenderById,
   DOSSIERS_DIR
 } from '../../src/server/db/index.js';
+import { extractGbLocation } from '../../src/server/scrapers/portalParsers.js';
 import {
   parsePortalHtml,
   extractDatesFromText,
@@ -1086,6 +1087,78 @@ describe('Crawler Engine & Scraper Pipeline', () => {
       expect(item.attachmentUrls).toEqual([
         'https://gbppra.gov.pk/storage/proc_files/9Kl6Xm1-metaQWR2ZXJ0aXNlbWVudCBGYWJyaWNhdGlvbiBvZiBBbWJ1bGFuY2UgRC5wZGY=-.pdf'
       ]);
+      expect(item.location).toBe('Hunza, Gilgit-Baltistan');
+      expect(item.publishDate).toBe('2026-11-04T09:00:00.000Z');
+      expect(item.closingDate).toBe('2026-11-20T09:00:00.000Z');
+    });
+
+    it('hardens GBPPRA .job-post-item parsing: skips non-biddable badges, flags Corrigendum/Addendum, reads .text-success/.text-danger dates, and extracts all 10 GB districts', () => {
+      const portal = PORTAL_DEFINITIONS.find(p => p.id === 'gilgit')!;
+      const makeCard = (id: number, badge: string, title: string, org: string, pub = '18 Nov, 2026', close = '05 Dec, 2026') => `
+        <div class="job-post-item">
+          <div class="job-post-item-header">
+            <h2>[TSE-202611${id}]</h2>
+            <h2>${title}</h2>
+          </div>
+          <div class="job-post-item-body">
+            <div class="badge-wrap"><span class="badge">${badge}</span></div>
+            <div><span class="fa fa-university"></span> <a href="#">${org}</a></div>
+            <div class="text-success">${pub}</div>
+            <div class="text-danger">${close}</div>
+          </div>
+          <div><a href="https://gbppra.gov.pk/procurementdetails/${id}" class="btn btn-primary">View Details</a></div>
+        </div>
+      `;
+
+      const mixedHtml = [
+        makeCard(4001, 'Corrigendum', 'Rehabilitation of Girls High School Building', 'XEN B&R Division Skardu', '20 Nov, 2026', '10 Dec, 2026'),
+        makeCard(4002, 'Addendum', 'Procurement of Science Lab Equipment for Colleges', 'Director Education Gilgit-Baltistan', '21 Nov, 2026', '12 Dec, 2026'),
+        makeCard(4003, 'Tender Notice', 'Supply of Solar Heating Systems for Hospital', 'Health Department Chilas'),
+        makeCard(4004, 'Final Evaluation Report', 'Construction of Bridge over River', 'C&W Division Gilgit'),
+        makeCard(4005, 'Technical Evaluation', 'Consultancy for Hydropower Feasibility', 'Water & Power GB'),
+        makeCard(4006, 'Financial Evaluation Result', 'Procurement of Medical Equipment', 'DHQ Hospital Skardu'),
+        makeCard(4007, 'Result', 'Upgradation of Technical College', 'TEVTA Gilgit'),
+        makeCard(4008, 'Cancelled', 'Procurement of Transport Vans', 'Directorate of Education'),
+        makeCard(4009, 'Postponed', 'Printing of Examination Answer Scripts', 'Karakoram Board'),
+        makeCard(4010, 'Auction', 'Disposal of Unserviceable Vehicles', 'Transport Pool Gilgit'),
+        makeCard(4011, 'Work Order / Supply Order', 'Supply of Office Stationery', 'Finance Department GB')
+      ].join('\n');
+
+      const result = parsePortalHtml(mixedHtml, portal);
+      expect(result.hitlRequired).toBe(false);
+      expect(result.items).toHaveLength(3);
+
+      expect(result.items[0].isCorrigendum).toBe(true);
+      expect(result.items[0].location).toBe('Skardu, Gilgit-Baltistan');
+      expect(result.items[0].publishDate).toBe('2026-11-20T09:00:00.000Z');
+      expect(result.items[0].closingDate).toBe('2026-12-10T09:00:00.000Z');
+      expect(result.items[0].description).toBe('Corrigendum');
+
+      expect(result.items[1].isCorrigendum).toBe(true);
+      // "Gilgit-Baltistan" must not falsely match district "Gilgit"
+      expect(result.items[1].location).toBe('Gilgit-Baltistan, Pakistan');
+      expect(result.items[1].publishDate).toBe('2026-11-21T09:00:00.000Z');
+      expect(result.items[1].closingDate).toBe('2026-12-12T09:00:00.000Z');
+
+      expect(result.items[2].isCorrigendum).toBeUndefined();
+      expect(result.items[2].location).toBe('Chilas, Gilgit-Baltistan');
+
+      // When every .job-post-item card is filtered as non-biddable, parser returns 0 items without falling back to Section 4
+      const allFilteredHtml = `
+        <table><tbody><tr><td><a href="/procurementdetails/4099">Should not leak from generic fallback</a></td><td>15 Dec 2026</td></tr></tbody></table>
+        ${makeCard(4090, 'Final Evaluation Report', 'Evaluation Report for Road Works', 'C&W Skardu')}
+        ${makeCard(4091, 'Postponed', 'Postponed Stationery Supply Tender', 'Education Kharmang')}
+      `;
+      const filteredOnly = parsePortalHtml(allFilteredHtml, portal);
+      expect(filteredOnly.items).toHaveLength(0);
+
+      // Verify all 10 GB districts and fallback
+      const districts = ['Gilgit', 'Skardu', 'Chilas', 'Nagar', 'Hunza', 'Ghizer', 'Shigar', 'Kharmang', 'Ghanche', 'Astore'];
+      for (const d of districts) {
+        expect(extractGbLocation(`XEN C&W Division ${d}`)).toBe(`${d}, Gilgit-Baltistan`);
+      }
+      expect(extractGbLocation('Government of Gilgit-Baltistan', 'Supply of Textbooks')).toBe('Gilgit-Baltistan, Pakistan');
+      expect(extractGbLocation('Government of Gilgit-Baltistan', 'Renovation of School in Ghanche')).toBe('Ghanche, Gilgit-Baltistan');
     });
 
     it('identifies generic listing URLs vs specific detail pages', () => {

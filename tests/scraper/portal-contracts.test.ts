@@ -38,12 +38,11 @@ const captured = fs.readdirSync(FIXTURES)
     expected: JSON.parse(fs.readFileSync(path.join(FIXTURES, d, 'expected.json'), 'utf8')) as Expected
   }));
 
-const synthetic = ['punjab_eproc', 'sppra', 'tender_services'].filter(d => fs.existsSync(path.join(FIXTURES, d, 'page.html')));
+const synthetic = ['punjab_eproc', 'sppra', 'gilgit', 'tender_services'].filter(d => fs.existsSync(path.join(FIXTURES, d, 'page.html')));
 
 /** Portals with no fixture, and why. */
 const NOT_COVERED: Record<string, string> = {
   kppra: 'JSON API-backed (kpApi.ts): tested in tests/scraper/kp-api.test.ts',
-  gilgit: 'offline_broken: the portal is unreachable',
   ungm: 'JavaScript-rendered: needs the Playwright tier, not plain HTTP'
 };
 

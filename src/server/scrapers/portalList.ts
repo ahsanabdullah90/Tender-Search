@@ -140,16 +140,17 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
   },
   {
     id: 'gilgit',
-    name: 'Government of Gilgit-Baltistan',
-    category: 'Federal/Regional',
+    name: 'Gilgit-Baltistan PPRA (gbppra.gov.pk)',
+    category: 'Regulatory',
     tier: 'http',
-    baseUrl: 'https://gilgitbaltistan.gov.pk',
-    tendersUrl: 'https://gilgitbaltistan.gov.pk',
-    fileCode: 'GB',
-    description: 'Gilgit-Baltistan portal (no dedicated public tenders board)',
+    baseUrl: 'https://gbppra.gov.pk',
+    tendersUrl: 'https://gbppra.gov.pk/viewall',
+    fileCode: 'GBPPRA',
+    description: 'Gilgit-Baltistan Public Procurement Regulatory Authority active procurement board (gbppra.gov.pk/viewall)',
     defaultKeywords: ['civil works', 'solar', 'education', 'printing'],
-    accessMode: 'offline_broken',
-    verifiedStatus: 'Partial — No dedicated tenders section; /Tenders 404s'
+    accessMode: 'public',
+    verifiedStatus: 'Working — Live GBPPRA procurement board with query pagination',
+    pagination: { kind: 'query', param: 'page', maxPages: 4, quickMaxPages: 4, deepMaxPages: 12 }
   },
 
   // 3. Technology, Skills & Education Authorities

@@ -4,7 +4,7 @@
 
 Tender Tracker catalogs 18 official and aggregator procurement portals across Pakistan, categorized into 5 operational sectors.
 
-These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The live database tracks 12 active online portals (with `epms_ppra` replacing legacy `epads`, Sindh `sppra` restored via the official EPADS public JSON API & DMS PDF fetcher, KP `kppra` restored via the official `kp.gov.pk` public REST API, and `deleted_portals` recording `epads`, `giz`, `pid`, `tender_services`, `ungm`, `psda`, and `gilgit`).
+These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The live database tracks 13 active online portals (with `epms_ppra` replacing legacy `epads`, Sindh `sppra` restored via the official EPADS public JSON API & DMS PDF fetcher, KP `kppra` restored via the official `kp.gov.pk` public REST API, Gilgit-Baltistan `gilgit` restored via `gbppra.gov.pk/viewall`, and `deleted_portals` recording `epads`, `giz`, `pid`, `tender_services`, `ungm`, and `psda`).
 
 | ID | Portal Name | Category | Tier | Access Mode | Default Tenders URL | Scraping Strategy & Operational Status |
 |---|---|---|---|---|---|---|
@@ -16,7 +16,7 @@ These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scra
 | `ndma` | National Disaster Management Authority (NDMA) | Federal/Regional | `http` | `public` | `https://ndma.gov.pk/tenders` | Emergency procurement and disaster relief infrastructure (scraped via `.tender-card` DOM extractors). |
 | `fde` | Federal Directorate of Education (FDE) | Federal/Regional | `http` | `public` | `https://fde.gov.pk/download-category/tender/` | Islamabad school solarization, furniture, and educational supplies (scraped via `h3.package-title`). |
 | `mofept` | Ministry of Federal Education & Professional Training | Federal/Regional | `http` | `public` | `https://mofept.gov.pk/Tenders` | Federal education ministry active tenders with server-side search parsing. |
-| `gilgit` | Government of Gilgit-Baltistan | Federal/Regional | `http` | `offline_broken` | `https://gilgitbaltistan.gov.pk` | Regional portal lacks dedicated public tenders directory; handled gracefully by crawler. |
+| `gilgit` | Gilgit-Baltistan PPRA (`gbppra.gov.pk`) | Regulatory | `http` | `public` | `https://gbppra.gov.pk/viewall` | Gilgit-Baltistan PPRA procurement board (`quickMaxPages: 4` / `deepMaxPages: 12`), scraped via Section 3c `.job-post-item` parser in `portalParsers.ts` skipping non-biddable `.badge-wrap .badge` statuses (evaluation reports, results, cancelled, postponed, auction, work/supply orders), flagging `Corrigendum`/`Addendum`, reading `.text-success` / `.text-danger` dates, and extracting GB district `location` (`extractGbLocation`). |
 | `pseb` | Pakistan Software Export Board (TechDestination) | Tech & Skills | `http` | `public` | `https://techdestination.com/tenders/` | Rebranded to TechDestination; extracts tender notices and attached bidding PDFs. |
 | `ignite` | Ignite National Technology Fund | Tech & Skills | `http` | `public` | `https://ignite.org.pk/procurement/` | National innovation and startup incubators procurement tab. |
 | `psdf` | Punjab Skills Development Fund (PSDF) | Tech & Skills | `http` | `public` | `https://psdf.org.pk/procurement` | Apex TVET and skills training procurement listings (scraped via `.inner-advertisement-listing-box`). |
@@ -97,12 +97,12 @@ When a configured `tenders_url` fails with a dead-link HTTP error (`404`, `410`,
 
 Every portal in `PORTAL_DEFINITIONS` is accounted for in `tests/scraper/portal-contracts.test.ts`:
 - **Captured Live Fixtures (`<= 50 KB` each)**: `epms_ppra`, `bppra`, `ndma`, `fde` (plus `fde_detail` exercising WordPress Download Manager `?wpdmdl=` attachment discovery), `mofept`, `pseb`, `ignite`, `psdf`, and `peef`.
-- **Synthetic Fixtures**: `punjab_eproc`, `sppra`, `tender_services`, `cloudflare_challenge`, and `login_required`.
+- **Synthetic Fixtures**: `punjab_eproc`, `sppra`, `gilgit`, `tender_services`, `cloudflare_challenge`, and `login_required`.
 - **Documented HTTP Zero-Yield / Non-Listing Portals**:
   - `psda`: Live page renders `<p><span><b>No Opening</b></span></p>` (recognized by `hasEmptyTenderTableState`).
   - `giz`: Overview page linking to external procurement portals (`ausschreibungen.giz.de`, `service.bund.de`, `ted.europa.eu`).
   - `pid`: Press Information Department homepage containing press releases rather than structured tender rows.
-- **Explicitly Excluded (`NOT_COVERED`)**: `kppra` (JSON API-backed via `kpApi.ts`, covered in `tests/scraper/kp-api.test.ts`), `gilgit` (`offline_broken`), and `ungm` (requires Playwright JS rendering).
+- **Explicitly Excluded (`NOT_COVERED`)**: `kppra` (JSON API-backed via `kpApi.ts`, covered in `tests/scraper/kp-api.test.ts`), and `ungm` (requires Playwright JS rendering).
 
 ---
 
