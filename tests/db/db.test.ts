@@ -36,14 +36,16 @@ import {
 import { findCanonicalMatch } from '../../src/server/services/deduplicator.js';
 import {
   appendSecondarySource,
-  slimPassedTenders,
-  recordTenderSuppression,
-  isTenderSuppressed,
   appendTenderExtractedText,
   buildFts5PrefixQuery,
   updateTenderFields,
   getKnownTenderMapForPortal
 } from '../../src/server/db/repositories/tendersRepo.js';
+import {
+  slimPassedTenders,
+  recordTenderSuppression,
+  isTenderSuppressed
+} from '../../src/server/db/repositories/tenderLifecycleRepo.js';
 import {
   getAlertsDigest,
   getDigestSettings,

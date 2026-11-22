@@ -16,11 +16,11 @@ import {
 import {
   getTenderById,
   updateTenderFields,
-  deleteTenders,
   setTenderTracksAndRelease,
   setTenderProvenance,
   hasTenderExtractedText
 } from '../db/repositories/tendersRepo.js';
+import { deleteTenders } from '../db/repositories/tenderLifecycleRepo.js';
 import { getAllDomainTracks } from '../db/repositories/tracksRepo.js';
 import { deriveDossierLabel } from './dossierManager.js';
 import { upgradeDossierDocTypeIfNeeded } from './dossierStore.js';

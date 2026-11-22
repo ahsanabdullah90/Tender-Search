@@ -1,11 +1,11 @@
 import {
   updateTenderFields,
-  deleteTenders,
   setTenderProvenance,
   updateTenderTracks,
   recordDeadlineExtension,
   appendTenderExtractedText
 } from '../db/repositories/tendersRepo.js';
+import { deleteTenders } from '../db/repositories/tenderLifecycleRepo.js';
 import { getAllDomainTracks } from '../db/repositories/tracksRepo.js';
 import { DocumentExtractionResult } from './documentExtractor.js';
 import { resolveCanonicalDeadline, formatClosingDate, DeadlineSourceKind, DeadlineConfidence } from '../scrapers/dateParser.js';

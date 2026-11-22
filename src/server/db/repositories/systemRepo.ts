@@ -3,7 +3,7 @@ import path from 'path';
 import { getPktDateKey } from '../../../shared/pktDate.js';
 import { getPathSizeBytes } from '../../services/fileUtils.js';
 import { db, BACKUPS_DIR, DOSSIERS_DIR } from '../connection.js';
-import { deleteTenders, NOT_STAGING_SQL } from './tendersRepo.js';
+import { deleteTenders, NOT_STAGING_SQL } from './tenderLifecycleRepo.js';
 import { DigestAlertItem, DigestSummary } from '../../../shared/types.js';
 
 export function getAppSetting(key: string): string | null {

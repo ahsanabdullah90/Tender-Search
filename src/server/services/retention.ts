@@ -14,7 +14,7 @@ import {
   getStaleAwaitingScopeTenderIds,
   countAwaitingScopeTenders,
   countPendingFilePurges
-} from '../db/repositories/tendersRepo.js';
+} from '../db/repositories/tenderLifecycleRepo.js';
 import { releaseExpiredLeases } from '../db/repositories/ingestJobsRepo.js';
 import {
   retryPendingFilePurges,

@@ -102,7 +102,13 @@ This master plan establishes the complete **7-portal statutory procurement backb
 
 ---
 
-## 3. Recently Completed Register Items (2026-11-11 – 2026-11-21)
+## 3. Recently Completed Register Items (2026-11-11 – 2026-11-22)
+
+- **Full-Repository Codebase Audit & 5-Phase Refactoring (`2026-11-22`):**
+  - **Phase 1–2**: Hardened scraper/service error handling and concurrency races, and pruned dead/legacy code across client and server.
+  - **Phase 3A–3B**: Extracted `src/shared/documentUtils.ts`, `src/server/services/fileUtils.ts`, `src/server/scrapers/scraperUtils.ts`, `src/client/utils/format.ts`, and `src/client/utils/apiClient.ts`; consolidated modals/popovers/status chips onto shared primitives in `src/client/ui/index.tsx`; hardened `%PORT%`/`$env:PORT`, Edge-first resolution, and cleanup scoping in `start-tender-tracker.bat`, `scripts/launch.cmd`, and `scripts/tray-app.ps1`.
+  - **Phase 4**: Broke all 14 circular imports in `src/` cleanly across shared/repository/service/scraper boundaries, typed all Express route handlers (`Request`, `Response`), and added the `GOV-3` zero-circular-import invariant test in `tests/unit/system-governance.test.ts`.
+  - **Phase 5**: Decomposed `SourcesScreen.tsx` into `src/client/components/sources/` (`shared.tsx`, `KeywordsTab.tsx`, `PortalsTab.tsx`, `DataTab.tsx`), extracted `detailHelpers.ts` + `DossierSection.tsx` from `Detail.tsx`, extracted `src/server/scrapers/parserHelpers.ts` from `portalParsers.ts`, and extracted `src/server/db/repositories/tenderLifecycleRepo.ts` from `tendersRepo.ts` with full barrel/re-export compatibility and green `npm run verify`.
 
 - **PSDF Title Sanitization & Passive Network Threshold Tuning (`2026-11-21`):**
   - Added `stripLiteralHtmlTags` in `src/server/scrapers/portalParsers.ts` (and `sanitizeScrapedItems`) to strip/reject HTML-encoded `<img>` icon tags from PSDF titles, removed the malformed historical row `tender-psdf-40a989667fde1421` from `./data/tender_tracker.db`, and tuned `PASSIVE_SLOW_HTML_MS` (`22s`) / `PASSIVE_WINDOW_MS` (`2m`) in `src/server/services/networkMonitor.ts` to avoid false slow-network pauses after healthy multi-page scans.

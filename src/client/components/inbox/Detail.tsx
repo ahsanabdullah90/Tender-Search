@@ -5,101 +5,31 @@ import {
   Copy,
   Download,
   ExternalLink,
-  FileText,
   Pencil,
   RotateCw,
   Sparkles,
   Trash2,
-  TriangleAlert,
-  Upload
+  TriangleAlert
 } from 'lucide-react';
 import { Tender, CorrigendumLog, DocumentQueueStatus } from '../../../shared/types';
-import { isDirectDocumentUrl } from '../../../shared/documentUtils';
 import { Button, Chip, FIELD_INPUT_CLASS } from '../../ui';
 import { apiMutate } from '../../utils/apiClient';
 import { asList, fileToBase64 } from '../../utils/format';
 import { DeleteTenderModal } from './DeleteTenderModal';
+import {
+  buildEditForm,
+  deadlineProvenance,
+  formatCountdown,
+  getTenderDocProcessingState,
+  hasAutoFetchableDocuments,
+  humanReviewReason,
+  useTick
+} from './detailHelpers';
+import { DossierSection } from './DossierSection';
 import { HighlightedDescription } from './HighlightedDescription';
 
 export { asList };
-
-function formatCountdown(closingDate: string | null) {
-  if (!closingDate) return null;
-  const diff = new Date(closingDate).getTime() - Date.now();
-  if (Number.isNaN(diff)) return null;
-  if (diff <= 0) return 'Closed';
-  const s = Math.floor(diff / 1000);
-  const d = Math.floor(s / 86400);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const clock = `${pad(Math.floor((s % 86400) / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
-  return d > 0 ? `${d}d ${clock}` : clock;
-}
-
-function buildEditForm(t: Tender) {
-  return {
-    title: t.title || '',
-    organization: t.organization || '',
-    reference_no: t.reference_no || '',
-    closing_date: t.closing_date ? t.closing_date.slice(0, 10) : '',
-    estimated_value: t.estimated_value || '',
-    direct_url: t.direct_url || '',
-    description: t.description || '',
-  };
-}
-
-/** Re-renders its caller once per interval and returns the current timestamp cleanly. */
-export function useTick(ms: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(timer);
-  }, [ms]);
-  return now;
-}
-
-/** Where a tender's deadline came from, as a badge (docs/13 §4.1). */
-export function deadlineProvenance(t: Pick<Tender, 'closing_date' | 'deadline_source' | 'deadline_confidence'>): {
-  label: string;
-  tone: 'ok' | 'warn' | 'neutral';
-  title: string;
-} {
-  if (!t.closing_date) {
-    return { label: 'No deadline · Portal HTML only', tone: 'neutral', title: 'The portal gave no deadline and none was found in the documents.' };
-  }
-  const fromDocument = t.deadline_source === 'corrigendum_doc' || t.deadline_source === 'primary_doc';
-  if (fromDocument && t.deadline_confidence === 'high') {
-    return t.deadline_source === 'corrigendum_doc'
-      ? { label: 'Verified from corrigendum', tone: 'ok', title: 'Deadline read from the corrigendum document.' }
-      : { label: 'Document verified', tone: 'ok', title: 'Deadline read from the official tender document.' };
-  }
-  if (fromDocument) {
-    return { label: 'From document · check', tone: 'warn', title: 'Deadline read from a document, but the reading was not certain. Check before bidding.' };
-  }
-  if (t.deadline_source === 'manual') {
-    return { label: 'Entered manually', tone: 'neutral', title: 'Deadline entered by hand.' };
-  }
-  return { label: 'Portal listing', tone: 'neutral', title: 'Deadline taken from the portal listing; the documents have not confirmed it.' };
-}
-
-/** Turns a stored review_reason ("kind: detail") into a sentence for the operator. */
-export function humanReviewReason(reason?: string | null): string {
-  if (!reason) return 'Please check this tender.';
-  const sep = reason.indexOf(':');
-  const kind = sep > 0 ? reason.slice(0, sep) : reason;
-  const detail = sep > 0 ? reason.slice(sep + 1).trim() : '';
-  switch (kind) {
-    case 'deadline_moved_earlier':
-      return `A corrigendum moved the deadline earlier (${detail}).`;
-    case 'corrigendum_cancelled':
-      return 'A corrigendum says this tender was cancelled or withdrawn.';
-    case 'uncertain_past_deadline':
-      return `${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
-    case 'excluded_terms_in_documents':
-      return `The documents mention excluded terms: ${detail}.`;
-    default:
-      return detail || reason;
-  }
-}
+export { useTick, deadlineProvenance, humanReviewReason, getTenderDocProcessingState };
 
 function LiveCountdown({ closingDate }: { closingDate: string | null }) {
   useTick(1000);
@@ -128,112 +58,6 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 
-interface TenderDocProcessingState {
-  kind: 'processing' | 'queued' | 'failed' | 'complete' | 'listing_only';
-  savedCount: number;
-  pendingCount: number;
-  processingCount: number;
-  failedCount: number;
-  shortLabel: string;
-  bannerTitle: string;
-  bannerDetail: string;
-  tone: 'accent' | 'warn' | 'ok' | 'neutral';
-}
-
-export function getTenderDocProcessingState(
-  t: Tender,
-  docQueue?: DocumentQueueStatus,
-  isFetchingLocal: boolean = false
-): TenderDocProcessingState {
-  const savedCount = asList(t.cached_dossiers).length;
-  const processingCount = t.doc_jobs_processing ?? 0;
-  const pendingCount = t.doc_jobs_pending ?? 0;
-  const failedCount = t.doc_jobs_failed ?? 0;
-  const inActiveQueue = Boolean(docQueue?.activeTenderIds?.includes(t.id));
-  const isProcessing = Boolean(isFetchingLocal || processingCount > 0 || inActiveQueue);
-
-  if (isProcessing) {
-    return {
-      kind: 'processing',
-      savedCount,
-      pendingCount,
-      processingCount,
-      failedCount,
-      shortLabel: savedCount > 0 ? 'Processing more…' : 'Processing…',
-      bannerTitle: processingCount > 0 ? `Actively processing ${processingCount} file(s)…` : 'Downloading & extracting documents…',
-      bannerDetail: pendingCount > 0
-        ? `${pendingCount} additional file(s) queued next.`
-        : savedCount > 0
-          ? `${savedCount} document(s) already saved; updating metadata and text index.`
-          : 'Reading portal documents, dates, and scope right now.',
-      tone: 'accent'
-    };
-  }
-
-  if (pendingCount > 0 || t.doc_fetch_status === 'pending') {
-    const q = pendingCount > 0 ? pendingCount : 1;
-    return {
-      kind: 'queued',
-      savedCount,
-      pendingCount: q,
-      processingCount,
-      failedCount,
-      shortLabel: savedCount > 0 ? `+${q} queued` : `Queued (${q})`,
-      bannerTitle: pendingCount > 0 ? `Queued for processing (${pendingCount} file(s))` : 'Queued for background processing',
-      bannerDetail: savedCount > 0
-        ? `${savedCount} document(s) saved; remaining file(s) will process automatically or on Fetch Documents.`
-        : 'Waiting in the background document queue — click Fetch Documents to pull now.',
-      tone: 'accent'
-    };
-  }
-
-  if (t.doc_fetch_status === 'failed' || t.doc_fetch_status === 'partial' || (savedCount === 0 && failedCount > 0)) {
-    return {
-      kind: 'failed',
-      savedCount,
-      pendingCount,
-      processingCount,
-      failedCount,
-      shortLabel: 'Retry docs',
-      bannerTitle: t.doc_fetch_status === 'partial' || savedCount > 0
-        ? `Partial download (${savedCount} saved, ${failedCount || 1} failed)`
-        : 'Document download failed',
-      bannerDetail: 'Some portal files could not be downloaded. Click Retry document fetch to try again.',
-      tone: 'warn'
-    };
-  }
-
-  if (savedCount > 0 || t.doc_fetch_status === 'complete') {
-    return {
-      kind: 'complete',
-      savedCount,
-      pendingCount,
-      processingCount,
-      failedCount,
-      shortLabel: savedCount > 0 ? `${savedCount} saved` : 'Processed',
-      bannerTitle: savedCount > 0
-        ? `Processed · ${savedCount} ${savedCount === 1 ? 'document' : 'documents'} saved`
-        : 'Processed · Portal checked',
-      bannerDetail: savedCount > 0
-        ? 'Files downloaded and indexed for deadline and keyword matching.'
-        : 'Portal page was checked; no pending document jobs remain.',
-      tone: 'ok'
-    };
-  }
-
-  return {
-    kind: 'listing_only',
-    savedCount,
-    pendingCount,
-    processingCount,
-    failedCount,
-    shortLabel: 'Listing only',
-    bannerTitle: 'Portal listing only · No downloadable files provided',
-    bannerDetail: 'This notice did not publish PDF/Word attachments on the portal. Click Fetch Documents to re-check or upload a notice manually.',
-    tone: 'neutral'
-  };
-}
-
 interface DetailProps {
   tender: Tender;
   corrigenda: CorrigendumLog[];
@@ -247,19 +71,6 @@ interface DetailProps {
   onToggleBookmark: () => void;
   onTenderUpdated?: (tender: Tender) => void;
   onTenderDeleted?: (tenderId: string) => void;
-}
-
-/** True when an opened tender has no saved files yet, is not Passed/failed, and has a fetchable attachment or detail page. */
-function hasAutoFetchableDocuments(t: Tender): boolean {
-  if (asList(t.cached_dossiers).length > 0) return false;
-  if (t.pipeline_status === 'Passed' || t.doc_fetch_status === 'failed') return false;
-  const attUrls = asList<string>(t.attachment_urls);
-  if (attUrls.some(u => typeof u === 'string' && /^https?:\/\//i.test(u))) return true;
-  const directUrl = t.direct_url || '';
-  if (isDirectDocumentUrl(directUrl)) return true;
-  if (/epms\.ppra\.gov\.pk\/public\/tenders\/tender-details\//i.test(directUrl)) return true;
-  if (/fde\.gov\.pk\/download\/[^/?#]+/i.test(directUrl) && !/\/download-category\//i.test(directUrl)) return true;
-  return false;
 }
 
 /** Detail Pane exported for both Inbox and Pipeline */
@@ -300,10 +111,8 @@ export function Detail({
   const [aiStatusMessage, setAiStatusMessage] = useState<{ text: string; isError?: boolean } | null>(null);
   const [editingDetails, setEditingDetails] = useState(false);
   const [savingDetails, setSavingDetails] = useState(false);
-  const [previewPdfIndex, setPreviewPdfIndex] = useState<number | null>(null);
   const [copiedSummary, setCopiedSummary] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [editForm, setEditForm] = useState(() => buildEditForm(tender));
 
@@ -321,7 +130,6 @@ export function Detail({
       setNoteState('idle');
       setAiStatusMessage(null);
       setEditingDetails(false);
-      setPreviewPdfIndex(null);
       setCopiedSummary(false);
       setEditForm(buildEditForm(tender));
     } else if (notesRef.current === lastSavedNotesRef.current) {
@@ -1030,152 +838,14 @@ export function Detail({
         </div>
 
         {/* Documents / Dossiers Section */}
-        <div
-          onPaste={e => {
-            const items = e.clipboardData?.items;
-            if (!items) return;
-            for (let i = 0; i < items.length; i++) {
-              if (items[i].type.startsWith('image/') || items[i].type === 'application/pdf') {
-                const f = items[i].getAsFile();
-                if (f) {
-                  e.preventDefault();
-                  void handleFileUpload(f);
-                  break;
-                }
-              }
-            }
-          }}
-        >
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted">Saved documents ({files.length})</h3>
-            <div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*,.pdf"
-                aria-label="Upload tender notice image or PDF"
-                className="hidden"
-                onChange={e => {
-                  const f = e.target.files?.[0];
-                  if (f) void handleFileUpload(f);
-                  e.target.value = '';
-                }}
-              />
-              <Button size="sm" onClick={() => fileInputRef.current?.click()} disabled={uploadingFile}>
-                <Upload className="h-3.5 w-3.5" />
-                {uploadingFile ? 'Uploading…' : 'Upload image / PDF'}
-              </Button>
-            </div>
-          </div>
-          <div
-            data-testid="tender-doc-status"
-            className={`mb-2.5 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
-              docState.tone === 'accent'
-                ? 'border-accent/30 bg-accent-soft text-accent'
-                : docState.tone === 'warn'
-                  ? 'border-warn/30 bg-warn-soft text-warn'
-                  : docState.tone === 'ok'
-                    ? 'border-ok/30 bg-ok-soft text-ok'
-                    : 'border-line bg-surface-2 text-ink-muted'
-            }`}
-          >
-            {docState.kind === 'processing' && (
-              <>
-                <RotateCw aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0 motion-safe:animate-spin" />
-                <progress className="sr-only" aria-label={docState.bannerTitle} />
-              </>
-            )}
-            <div className="min-w-0">
-              <div className="font-semibold">{docState.bannerTitle}</div>
-              <div className="mt-0.5 text-[11px] opacity-90">{docState.bannerDetail}</div>
-            </div>
-          </div>
-          {files.length === 0 ? (
-            fetchingDocs ? (
-              <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-sm text-ink-muted">
-                <RotateCw aria-hidden="true" className="h-4 w-4 shrink-0 motion-safe:animate-spin text-accent" />
-                <span>Downloading documents from portal…</span>
-                <progress className="sr-only" aria-label="Downloading tender documents" />
-              </div>
-            ) : docState.kind === 'processing' || docState.kind === 'queued' ? (
-              <p className="text-ink-muted">
-                Queued for automatic download — documents will appear here shortly, or click Fetch Documents to pull them now.
-              </p>
-            ) : (
-              <p className="text-ink-muted">
-                No documents saved yet. Click Fetch Documents to check the portal now, or upload a tender image/PDF manually.
-              </p>
-            )
-          ) : (
-            <div className="space-y-3">
-              {files.map((file, i) => {
-                const fileUrl = file.localPath.startsWith('/')
-                  ? file.localPath
-                  : `/api/dossiers/${currentTender.id}/${encodeURIComponent(file.localPath.replace(/\\/g, '/').split('/').pop() || '')}`;
-                const isImage =
-                  file.mimeType?.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(file.localPath);
-                const isPdf = file.mimeType === 'application/pdf' || /\.pdf$/i.test(file.localPath);
-
-                return (
-                  <div key={i} className="rounded-lg border border-line p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <a
-                        href={fileUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex min-w-0 flex-1 items-center gap-3 hover:underline"
-                      >
-                        <FileText className="h-4 w-4 shrink-0 text-ink-muted" />
-                        <span className="truncate font-semibold">{file.label || `Document ${i + 1}`}</span>
-                        {file.docType && (
-                          <span className="rounded bg-chip px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-muted">
-                            {file.docType}
-                          </span>
-                        )}
-                      </a>
-                      <div className="flex items-center gap-2">
-                        {isPdf && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setPreviewPdfIndex(previewPdfIndex === i ? null : i)}
-                          >
-                            {previewPdfIndex === i ? 'Hide preview' : 'Preview PDF'}
-                          </Button>
-                        )}
-                        <a
-                          href={`${fileUrl}${fileUrl.includes('?') ? '&' : '?'}download=1`}
-                          download
-                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-line bg-surface px-2.5 text-xs font-semibold text-ink hover:bg-surface-2"
-                        >
-                          <Download className="h-3 w-3" />
-                          Download
-                        </a>
-                      </div>
-                    </div>
-                    {isImage && (
-                      <a href={fileUrl} target="_blank" rel="noopener noreferrer" className="mt-3 block">
-                        <img
-                          src={fileUrl}
-                          alt={file.label || `Tender notice ${i + 1}`}
-                          className="max-h-96 w-full rounded-lg border border-line bg-surface-2 object-contain"
-                          loading="lazy"
-                        />
-                      </a>
-                    )}
-                    {isPdf && previewPdfIndex === i && (
-                      <iframe
-                        src={fileUrl}
-                        title={file.label || `PDF Preview ${i + 1}`}
-                        className="mt-3 h-96 w-full rounded-lg border border-line bg-surface"
-                      />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        <DossierSection
+          tenderId={currentTender.id}
+          files={files}
+          docState={docState}
+          fetchingDocs={fetchingDocs}
+          uploadingFile={uploadingFile}
+          onUploadFile={handleFileUpload}
+        />
 
         {otherSources.length > 0 && (
           <div>

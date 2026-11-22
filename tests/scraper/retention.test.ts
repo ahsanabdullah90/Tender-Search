@@ -207,7 +207,7 @@ describe('Retention Lifecycle Daemon', () => {
   });
 
   it('expires undated tenders with no publish date 90 days after they were first seen (Phase 0.3)', async () => {
-    const { getExpiredUnreviewedTenderIds } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const { getExpiredUnreviewedTenderIds } = await import('../../src/server/db/repositories/tenderLifecycleRepo.js');
     const insert = db.prepare(`
       INSERT INTO tenders (id, canonical_id, title, organization, portal_id, portal_name, direct_url,
         domain_tracks, matched_keywords, match_score, publish_date, closing_date, pipeline_status, created_at)
@@ -243,7 +243,7 @@ describe('Retention Lifecycle Daemon', () => {
   });
 
   it('RET-2: never uses publish date inferred from upload folder for ageing; uses created_at instead (A2)', async () => {
-    const { getExpiredUnreviewedTenderIds } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const { getExpiredUnreviewedTenderIds } = await import('../../src/server/db/repositories/tenderLifecycleRepo.js');
     const folderDateId = 'tender-upload-folder-date';
     // publish_date is old (120 days ago), but it came from an upload folder; created_at is fresh (2 days ago)
     db.prepare(`
@@ -262,7 +262,7 @@ describe('Retention Lifecycle Daemon', () => {
   });
 
   it('RET-3: records every deletion in deleted_tenders with explicit reason (G3)', async () => {
-    const { deleteTenders } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const { deleteTenders } = await import('../../src/server/db/repositories/tenderLifecycleRepo.js');
     const testDelId = 'tender-test-deletion-record';
     db.prepare(`
       INSERT INTO tenders (
@@ -280,7 +280,7 @@ describe('Retention Lifecycle Daemon', () => {
   });
 
   it('RET-4: permanent user suppression vs auto-expired suppression lifting on future date (F4, B8)', async () => {
-    const { deleteTenders, isTenderSuppressed } = await import('../../src/server/db/repositories/tendersRepo.js');
+    const { deleteTenders, isTenderSuppressed } = await import('../../src/server/db/repositories/tenderLifecycleRepo.js');
     const userSuppressedId = 'tender-user-suppressed';
     const autoExpiredId = 'tender-auto-expired';
 

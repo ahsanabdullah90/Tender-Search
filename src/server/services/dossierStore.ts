@@ -21,7 +21,9 @@ import {
   enqueuePendingFilePurge,
   getPendingFilePurges,
   deletePendingFilePurge,
-  incrementPendingFilePurgeAttempt,
+  incrementPendingFilePurgeAttempt
+} from '../db/repositories/tenderLifecycleRepo.js';
+import {
   getTenderById,
   getAllTenderDossierRows,
   getAllTendersWithDossiers,
