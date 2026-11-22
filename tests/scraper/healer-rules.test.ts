@@ -151,8 +151,8 @@ describe('healer-rules (The 7 Self-Healing Anti-Corruption Rules)', () => {
   });
 
   describe('Rule 7: Canonical Baseline Immutability', () => {
-    it('PORTAL_DEFINITIONS contains all 18 immutable canonical portals', () => {
-      expect(PORTAL_DEFINITIONS).toHaveLength(18);
+    it('PORTAL_DEFINITIONS contains all 19 immutable canonical portals', () => {
+      expect(PORTAL_DEFINITIONS).toHaveLength(19);
       const punjab = PORTAL_DEFINITIONS.find(p => p.id === 'punjab_eproc')!;
       expect(punjab.tendersUrl).toBe('https://eproc.punjab.gov.pk/ActiveTenders.aspx');
       expect(punjab.baseUrl).toBe('https://eproc.punjab.gov.pk');

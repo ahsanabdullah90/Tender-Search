@@ -9,13 +9,14 @@ This document tracks **active operational items and approved non-breaking featur
 ## 1. Portal Maintenance & Periodic Connector Monitoring
 
 ### Item 1: Connector & Session Monitoring
-- **Active Regulatory Coverage (`13/13` online in live DB):**
+- **Active Regulatory Coverage (`14/14` online in live DB — full 7-portal statutory backbone active):**
   - `epms_ppra`: Open Federal PPRA EPMS (`https://epms.ppra.gov.pk/public/tenders/active-tenders?status=1`, `tier: 'http'`, `accessMode: 'public'`, 50/page, `quickMaxPages: 4` / `deepMaxPages: 20`), paired with deterministic detail-page `BidBrief`, cancelled-reason/corrigendum-badge/`&#38;` parser guards (`parseEpmsDetailHtml` in `src/server/scrapers/portalParsers.ts`), and folder-aware `/pdf?file=` labels (`dossierManager.ts`). Legacy `epads` is retired in `deleted_portals` while preserving historical tenders.
   - `punjab_eproc`: Primary Punjab provincial source (`https://eproc.punjab.gov.pk/ActiveTenders.aspx`, ASP.NET postback pagination bumped to `quickMaxPages: 3` / `deepMaxPages: 10`), aggregating tenders across Punjab departments and authorities centrally.
   - `bppra`: Upgraded Balochistan BPPRA (`https://bpptwo.vdc.services:5451/Tenders`, `tier: 'playwright'`) with `src/server/scrapers/bppraScraper.ts` for Blazor `Active Tenders` 100/page pagination + `/RFP`, `/PreQualification`, and `/EOI` tabs, `District` location & `Corrigendum` extraction (`portalParsers.ts`), and deterministic `:9446` NIT JSON API `BidBrief` / FTS5 text & automatic BOQ PDF discovery (`tenderAnalysis.ts`).
   - `sppra`: Restored Sindh SPPRA (`https://portalsindh.eprocure.gov.pk/#/`) as the sole active Sindh portal via `src/server/scrapers/sppraApi.ts` (`tier: 'http'`, direct EPADS WSO2 public JSON API + DMS PDF downloads for NIT and PA Published Documents), with Angular `<section class="card">` DOM fallback in `portalParsers.ts` and full unit/contract tests (`tests/unit/sppra-api.test.ts`).
   - `kppra`: Restored Khyber Pakhtunkhwa KPPRA (`https://kp.gov.pk/tenders`) via `src/server/scrapers/kpApi.ts` (`tier: 'http'`, `accessMode: 'public'`, `https://mgn1.kp.gov.pk/api/tenders`, `quickMaxPages: 8` / `deepMaxPages: 15`), mapping `uuid` detail URLs, `media`/`bidding_document`/`corrigenda` PDFs with deadline auto-extension, auction skipping, and KP district location extraction (`tests/scraper/kp-api.test.ts`).
   - `gilgit`: Restored Gilgit-Baltistan PPRA (`https://gbppra.gov.pk/viewall`, `category: 'Regulatory'`, `fileCode: 'GBPPRA'`, `quickMaxPages: 4` / `deepMaxPages: 12`) with hardened `.job-post-item` parsing in `portalParsers.ts` filtering non-biddable `.badge-wrap .badge` statuses, flagging `Corrigendum`/`Addendum`, reading `.text-success`/`.text-danger` dates, and extracting GB district locations (`extractGbLocation`).
+  - `ajk_ppra`: Added Azad Jammu & Kashmir PPRA (`https://www.ajkppra.gov.pk/advertisements.php`, `category: 'Regulatory'`, `fileCode: 'AJKPPRA'`) with Section 3g `table.table` parsing, `extractAjkLocation`, inline `Corrigendum` PDF detection, and portal `Referer` headers in `dossierManager.ts` (`tests/scraper/ajk-ppra.test.ts`).
 - **Removed / Blocked Portals (`deleted_portals` in live DB; canonical entries retained in `PORTAL_DEFINITIONS` per `HEAL-7`):**
   - `psda`: Individual Punjab authority (`psda.punjab.gov.pk/tenders`) consistently displays `"No Opening"`; Punjab tenders are covered centrally via `punjab_eproc`, so `psda` was archived via `deletePortal`.
 
@@ -68,7 +69,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
      - In Column 6 (`Download`), extract main `/uploadfiles/tenderdocuments/...pdf` and all inline red `Corrigendum` PDF links (`isCorrigendum: true`).
      - Infer AJK district location (`Muzaffarabad`, `Mirpur`, `Bagh`, `Neelum`, `Rawalakot`, `Sudhanoti`, `Bhimber`, `Kotli`, `Hattian`, `Haveli`) $\rightarrow$ `"<District>, Azad Kashmir"`.
   3. `src/server/services/dossierManager.ts`: Ensure document requests supply portal `Referer` header so Apache ModSecurity serves direct PDF bytes (`200 OK`) instead of HTTP 406 rejections.
-- **Status:** `QUEUED` (Designed & Probed live).
+- **Status:** `COMPLETED (2026-11-22)` — Registered `ajk_ppra` in `portalList.ts` & `dossierStore.ts`, added Section 3g parser + `extractAjkLocation` in `portalParsers.ts`, added `Referer` headers to `fetchFileBuffer` in `dossierManager.ts`, seeded `ajk_ppra` in `./data/tender_tracker.db` (`14` active portals / 7 statutory boards), added `tests/fixtures/portals/ajk_ppra/page.html` & `tests/scraper/ajk-ppra.test.ts`, and verified with `npm run verify`.
 
 #### Workstream E: Two-Phase Scan Execution & Anti-Duplication Protection
 - **Objective:** Ensure Federal and Provincial Statutory Portals take strict priority, and individual agency websites never produce duplicate tender records.

@@ -287,7 +287,7 @@ Configurable business domain filters.
 ---
 
 ### 5. `portal_health`
-Maintains operational health, credentials, and scan metrics for each of the 18 portals.
+Maintains operational health, credentials, and scan metrics for each of the 19 portals.
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|

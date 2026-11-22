@@ -19,7 +19,7 @@ describe('seed-sample script smoke test', () => {
       expect(countResult.count).toBe(20);
 
       const portalsCount = checkDb.prepare('SELECT COUNT(*) as count FROM portal_health').get() as { count: number };
-      expect(portalsCount.count).toBe(18);
+      expect(portalsCount.count).toBe(19);
     } finally {
       checkDb.close();
     }

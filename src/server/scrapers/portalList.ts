@@ -96,6 +96,19 @@ export const PORTAL_DEFINITIONS: PortalDefinition[] = [
     verifiedStatus: 'Working — Live BPPRA Blazor active tenders (100/page) & :9446 NIT/BOQ API',
     pagination: { kind: 'click', maxPages: 3, quickMaxPages: 2, deepMaxPages: 5 }
   },
+  {
+    id: 'ajk_ppra',
+    name: 'AJK PPRA (ajkppra.gov.pk)',
+    category: 'Regulatory',
+    tier: 'http',
+    baseUrl: 'https://www.ajkppra.gov.pk',
+    tendersUrl: 'https://www.ajkppra.gov.pk/advertisements.php',
+    fileCode: 'AJKPPRA',
+    description: 'Azad Jammu & Kashmir Public Procurement Regulatory Authority active procurement advertisements board',
+    defaultKeywords: ['civil works', 'education', 'solar', 'equipment', 'printing'],
+    accessMode: 'public',
+    verifiedStatus: 'Working — Live AJK PPRA active procurement board'
+  },
 
   // 2. Federal & Regional Government Entities
   {

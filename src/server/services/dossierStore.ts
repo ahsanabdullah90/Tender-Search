@@ -72,6 +72,7 @@ export const PORTAL_FILE_CODES: Record<string, string> = {
   sppra: 'SPPRA',
   kppra: 'KPPRA',
   bppra: 'BPPRA',
+  ajk_ppra: 'AJKPPRA',
   ndma: 'NDMA',
   fde: 'FDE',
   mofept: 'MOFEPT',
@@ -138,7 +139,7 @@ function decodeURIComponentSafe(value: string): string {
  */
 export function inferDocType(labelOrName: string = '', remoteUrl?: string | null): DocType {
   const combined = `${labelOrName || ''} ${extractUrlClues(remoteUrl)}`.toLowerCase();
-  if (/(corrigend|amendment|addendum|errat)/i.test(combined)) return 'corrigendum';
+  if (/(corrigend|amendment|addendum|errat|(?:^|[^a-z0-9])corr\.?(?:[^a-z0-9]|$)|corri\d+)/i.test(combined)) return 'corrigendum';
   if (/(?:^|[^a-z0-9])boq(?:[^a-z0-9]|$)|\/boqmanual\/|bill[\s_-]*of[\s_-]*quantit|pricing[\s_-]*schedule|schedule[\s_-]*of[\s_-]*requirement/i.test(combined)) return 'boq';
   if (/(?:^|[^a-z0-9])rfp(?:[^a-z0-9]|$)|request[\s_-]*for[\s_-]*proposal/i.test(combined)) return 'rfp';
   if (/(?:^|[^a-z0-9])tor(?:[^a-z0-9]|$)|terms[\s_-]*of[\s_-]*reference/i.test(combined)) return 'tor';

@@ -7,8 +7,8 @@ describe('docs-consistency (QA-4 Automated Documentation Consistency)', () => {
   const rootDir = path.resolve(__dirname, '../../');
   const docsDir = path.resolve(rootDir, 'docs');
 
-  it('proves canonical portal count in PORTAL_DEFINITIONS is exactly 18', () => {
-    expect(PORTAL_DEFINITIONS).toHaveLength(18);
+  it('proves canonical portal count in PORTAL_DEFINITIONS is exactly 19', () => {
+    expect(PORTAL_DEFINITIONS).toHaveLength(19);
   });
 
   it('proves all source files quoted in active docs exist on disk (QA-4)', () => {

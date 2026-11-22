@@ -133,6 +133,7 @@ export interface DownloadDossierOptions {
   signal?: AbortSignal;
   maxBytes?: number;
   timeoutMs?: number;
+  referer?: string;
   onError?: (err: Error, meta: { isTransientNetwork: boolean }) => void;
   tenderMeta?: {
     portalId?: string | null;
@@ -372,7 +373,8 @@ export function fetchFileBuffer(
 
     const headers: Record<string, string> = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'application/pdf,application/octet-stream,*/*'
+      'Accept': 'application/pdf,application/octet-stream,image/*,*/*;q=0.8',
+      'Referer': options?.referer || `${parsedUrl.origin}/`
     };
     if (cookie) headers['Cookie'] = cookie;
 

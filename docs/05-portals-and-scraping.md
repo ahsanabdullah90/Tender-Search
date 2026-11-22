@@ -1,10 +1,10 @@
 # 05. Portals Catalog & Self-Healing Scraping Architecture
 
-## The 18 Pakistan Procurement Portals
+## The 19 Pakistan Procurement Portals
 
-Tender Tracker catalogs 18 official and aggregator procurement portals across Pakistan, categorized into 5 operational sectors.
+Tender Tracker catalogs 19 official and aggregator procurement portals across Pakistan, categorized into 5 operational sectors.
 
-These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The live database tracks 13 active online portals (with `epms_ppra` replacing legacy `epads`, Sindh `sppra` restored via the official EPADS public JSON API & DMS PDF fetcher, KP `kppra` restored via the official `kp.gov.pk` public REST API, Gilgit-Baltistan `gilgit` restored via `gbppra.gov.pk/viewall`, and `deleted_portals` recording `epads`, `giz`, `pid`, `tender_services`, `ungm`, and `psda`).
+These 19 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scrapers/portalList.ts`). A given installation can track fewer: a portal the operator removes from **Sources > Portals** is recorded in the `deleted_portals` table and is not re-seeded on restart. The live database tracks 14 active online portals (completing the full 7-board statutory backbone: `epms_ppra`, `punjab_eproc`, `sppra`, `kppra`, `bppra`, `gilgit`, and `ajk_ppra`, with `deleted_portals` recording `epads`, `giz`, `pid`, `tender_services`, `ungm`, and `psda`).
 
 | ID | Portal Name | Category | Tier | Access Mode | Default Tenders URL | Scraping Strategy & Operational Status |
 |---|---|---|---|---|---|---|
@@ -13,6 +13,7 @@ These 18 are the canonical definitions in `PORTAL_DEFINITIONS` (`src/server/scra
 | `sppra` | Sindh SPPRA | Regulatory | `http` | `public` | `https://portalsindh.eprocure.gov.pk/#/` | Official Sindh EPADS public portal (13,500+ active listings) fetched directly via `sppraApi.ts` (`apiprd.eprocure.gov.pk` JSON API + DMS base64 PDF downloads for NIT & PA Published Documents), with Angular `<section class="card">` DOM fallback in `portalParsers.ts`. |
 | `kppra` | Khyber Pakhtunkhwa KPPRA | Regulatory | `http` | `public` | `https://kp.gov.pk/tenders` | Official KP Government & KPPRA public tenders REST API (`mgn1.kp.gov.pk/api/tenders`) via `kpApi.ts` (`quickMaxPages: 8` / `deepMaxPages: 15`), mapping `uuid` detail URLs, `media`/`bidding_document`/`corrigenda` PDFs with deadline auto-extension, auction skipping, and KP district `location` extraction (`extractKpLocation`). |
 | `bppra` | Balochistan BPPRA | Regulatory | `playwright` | `public` | `https://bpptwo.vdc.services:5451/Tenders` | Balochistan ePPS Blazor portal (`bppraScraper.ts`: `Active Tenders` 100/page pagination + `/RFP`, `/PreQualification`, and `/EOI` tabs, District location & Corrigendum extraction in `portalParsers.ts`, plus deterministic `:9446` NIT JSON API `BidBrief` / FTS5 text & automatic BOQ PDF discovery in `tenderAnalysis.ts`). |
+| `ajk_ppra` | AJK PPRA (`ajkppra.gov.pk`) | Regulatory | `http` | `public` | `https://www.ajkppra.gov.pk/advertisements.php` | Azad Jammu & Kashmir statutory procurement board scraped via Section 3g `table.table` parser in `portalParsers.ts`, skipping `Sales/Auction/Disposal` rows, parsing `DD-MM-YYYY` dates, extracting main + inline red `Corrigendum` PDFs (`isCorrigendum`), inferring AJK district `location` (`extractAjkLocation`), and sending portal `Referer` headers in `dossierManager.ts`. |
 | `ndma` | National Disaster Management Authority (NDMA) | Federal/Regional | `http` | `public` | `https://ndma.gov.pk/tenders` | Emergency procurement and disaster relief infrastructure (scraped via `.tender-card` DOM extractors). |
 | `fde` | Federal Directorate of Education (FDE) | Federal/Regional | `http` | `public` | `https://fde.gov.pk/download-category/tender/` | Islamabad school solarization, furniture, and educational supplies (scraped via `h3.package-title`). |
 | `mofept` | Ministry of Federal Education & Professional Training | Federal/Regional | `http` | `public` | `https://mofept.gov.pk/Tenders` | Federal education ministry active tenders with server-side search parsing. |
@@ -97,7 +98,7 @@ When a configured `tenders_url` fails with a dead-link HTTP error (`404`, `410`,
 
 Every portal in `PORTAL_DEFINITIONS` is accounted for in `tests/scraper/portal-contracts.test.ts`:
 - **Captured Live Fixtures (`<= 50 KB` each)**: `epms_ppra`, `bppra`, `ndma`, `fde` (plus `fde_detail` exercising WordPress Download Manager `?wpdmdl=` attachment discovery), `mofept`, `pseb`, `ignite`, `psdf`, and `peef`.
-- **Synthetic Fixtures**: `punjab_eproc`, `sppra`, `gilgit`, `tender_services`, `cloudflare_challenge`, and `login_required`.
+- **Synthetic Fixtures**: `punjab_eproc`, `sppra`, `gilgit`, `ajk_ppra`, `tender_services`, `cloudflare_challenge`, and `login_required`.
 - **Documented HTTP Zero-Yield / Non-Listing Portals**:
   - `psda`: Live page renders `<p><span><b>No Opening</b></span></p>` (recognized by `hasEmptyTenderTableState`).
   - `giz`: Overview page linking to external procurement portals (`ausschreibungen.giz.de`, `service.bund.de`, `ted.europa.eu`).
@@ -151,7 +152,7 @@ export interface PortalDefinition {
 ```
 
 ### Configuration & Parser Principles
-1. **Single Source of Truth**: All 18 canonical portals are defined in `PORTAL_DEFINITIONS` adhering to `PortalDefinition`, while user edits live in SQLite `portal_health` (`HEAL-7` preserves `reset-default`).
+1. **Single Source of Truth**: All 19 canonical portals are defined in `PORTAL_DEFINITIONS` adhering to `PortalDefinition`, while user edits live in SQLite `portal_health` (`HEAL-7` preserves `reset-default`).
 2. **Two-Speed Pagination (`quick` vs `deep`)**: `crawlerEngine.ts` selects `quickMaxPages` for routine scans (with SQLite early-stop on `page >= 2` when all items match known unchanged notices) and `deepMaxPages` for scheduled/manual deep sweeps, recording `pages_scanned` in `portal_health`.
 3. **Deterministic Dispatch + Heuristic Fallback**: `portalParsers.ts` dispatches portal-specific Cheerio extractors by `portal.id` / URL pattern (`epms_ppra`, `bppra`, `ndma`, `fde`, `psdf`, ASP.NET RadGrid for `punjab_eproc`, etc.) before falling back to generic table/PDF link parsing and Phase-2 Gemini DOM extraction.
 4. **Downloadable Document Candidate Filtering**: `orderDocumentCandidates` (`src/server/scrapers/ingestPipeline.ts`) and `collectRowDocumentUrls` (`src/server/db/repositories/ingestJobsRepo.ts`) filter out non-downloadable `.html`/`.aspx`/`.php`/`.jsp` page links (while retaining `/pdf?file=` and `?wpdmdl=` endpoints) via `isDownloadableCandidateUrl`, preventing HTML viewer links from crowding out downloadable PDFs or creating guaranteed-fail queue jobs (`DOC-6`).

@@ -1,6 +1,6 @@
 # Tender Tracker - Pakistan Procurement Watchdog
 
-Autonomous procurement scout and opportunity command center monitoring 18 Pakistani statutory authorities, provincial PPRAs, federal ministries, skill development boards, and international agencies.
+Autonomous procurement scout and opportunity command center monitoring 19 Pakistani statutory authorities, provincial PPRAs, federal ministries, skill development boards, and international agencies.
 
 ## Quick Start (Windows 11)
 
@@ -59,7 +59,7 @@ npm run test:watch
 # Run test coverage analysis
 npm run test:coverage
 
-# Probe live connectivity for all 18 procurement portals
+# Probe live connectivity for all 19 procurement portals
 npm run probe:portals
 
 # Launch standalone desktop window + Windows system tray

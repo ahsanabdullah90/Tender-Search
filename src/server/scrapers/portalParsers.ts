@@ -328,6 +328,19 @@ const GB_LOCATION_PATTERNS: Array<[RegExp, string]> = [
   [/\bgilgit\b(?!\s*[-–—]\s*baltistan)/i, 'Gilgit']
 ];
 
+const AJK_LOCATION_PATTERNS: Array<[RegExp, string]> = [
+  [/\b(?:muzaffar\s*abad|mzd)\b/i, 'Muzaffarabad'],
+  [/\bmirpur\b/i, 'Mirpur'],
+  [/\bbagh\b/i, 'Bagh'],
+  [/\bneel[au]m\b/i, 'Neelum'],
+  [/\b(?:rawalakot|poonch)\b/i, 'Rawalakot'],
+  [/\b(?:sudhan[ao]ti|pallandri)\b/i, 'Sudhanoti'],
+  [/\bbhimbe?r\b/i, 'Bhimber'],
+  [/\bkotli\b/i, 'Kotli'],
+  [/\b(?:hattian(?:\s+bala)?|jhelum\s+valley)\b/i, 'Hattian'],
+  [/\bhaveli\b/i, 'Haveli']
+];
+
 function extractLocationFromPatterns(
   patterns: Array<[RegExp, string]>,
   provinceLabel: string,
@@ -359,6 +372,13 @@ export function extractPunjabLocation(deptText: string, title?: string): string 
  */
 export function extractGbLocation(deptText: string, title?: string): string {
   return extractLocationFromPatterns(GB_LOCATION_PATTERNS, 'Gilgit-Baltistan', 'Gilgit-Baltistan, Pakistan', deptText, title);
+}
+
+/**
+ * Extracts a canonical Azad Jammu & Kashmir district location from department text (or title fallback).
+ */
+export function extractAjkLocation(deptText: string, title?: string): string {
+  return extractLocationFromPatterns(AJK_LOCATION_PATTERNS, 'Azad Kashmir', 'Azad Kashmir, Pakistan', deptText, title);
 }
 
 /**
@@ -982,6 +1002,101 @@ export function parsePortalHtml(html: string, portal: PortalDefinition): ScrapeR
       });
     });
     if (items.length > 0) return { items: sanitizeScrapedItems(items, portal), hitlRequired: false };
+  }
+
+  // 3g. Structured AJK PPRA Active Advertisements Table (https://www.ajkppra.gov.pk/advertisements.php)
+  const ajkTable = $('table.table').filter((_, tbl) => {
+    const firstRowText = $(tbl).find('tr').first().text().replace(/\s+/g, ' ').trim().toLowerCase();
+    return (
+      firstRowText.includes('procurement') &&
+      firstRowText.includes('publishing date') &&
+      firstRowText.includes('closing date') &&
+      (firstRowText.includes('procuring agency') || portal.id === 'ajk_ppra')
+    );
+  }).first();
+  if (ajkTable.length > 0) {
+    ajkTable.find('tr').each((_, el) => {
+      if ($(el).find('th').length > 0) return;
+      const tds = $(el).children('td');
+      if (tds.length < 7) return;
+
+      const col0Text = $(tds[0]).text().replace(/\s+/g, ' ').trim();
+      if (!col0Text || /\b(?:sales?|auction|disposal)\b/i.test(col0Text)) return;
+
+      const idMatch = col0Text.match(/\b(\d{3,8})\b/);
+      const referenceNo = idMatch ? `AJKPPRA-${idMatch[1]}` : undefined;
+      const procType = col0Text.replace(/\b\d{3,8}\b/, '').replace(/\s+/g, ' ').trim();
+
+      const titleClone = $(tds[1]).clone();
+      titleClone.find('strong').each((__, sEl) => {
+        if (/^\(?\d+\)?$/.test($(sEl).text().trim())) {
+          $(sEl).remove();
+        }
+      });
+      const title = titleClone.text().replace(/\s+/g, ' ').trim();
+      if (!title || title.length <= 5) return;
+      if (
+        /^(?:auction|disposal|sale)\b|\b(?:open\s+auction|public\s+auction|auction\s+(?:notice|of\b)|sale\s+of\s+(?:scrap|condemned|unserviceable|obsolete|vehicles|trees|wood)|disposal\s+of\s+(?:scrap|condemned|unserviceable|obsolete|old|surplus|assets))\b/i.test(
+          title
+        )
+      ) {
+        return;
+      }
+
+      const publishDate = parseDateString($(tds[2]).text().trim()) || undefined;
+      const closingDate = parseDateString($(tds[3]).text().trim());
+      const department = $(tds[4]).text().replace(/\s+/g, ' ').trim();
+      const agency = $(tds[5]).text().replace(/\s+/g, ' ').trim();
+      const organization =
+        agency && department && !agency.toLowerCase().includes(department.toLowerCase())
+          ? `${agency} (${department})`
+          : (agency || department || portal.name);
+
+      const attachmentUrls: string[] = [];
+      let mainDocUrl: string | undefined;
+      let hasCorrLink = false;
+      $(tds[6]).find('a[href]').each((__, aEl) => {
+        const href = $(aEl).attr('href');
+        if (!href) return;
+        const absUrl = resolvePortalUrl(href, portal);
+        if (!attachmentUrls.includes(absUrl)) attachmentUrls.push(absUrl);
+
+        const linkText = $(aEl).text().replace(/\s+/g, ' ').trim();
+        const linkTitle = $(aEl).attr('title') || '';
+        const linkStyle = ($(aEl).attr('style') || '').toLowerCase();
+        const isCorr =
+          /\b(?:corrigendum|addendum)\b/i.test(linkText) ||
+          /\b(?:corrigendum|addendum|corr\.?)\b/i.test(`${href} ${linkTitle}`) ||
+          /#ff0000|\bred\b/.test(linkStyle);
+        if (isCorr) {
+          hasCorrLink = true;
+        } else if (!mainDocUrl && !/\.(jpe?g|png|webp)(\?|$)/i.test(absUrl)) {
+          mainDocUrl = absUrl;
+        }
+      });
+
+      const directUrl = mainDocUrl || attachmentUrls[0] || portal.tendersUrl;
+      if (isNonBidEvaluationOrPlanTitle(title, directUrl)) return;
+
+      const isCorrigendum =
+        hasCorrLink ||
+        /\b(?:corrigendum|addendum)\b/i.test(col0Text) ||
+        /\b(?:corrigendum|addendum)\b/i.test(title);
+
+      items.push({
+        referenceNo,
+        title,
+        organization,
+        location: extractAjkLocation(`${agency} ${department}`, title),
+        directUrl,
+        publishDate,
+        closingDate,
+        description: [procType, department, agency].filter(Boolean).join(' | ').slice(0, 350),
+        isCorrigendum: isCorrigendum || undefined,
+        attachmentUrls
+      });
+    });
+    return { items: sanitizeScrapedItems(items, portal), hitlRequired: false };
   }
 
   // 4. Standard & Drupal / NinjaTable / GridView rows

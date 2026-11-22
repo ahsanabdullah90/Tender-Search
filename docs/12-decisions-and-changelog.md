@@ -115,6 +115,9 @@
 ## Changelog
 
 ### Version 1.9.0 (November 13–22, 2026)
+- **Workstream D — Azad Jammu & Kashmir PPRA (`ajk_ppra`) Connector (November 22, 2026)**:
+  - Registered `ajk_ppra` (`https://www.ajkppra.gov.pk/advertisements.php`, `Regulatory`, `AJKPPRA` file code) in `src/server/scrapers/portalList.ts` and `src/server/services/dossierStore.ts` (including `Corr.` corrigendum filename detection), completing the 19-portal canonical catalog and 7-board statutory backbone in `./data/tender_tracker.db` (`14` active portals).
+  - Implemented Section 3g `table.table` parsing and `extractAjkLocation` in `src/server/scrapers/portalParsers.ts` (skipping `Sales/Auction/Disposal`, extracting `DD-MM-YYYY` dates, main + inline red `Corrigendum` PDFs, and all 10 AJK districts), added portal `Referer` headers to `fetchFileBuffer` in `src/server/services/dossierManager.ts`, and added `tests/fixtures/portals/ajk_ppra/page.html` + `tests/scraper/ajk-ppra.test.ts`.
 - **Workstream C — Gilgit-Baltistan PPRA (`gilgit`) Hardening (November 22, 2026)**:
   - Repointed `gilgit` in `src/server/scrapers/portalList.ts`, `src/server/services/dossierStore.ts` (`GBPPRA` fileCode), and `src/server/db/schema.ts` to `https://gbppra.gov.pk/viewall` (`category: 'Regulatory'`, `accessMode: 'public'`, `quickMaxPages: 4` / `deepMaxPages: 12`), and restored `gilgit` in `./data/tender_tracker.db` (`13` active portals).
   - Hardened Section 3c `.job-post-item` parsing in `src/server/scrapers/portalParsers.ts`: filtered non-biddable `.badge-wrap .badge` statuses (evaluation reports, results, cancelled, postponed, auction, work/supply orders) without leaking to generic table fallback, flagged `Corrigendum`/`Addendum`, read `.text-success` / `.text-danger` dates directly, added `extractGbLocation` across all GB districts, and added `tests/fixtures/portals/gilgit/page.html`.

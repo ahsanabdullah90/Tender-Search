@@ -11,7 +11,7 @@ Public procurement in Pakistan is fragmented across dozens of independent federa
 ## Core Value Proposition
 
 1. **Autonomous Multi-Portal Discovery**:
-   Continuously monitors 18 public procurement portals across Pakistan, covering regulatory authorities (Federal PPRA (EPMS), Punjab PPRA, Sindh SPPRA, Balochistan BPPRA, KP KPPRA), federal & regional entities (NDMA, FDE, MOFEPT, Gilgit-Baltistan), technology & skills authorities (PSEB/TechDestination, Ignite, PSDF, PSDA, PEEF), multilateral agencies (UNGM, GIZ), and aggregators (Tender Services Pakistan, PID).
+   Continuously monitors 19 public procurement portals across Pakistan, covering all 7 statutory regulatory authorities (Federal PPRA (EPMS), Punjab PPRA, Sindh SPPRA, Balochistan BPPRA, KP KPPRA, Gilgit-Baltistan PPRA, AJK PPRA), federal entities (NDMA, FDE, MOFEPT), technology & skills authorities (PSEB/TechDestination, Ignite, PSDF, PSDA, PEEF), multilateral agencies (UNGM, GIZ), and aggregators (Tender Services Pakistan, PID).
 
 2. **Self-Healing Scraper & 7 Anti-Corruption Rules**:
    Recovers when a government portal moves its tender page (HTTP 404/410/500) or redirects to a new host/port (e.g., `bppra.gob.pk` $\rightarrow$ `bpptwo.vdc.services:5451/Tenders`), governed by 7 strict Anti-Corruption Rules (`AGENTS.md §2`):

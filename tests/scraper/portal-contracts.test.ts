@@ -38,7 +38,7 @@ const captured = fs.readdirSync(FIXTURES)
     expected: JSON.parse(fs.readFileSync(path.join(FIXTURES, d, 'expected.json'), 'utf8')) as Expected
   }));
 
-const synthetic = ['punjab_eproc', 'sppra', 'gilgit', 'tender_services'].filter(d => fs.existsSync(path.join(FIXTURES, d, 'page.html')));
+const synthetic = ['punjab_eproc', 'sppra', 'gilgit', 'ajk_ppra', 'tender_services'].filter(d => fs.existsSync(path.join(FIXTURES, d, 'page.html')));
 
 /** Portals with no fixture, and why. */
 const NOT_COVERED: Record<string, string> = {
@@ -62,11 +62,11 @@ describe('Portal contract tests', () => {
     vi.useRealTimers();
   });
 
-  it('accounts for all 18 portals: a fixture, a synthetic fixture, or a stated reason', () => {
+  it('accounts for all 19 portals: a fixture, a synthetic fixture, or a stated reason', () => {
     const covered = new Set([...captured.map(c => c.dir), ...synthetic, ...Object.keys(NOT_COVERED)]);
     const missing = PORTAL_DEFINITIONS.map(p => p.id).filter(id => !covered.has(id));
     expect(missing).toEqual([]);
-    expect(PORTAL_DEFINITIONS).toHaveLength(18);
+    expect(PORTAL_DEFINITIONS).toHaveLength(19);
   });
 
   for (const { dir, html, expected } of captured) {
@@ -91,7 +91,7 @@ describe('Portal contract tests', () => {
           expect(item.directUrl, `link in ${dir}`).toMatch(/^https?:\/\//);
           expect(orderDocumentCandidates(item).length).toBeLessThanOrEqual(5);
         }
-        expect(getPortalFileCode(portal.id)).toMatch(/^[A-Z0-9]{2,6}$/);
+        expect(getPortalFileCode(portal.id)).toMatch(/^[A-Z0-9]{2,8}$/);
       });
 
       it('no tender with a past deadline survives ingest (clock frozen to capture date)', async () => {

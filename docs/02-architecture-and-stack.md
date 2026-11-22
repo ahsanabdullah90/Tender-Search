@@ -45,7 +45,7 @@ graph TD
     end
 
     subgraph External [External Web & AI Services]
-        GovPortals[18 Pakistan Procurement Portals]
+        GovPortals[19 Pakistan Procurement Portals]
         GeminiAPI[Google AI Studio: 4-Model Failover Pool]
     end
 
