@@ -1,6 +1,6 @@
 # 14. Active Backlog & Next Steps
 
-**Last updated:** 2026-11-22 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, Standalone Desktop Window & System Tray, and Network Health Monitor & Anti-Corruption Safeguards; Master Plan Workstreams A–G and Architectural Milestones #1–#5 completed for 7-Statutory Backbone, Two-Phase Scan Priority, Cross-Portal Dedup, Unidirectional Layers, Runtime Validation/Errors, Versioned SQLite Migrations, and `RuntimeContext` DI).
+**Last updated:** 2026-11-23 · **System Baseline:** v1.9.0 (Plans A–F implemented: BidBrief, 48h Closing Alerts & Digest, Two-Speed Pagination, Parallel Portal Workers & `ScraperErrorCode`, Production Runtime Separation, Offline `local_ocr` Fallback, Standalone Desktop Window & System Tray, and Network Health Monitor & Anti-Corruption Safeguards; Master Plan Workstreams A–G, Architectural Milestones #1–#5, and Migration `v7` Portal Consistency completed; Next Roadmap Planned: `tenderservice.pk` Re-enablement, `'Watching'` Extension Workflow, Hybrid DeepSeek + Gemini Vision Engine, and `brightspyre` Tender/Consultancy Connector).
 
 This document tracks **active operational items and approved non-breaking feature plans**. All historical investigations and completed fixes are archived in [`docs/archive/`](./archive/).
 
@@ -22,9 +22,64 @@ This document tracks **active operational items and approved non-breaking featur
 
 ---
 
-## 2. Planned Improvements & Active Workstreams (Approved — Ready for Execution)
+## 2. Planned Improvements & Active Workstreams (Approved — Planned, Not Yet Executed)
 
-### Master Plan: 7-Statutory Backbone, Two-Phase Scan Priority & Cross-Portal Dedup
+### Planned Roadmap: Newspaper Clippings (`tenderservice.pk`), Tight-Deadline Extension Watch, Hybrid AI Engine & Development-Sector Portals (`brightspyre`)
+
+The following four workstreams have been investigated, designed, and approved for upcoming execution (recorded in planning documentation first before any code changes are applied):
+
+#### Planned Workstream 1: `tenderservice.pk` (`tender_services`) Re-enablement & Cross-Portal Deduplication
+- **Portal Context & Live Probe Findings:**
+  - `https://tenderservice.pk` (`tender_services`) is a nationwide newspaper tender clipping aggregator (`171 KB` public listing HTML, 50 rows/page, `a#jobLink` hrefs `/<numeric_id>/<slug>`).
+  - Listing rows place the newspaper category in `a#jobLink`, the **real tender scope summary** inside `<font color=grey>`, the **actual procuring agency** inside the HTML comment wrapping `<a id="company_sub_link">`, and the **newspaper publication date** in `calendar-search.php?date=YYYY-MM-DD`.
+  - Detail pages (`https://tenderservice.pk/<id>/<slug>`) publicly expose a `Tender Details` table (`Tender id: Ts<id>e`, `Company Name`, `Department Abbreviation`, `Industry`, `Newspaper`, `Contact Number`, `Address`), while the scanned newspaper clipping image requires an authenticated session via `https://tenderservice.pk/permits/login.php` (already supported by `authenticatePortal` in `src/server/scrapers/portalAuth.ts`).
+- **Planned Implementation Steps:**
+  1. **Dedicated Portal Adapter (`src/server/scrapers/adapters/`) & Config (`src/server/domain/portalList.ts`):** Re-enable `tender_services` (`tier: 'http'`, `accessMode: 'public'`, `tendersUrl: 'https://tenderservice.pk'`, query pagination `?page=N` with `quickMaxPages: 2` / `deepMaxPages: 5`), running in **Phase 2** of Two-Phase Scan Execution after the 7 statutory boards.
+  2. **Clean Field Mapping:** Use the `<font color=grey>` scope summary as `title`, the uncommented/detail `Company Name` as `organization` (never `"Tender Service"`), treat the listing date strictly as `publishDate` (`closingDate: null` until extracted from the clipping), and never store synthetic `Ts<id>e` aggregator IDs as `reference_no` so statutory reference numbers cannot collide or mismatch.
+  3. **Authenticated Clipping Enrichment & Stage 2 OCR:** When operator credentials (`username`/`password`) are configured for `tender_services`, authenticate via `src/server/scrapers/portalAuth.ts`, download the newspaper clipping image from the detail page into `data/dossiers/`, and extract `closingDate`, `referenceNo`, and `BidBrief` via Stage 2 Vision / OCR (`src/server/services/documentExtractor.ts`).
+  4. **Cross-Portal Deduplication against Statutory Boards:** Leverage undated-vs-dated cross-portal matching in `src/server/services/deduplicator.ts` and `src/server/scrapers/ingestPipeline.ts` so newspaper notices that duplicate a statutory tender (`epms_ppra`, `punjab_eproc`, `sppra`, `kppra`, `bppra`, `gilgit`, `ajk_ppra`) merge cleanly into `secondary_sources` (*"Also listed on Tender Services Pakistan"*) and attach the newspaper clipping to the canonical statutory tender's `cached_dossiers` with zero duplicate Inbox cards.
+
+#### Planned Workstream 2: Tight-Deadline "Watch for Date Extension" (`'Watching'`) Workflow
+- **Problem Statement:** Some relevant tenders are discovered when the closing deadline is too close (e.g., $\le 3\text{–}5\text{ days}$) to prepare a full bid, unless the procuring agency issues a **Corrigendum / Date Extension Notice** (often published on the closing day or 1–3 days after in newspapers or on the statutory portal).
+- **Planned Implementation Steps:**
+  1. **First-Class `'Watching'` Status (`src/shared/types.ts`, `src/server/db/repositories/tendersRepo.ts`):** Add `'Watching'` (*"Watching for Extension"*) alongside `'New Opportunity'`, `'Under Review'`, and `'Passed'` in `TENDER_STATUSES`.
+  2. **1-Click Action & Inbox Filter Pill (`src/client/components/InboxScreen.tsx`, `src/client/components/inbox/Detail.tsx`):** Add a **"Watch for Extension"** button next to **Track This Bid** and **Pass** (highlighted when a tender closes within $\le 5\text{ days}$), plus a dedicated **`Watching (N)`** filter pill in the Inbox header so active Bid Pipeline lanes stay uncluttered.
+  3. **Extended 7-Day Post-Deadline Retention Grace (`src/server/services/retention.ts`):** Exempt `'Watching'` tenders from immediate post-deadline archival and retain them for **7 days past `closing_date`** so late extension notices and newspaper corrigenda are captured.
+  4. **Automatic Re-Promotion on Extension / Corrigendum (`src/server/scrapers/ingestPipeline.ts`, `src/server/services/documentApply.ts`):** Whenever a re-scan, statutory update, or `tenderservice.pk` newspaper clipping detects `isCorrigendum = true` or a later `closing_date` on a `'Watching'` tender, automatically set `has_corrigendum = 1`, `viewed = 0`, surface it in the top Inbox Corrigendum Alert Banner and Daily Digest (`src/server/db/repositories/systemRepo.ts`), and notify the operator that the bid window has re-opened.
+
+#### Planned Workstream 3: Hybrid DeepSeek (`deepseek-chat`) + Gemini Vision AI Engine
+- **Architecture Decision:** Adopt a **Hybrid AI Architecture** pairing **DeepSeek-V3 (`deepseek-chat`)** as the high-precision, low-cost text & structured-extraction engine with **Gemini Vision (or optional OpenAI-compatible Vision)** + **Local Tesseract OCR** for scanned documents and newspaper clippings:
+  1. **DeepSeek Text Engine for Digital PDFs, Word Docs & Executive Summaries (`src/server/services/ocrService.ts`, `src/server/services/documentExtractor.ts`, `src/server/scrapers/tenderAnalysis.ts`):**
+     - Route all digital text extraction (`chars >= 200` from `pdfjs-dist` or `mammoth`, which accounts for ~70% of dossiers) and manual **"Analyze with AI"** requests to DeepSeek (`https://api.deepseek.com/v1/chat/completions`, model `deepseek-chat`, `response_format: { type: 'json_object' }`, `temperature: 0.1`).
+     - Extract structured `BidBrief` (`bidSecurityAmount`, `tenderFee`, `requiredRegistrations`, `requiredExperience`, `deliverablesSummary`, `bidMethod`), verified `closingDateISO`, `referenceNo`, `issuingOrg`, and a rich 4–6 bullet **Executive Summary (`summaryScope`)**.
+  2. **Upgraded `local_ocr` $\rightarrow$ DeepSeek Cleanup Pipeline (`src/server/services/documentExtractor.ts`, `src/server/runtime/ingestWorker.ts`):**
+     - When a scanned PDF or image is processed via local `tesseract.js` (`src/server/services/localOcrService.ts`), pass the raw OCR text through DeepSeek (`allowAiCrossCheck: true` when `deepseek_api_key` is configured) so DeepSeek reconstructs noisy OCR tables and produces a complete `BidBrief` and Executive Summary even without Vision quota.
+  3. **Vision Stage Reserved Strictly for Scanned NITs & Clippings (`chars < 200`):**
+     - Use Gemini Vision (`gemini_api_key`) or an optional OpenAI-compatible Vision model (`vision_base_url` / `vision_model`) exclusively for raw visual images and scanned PDFs (`tenderservice.pk` newspaper clippings and scanned NITs), falling back automatically to `local_ocr` + DeepSeek text analysis if Vision is unconfigured or rate-limited.
+  4. **Settings & Operator UI (`src/server/db/repositories/systemRepo.ts`, `src/server/routes/system.routes.ts`, `src/client/components/sources/DataTab.tsx`):**
+     - Store `deepseek_api_key`, `deepseek_base_url` (default `https://api.deepseek.com/v1`), and `deepseek_model` (default `deepseek-chat`) in `app_settings` alongside `gemini_api_key`, and expose both **Text AI Engine (DeepSeek)** and **Vision OCR Engine (Gemini)** status cards in **Configuration $\rightarrow$ Data & AI**.
+
+#### Planned Workstream 4: BrightSpyre (`resume.brightspyre.com`) Tender & Consultancy Connector
+- **Portal Context & Live Probe Findings (`2026-11-23`):**
+  - **Direct HTTP Access Verified (`tier: 'http'`):** Live testing via `fetchHtmlWithTolerantAgent` (`src/server/scrapers/htmlFetcher.ts`) confirmed that `https://resume.brightspyre.com` serves full server-side rendered HTML (`200 OK`, `~194 KB` on listing pages, `~48 KB` on detail pages) directly over standard HTTP without Cloudflare challenge blocking or Playwright browser overhead.
+  - **High-Value NGO / Donor / Development-Sector Coverage:** BrightSpyre is a primary procurement & consultancy board for Pakistani NGOs, INGOs, and donor-funded programs (FCDO/Palladium E4H, UNESCO/PJN, Relief International, Better Cotton Initiative, Adam Smith International, SIF, CBM, PVDP, HOPE'87, NIDA-Pakistan) that rarely appear on government PPRA boards.
+  - **Clean Schema.org RDFa Markup & Direct ToR Attachments:**
+    - Listing pages render `[typeof="JobPosting"]` cards with explicit RDFa attributes:
+      - Title & detail URL: `a.title-job` (`href="/jobs/<id>"` $\rightarrow$ `https://resume.brightspyre.com/jobs/<id>`)
+      - Organization: `[property="hiringOrganization"] [property="name"]` / `span[type="PropertyValue"]`
+      - Publish Date & Closing Date: `span[property="datePosted"]` (`YYYY-MM-DD`) and `span[property="validThrough"]` (`YYYY-MM-DD`)
+      - Category & Type: `span[property="occupationalCategory"]` (e.g. `Tender`, `Consultancy`), `span[property="employmentType"]` (e.g. `Tender`, `Consultancy`, `Full Time`, `Contractual`), and description snippet `span[property="description"]`
+      - Location hashtags: `ul li.tags-default a` (e.g. `#Islamabad`, `#Lahore`, `#Karachi`)
+    - Detail pages (`/jobs/<id>`) contain the full HTML Terms of Reference (ToR) / RFP / RFQ body, tender reference numbers, submission instructions, and direct downloadable ToR PDFs hosted under `https://www.brightspyre.com/uploadtor/<id>_job_<filename>.pdf`.
+- **Planned Implementation Steps (Separating Tenders/Consultancies from HR Jobs):**
+  1. **Multi-Category Crawl Targets:** Register canonical portal `brightspyre` (`name: 'BrightSpyre Tenders & Consultancies'`, `baseUrl: 'https://resume.brightspyre.com'`, `tendersUrl: 'https://resume.brightspyre.com/jobs?category=604'`, `category: 'Aggregator'`, `fileCode: 'BSPYRE'`, `tier: 'http'`, `accessMode: 'public'`) with a dedicated adapter in `src/server/scrapers/adapters/` that fetches:
+     - **`?category=604` (`Tender` category — 11 active RFPs/RFQs/EOIs/Tenders):** Ingest all active procurement notices.
+     - **`?category=287` (`Consultancy` category) & Page 1–2 of `/jobs` (`employmentType === 'Consultancy'`):** Ingest institutional and short-term technical assistance (STTA) consultancies, EOIs, and ToRs (e.g., AI portal development, policy frameworks, third-party evaluations, public procurement specialists) while **strictly filtering out** standard HR employment jobs (`employmentType` in `Full Time`, `Part Time`, `Internship`, `Contractual` staff roles like *"Family Doctor"*, *"Procurement Officer"*, *"Country Director"*, or *"Behavior Therapist"* unless flagged as `Tender`/`RFP`/`RFQ`/`EOI`/`ToR`).
+  2. **Detail Enrichment & ToR PDF Discovery:** Extract the full detail-page ToR text into `extracted_text` / `BidBrief` and automatically queue any `https://www.brightspyre.com/uploadtor/*.pdf` links as primary dossier attachments.
+
+---
+
+## 3. Completed Master Plan: 7-Statutory Backbone, Two-Phase Scan Priority & Cross-Portal Dedup
 
 This master plan establishes the complete **7-portal statutory procurement backbone** across all provinces and administrative territories of Pakistan, enforces **Statutory-First scan priority**, and hardens cross-portal deduplication so individual agency websites merge cleanly into statutory tenders with zero duplication.
 
@@ -102,7 +157,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
 
 ---
 
-## 3. Recently Completed Register Items (2026-11-11 – 2026-11-22)
+## 4. Recently Completed Register Items (2026-11-11 – 2026-11-22)
 
 - **Portal Lifecycle Consistency, Dialog Error UX & Schema Migration `v7` (`2026-11-22`):**
   - Added migration `v7` (`sync_tender_portal_names_and_retire_epads_tenders`, `LATEST_SCHEMA_VERSION = 7` in `src/server/db/schema.ts`), propagated portal renames to `tenders.portal_name`, exposed `is_builtin` on `GET /api/portals`, cancelled pending portal `document_ingest_jobs` on portal delete, and added optional `removeUnreviewedTenders` cleanup on `DELETE /api/portals/:portalId`.
@@ -221,7 +276,7 @@ This master plan establishes the complete **7-portal statutory procurement backb
 
 ---
 
-## 4. Completed Design Specifications (from `docs/13` §7)
+## 5. Completed Design Specifications (from `docs/13` §7)
 
 All four design specifications are completed and documented:
 - **Crawler Submodule Layout**: Decomposed into `htmlFetcher.ts`, `crawlerDeps.ts`, `portalParsers.ts`, `tenderAnalysis.ts`, `ingestPipeline.ts` (`docs/02`).
