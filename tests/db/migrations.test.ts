@@ -33,17 +33,17 @@ afterEach(() => {
 });
 
 describe('Versioned SQLite Migrations (PRAGMA user_version)', () => {
-  it('migrates a fresh user_version=0 DB cleanly through v1..v6, creates tables/FTS5/indexes, and stamps sentinels', () => {
+  it('migrates a fresh user_version=0 DB cleanly through v1..v7, creates tables/FTS5/indexes, and stamps sentinels', () => {
     const memDb = createMemoryDb();
     expect(getSchemaVersion(memDb)).toBe(0);
 
     const result = initDatabase(memDb);
 
-    expect(LATEST_SCHEMA_VERSION).toBe(6);
+    expect(LATEST_SCHEMA_VERSION).toBe(7);
     expect(result.fromVersion).toBe(0);
     expect(result.toVersion).toBe(LATEST_SCHEMA_VERSION);
     expect(result.skipped).toBe(false);
-    expect(result.applied.map(a => a.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(result.applied.map(a => a.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(getSchemaVersion(memDb)).toBe(LATEST_SCHEMA_VERSION);
 
     const expectedTables = [
@@ -343,5 +343,53 @@ describe('Versioned SQLite Migrations (PRAGMA user_version)', () => {
     expect(addColumnIfMissing(memDb, 'sample', 'note', 'TEXT')).toBe(false);
     expect(hasColumn(memDb, 'sample', 'note')).toBe(true);
     expect(() => addColumnIfMissing(memDb, 'missing_table', 'col', 'TEXT')).toThrow();
+  });
+
+  it('v7 normalizes stale tenders.portal_name against portal_health.portal_name and migrates legacy epads tenders to epms_ppra', () => {
+    const memDb = createMemoryDb();
+
+    // Run migrations v1..v6 only
+    runMigrations(memDb, SCHEMA_MIGRATIONS.slice(0, 6));
+    expect(getSchemaVersion(memDb)).toBe(6);
+
+    // Seed portal_health rows including a renamed portal
+    memDb.prepare(`
+      INSERT INTO portal_health (portal_id, portal_name, category, tier, base_url, tenders_url)
+      VALUES
+        ('epms_ppra', 'Federal PPRA (EPMS)', 'Regulatory', 'http', 'https://epms.ppra.gov.pk', 'https://epms.ppra.gov.pk/public/tenders'),
+        ('sppra', 'Sindh SPPRA (Renamed)', 'Regulatory', 'http', 'https://ppms.pprasindh.gov.pk', 'https://ppms.pprasindh.gov.pk/PPMS')
+    `).run();
+
+    // Insert a legacy epads tender and a tender with a stale portal_name
+    memDb.prepare(`
+      INSERT INTO tenders (
+        id, canonical_id, portal_id, portal_name, reference_no, title, organization, direct_url
+      ) VALUES
+        ('t-epads-old', 't-epads-old', 'epads', 'Federal PPRA (EPADS)', 'EP-01', 'Legacy EPADS Tender', 'PPRA', 'https://eprocure.gov.pk/t/1'),
+        ('t-sppra-stale', 't-sppra-stale', 'sppra', 'Sindh SPPRA Old Name', 'SP-02', 'Sindh Roads Tender', 'Works Dept', 'https://ppms.pprasindh.gov.pk/t/2')
+    `).run();
+
+    const result = initDatabase(memDb);
+    expect(result.fromVersion).toBe(6);
+    expect(result.toVersion).toBe(7);
+    expect(result.applied.map(a => a.version)).toEqual([7]);
+
+    const epadsRow = memDb.prepare('SELECT portal_id, portal_name FROM tenders WHERE id = ?').get('t-epads-old') as {
+      portal_id: string;
+      portal_name: string;
+    };
+    expect(epadsRow).toEqual({
+      portal_id: 'epms_ppra',
+      portal_name: 'Federal PPRA (EPMS)'
+    });
+
+    const sppraRow = memDb.prepare('SELECT portal_id, portal_name FROM tenders WHERE id = ?').get('t-sppra-stale') as {
+      portal_id: string;
+      portal_name: string;
+    };
+    expect(sppraRow).toEqual({
+      portal_id: 'sppra',
+      portal_name: 'Sindh SPPRA (Renamed)'
+    });
   });
 });

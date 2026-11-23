@@ -295,6 +295,35 @@ export const SCHEMA_MIGRATIONS: readonly Migration[] = [
 
       runAuditCleanupOnce(database);
     }
+  },
+  {
+    version: 7,
+    name: 'sync_tender_portal_names_and_retire_epads_tenders',
+    up: (database) => {
+      database.prepare(`
+        UPDATE tenders
+        SET portal_id = 'epms_ppra',
+            portal_name = COALESCE(
+              (SELECT portal_name FROM portal_health WHERE portal_id = 'epms_ppra'),
+              'Federal PPRA (EPMS)'
+            )
+        WHERE portal_id = 'epads'
+      `).run();
+
+      database.prepare(`
+        UPDATE tenders
+        SET portal_name = (
+          SELECT ph.portal_name FROM portal_health ph WHERE ph.portal_id = tenders.portal_id
+        )
+        WHERE EXISTS (
+          SELECT 1 FROM portal_health ph
+          WHERE ph.portal_id = tenders.portal_id
+            AND ph.portal_name IS NOT NULL
+            AND ph.portal_name != ''
+            AND ph.portal_name != tenders.portal_name
+        )
+      `).run();
+    }
   }
 ];
 

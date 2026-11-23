@@ -104,6 +104,10 @@ This master plan establishes the complete **7-portal statutory procurement backb
 
 ## 3. Recently Completed Register Items (2026-11-11 – 2026-11-22)
 
+- **Portal Lifecycle Consistency, Dialog Error UX & Schema Migration `v7` (`2026-11-22`):**
+  - Added migration `v7` (`sync_tender_portal_names_and_retire_epads_tenders`, `LATEST_SCHEMA_VERSION = 7` in `src/server/db/schema.ts`), propagated portal renames to `tenders.portal_name`, exposed `is_builtin` on `GET /api/portals`, cancelled pending portal `document_ingest_jobs` on portal delete, and added optional `removeUnreviewedTenders` cleanup on `DELETE /api/portals/:portalId`.
+  - Hardened `App.tsx`, `PortalsTab.tsx`, and `InboxScreen.tsx` with scheme-less URL normalization (`normalizeUrlInput`), inline error banners that keep Add/Edit dialogs open on failure, conditional `Reset to default URL` visibility (`is_builtin !== false`), optional unreviewed-tender removal on portal delete, and live Inbox portal pill synchronization (`tests/ui/sources-screen.test.tsx`).
+
 - **Pluggable `PortalAdapter` Registry, Unidirectional Layers & Architectural Milestones #1–#5 (`2026-11-22`):**
   - **Milestone #1 (Resolved)**: Unified portal-specific crawl dispatch, transport/pagination cookie settings, deterministic HTML extractors, and API/HTML detail enrichment behind `src/server/scrapers/adapters/` (`registry.ts`, `types.ts`, `guards.ts`, `genericAdapter.ts`, plus dedicated adapters for all specialized portals/agencies), covered by `tests/scraper/portal-adapters.test.ts`.
   - **Milestone #2 (Resolved)**: Eliminated all cross-layer server imports by introducing `src/server/domain/` (9 pure modules with downward shims), `src/server/services/sppraClient.ts`, and `src/server/runtime/` (`ingestWorker.ts`, `scheduler.ts`), enforced continuously by `GOV-4` in `tests/unit/system-governance.test.ts`.

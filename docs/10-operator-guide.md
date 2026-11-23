@@ -114,10 +114,11 @@ Navigate to **Sources & Keywords**:
    - Example: Add `inverter` or `photovoltaic` to *Solar & Clean Energy*; add `cleaning` or `janitorial` to the Ignore list.
    - **Organization Watchlist (`track-priority-orgs`)**: Tracks priority education, PPP, and TVET bodies (such as `PEF`, `PEIMA`, `SEF`, `PSDF`, `NAVTTC`, `TEVTA`s, `KPITB`, `BEF`, `NCHD`, `FDE`, `MOFEPT`, `Ignite`, `PSEB`, `HEC`) across all statutory portals while pairing strict negative exclusions for supply, civil works, solar, gas, uniforms, vehicles, and catering.
 2. **Portals Subtab**:
-   - Check the operational health, clickable website URL, and last scan yields of all 19 portals.
+   - Check the operational health, clickable website URL, and last scan yields of all active portals.
    - **Self-Healing Recovery**: If a portal moves its tenders sub-page or changes its HTML layout, the scraper automatically runs the 5-step discovery process during the scan and updates the portal URL.
    - **Explicit Diagnostics**: If a portal cannot be reached even after self-healing, the exact failure reason (`Reason: <error>`) is displayed in red below its URL.
-   - **Streamlined Editing**: Click **"Edit"** on any portal to update its **Portal name** and **Website address** in a clean two-field dialog.
+   - **Streamlined Adding & Editing**: Click **"Add portal"** or **"Edit"** on any portal to configure its **Portal name** and **Website address** (bare domains such as `irrigation.punjab.gov.pk/tenders` automatically normalize to `https://`, and validation errors are shown inline without closing the dialog). Built-in canonical portals include **"Reset to default URL"**, and renaming a portal immediately updates its display label across Inbox filter pills and tender cards.
+   - **Clean Portal Deletion**: When deleting a portal, you can optionally check **"Also remove unreviewed inbox tenders from this portal"** to clean up its unreviewed Inbox listings while preserving bookmarked tenders and active Pipeline bids.
    - **Portal Login**: Enter your login credentials for **Tender Services Pakistan** (`https://tenderservice.pk/permits/login.php`).
 3. **Data Subtab**:
    - **Document Ingest, Offline OCR & Vision Budgets**: View today's Gemini Vision usage, toggle offline `local_ocr` fallback (`local_ocr_enabled`), and configure the upfront scan time budget (seconds), maximum file size (MB), and Vision/text call caps per scan and per day.

@@ -72,8 +72,8 @@ export default function App() {
     closingSoon: 0,
     inPipeline: 0,
     unackCorrigenda: 0,
-    totalPortals: 19,
-    onlinePortals: 19,
+    totalPortals: 0,
+    onlinePortals: 0,
     hitlRequiredCount: 0
   });
 
@@ -82,7 +82,7 @@ export default function App() {
     currentPortal: null,
     progressPercent: 0,
     completedPortals: 0,
-    totalPortals: 19,
+    totalPortals: 0,
     newTendersFound: 0,
     corrigendaFound: 0,
     lastScanTimestamp: null
@@ -451,7 +451,7 @@ export default function App() {
     }
   };
 
-  const handleAddPortal = async (portal: { portal_name: string; tenders_url: string; base_url?: string; category?: string; tier?: string; access_mode?: string; login_url?: string }) => {
+  const handleAddPortal = async (portal: { portal_name: string; tenders_url: string; base_url?: string; category?: string; tier?: string; access_mode?: string; login_url?: string }): Promise<boolean> => {
     try {
       await apiMutate('/api/portals', 'POST', portal);
       fetchPortals();
@@ -459,15 +459,20 @@ export default function App() {
       return true;
     } catch (err) {
       console.error('Failed to add portal:', err);
-      return false;
+      throw err;
     }
   };
 
-  const handleDeletePortal = async (portalId: string) => {
+  const handleDeletePortal = async (portalId: string, options?: { removeUnreviewedTenders?: boolean }): Promise<boolean> => {
     try {
-      await apiMutate(`/api/portals/${portalId}`, 'DELETE');
+      if (options?.removeUnreviewedTenders) {
+        await apiMutate(`/api/portals/${portalId}`, 'DELETE', { removeUnreviewedTenders: true });
+      } else {
+        await apiMutate(`/api/portals/${portalId}`, 'DELETE');
+      }
       fetchPortals();
       fetchKpis();
+      fetchTenders();
       return true;
     } catch (err) {
       console.error('Failed to delete portal:', err);
@@ -475,12 +480,16 @@ export default function App() {
     }
   };
 
-  const handleUpdatePortal = async (portalId: string, updates: Partial<PortalHealth>) => {
+  const handleUpdatePortal = async (portalId: string, updates: Partial<PortalHealth>): Promise<boolean> => {
     try {
       await apiMutate(`/api/portals/${portalId}`, 'PUT', updates);
       fetchPortals();
+      fetchKpis();
+      fetchTenders();
+      return true;
     } catch (err) {
       console.error('Failed to update portal:', err);
+      throw err;
     }
   };
 

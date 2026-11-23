@@ -250,7 +250,7 @@ Acknowledges and clears an amendment alert.
 ## 4. Portals, Health & Authentication
 
 ### `GET /api/portals`
-Returns health metrics, access modes, and configuration for all active procurement portals.
+Returns health metrics, access modes, and configuration for all active procurement portals, including `is_builtin` (`true` when `portal_id` belongs to the canonical `PORTAL_DEFINITIONS` catalog, `false` for user-added custom portals).
 - **Response**: `200 OK` array of `PortalHealth` records.
 
 ### `POST /api/portals`
@@ -269,11 +269,17 @@ Adds a new custom procurement portal to SQLite. URLs are validated by `validateE
 - **Response**: `201 Created` (`{"success": true, "portal": {...}}`) or `400 Bad Request`.
 
 ### `DELETE /api/portals/:portalId`
-Deletes a procurement portal from active monitoring and records it in `deleted_portals` so it is not re-seeded.
-- **Response**: `200 OK` (`{"success": true, "portal_id": "...", "message": "..."}`).
+Deletes a procurement portal from active monitoring, records it in `deleted_portals` so it is not re-seeded, cancels any pending/processing `document_ingest_jobs` for that portal's tenders, and optionally removes unreviewed `New Opportunity` inbox tenders (`removeUnreviewedTenders: true`) while always preserving bookmarked tenders and active pipeline stages.
+- **Request Body** *(optional)*:
+  ```json
+  {
+    "removeUnreviewedTenders": true
+  }
+  ```
+- **Response**: `200 OK` (`{"success": true, "portal_id": "...", "removedTenders": n, "cancelledJobs": m, "message": "..."}`) or `404 Not Found`.
 
 ### `PUT /api/portals/:portalId`
-Updates portal settings (name, website URL, base URL, tier, access mode). Enforces strict origin normalization on `base_url` and `SEC-5` external URL safety (`validateExternalHttpUrl`).
+Updates portal settings (name, website URL, base URL, tier, access mode). Enforces strict origin normalization on `base_url` and `SEC-5` external URL safety (`validateExternalHttpUrl`). When `portal_name` changes, propagates the updated display name across all existing `tenders.portal_name` rows for that `portal_id`.
 - **Request Body**:
   ```json
   {
@@ -282,7 +288,7 @@ Updates portal settings (name, website URL, base URL, tier, access mode). Enforc
     "base_url": "https://example.gov.pk"
   }
   ```
-- **Response**: `200 OK` (`{"success": true, "message": "Portal updated successfully"}`) or `400 Bad Request`.
+- **Response**: `200 OK` (`{"success": true, "message": "Portal updated successfully"}`), `400 Bad Request`, or `404 Not Found`.
 
 ### `POST /api/portals/:portalId/reset-default`
 Resets a modified portal's URL, access mode, and tier back to canonical baseline values in `PORTAL_DEFINITIONS`.

@@ -1,5 +1,6 @@
 import {
   getTenderById,
+  getPortalById,
   updateTenderFields,
   getGeminiApiKey,
   mergeTenderAttachmentUrls,
@@ -37,9 +38,36 @@ import { scanState, type ScanStateStore } from './scanState.js';
 
 export { readCachedDossier };
 
-function resolvePortalDefForTender(tender: Tender): PortalDefinition {
+function resolvePortalDefForTender(tender: Tender): PortalDefinition & { sessionCookies?: string } {
+  const canonicalDef = PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id);
+  let dbPortal: ReturnType<typeof getPortalById> = null;
+  try {
+    dbPortal = tender.portal_id ? getPortalById(tender.portal_id) : null;
+  } catch {
+    dbPortal = null;
+  }
+
+  if (dbPortal) {
+    return {
+      ...(canonicalDef || ({} as PortalDefinition)),
+      id: dbPortal.portal_id,
+      name: dbPortal.portal_name || canonicalDef?.name || tender.portal_name,
+      category: (dbPortal.category || canonicalDef?.category || 'Federal/Regional') as PortalDefinition['category'],
+      tier: (dbPortal.tier || canonicalDef?.tier || 'http') as PortalDefinition['tier'],
+      baseUrl: sanitizeOriginUrl(
+        dbPortal.base_url,
+        canonicalDef?.baseUrl || sanitizeOriginUrl(tender.direct_url, tender.direct_url || '')
+      ),
+      tendersUrl: dbPortal.tenders_url || canonicalDef?.tendersUrl || tender.direct_url,
+      loginUrl: dbPortal.login_url || canonicalDef?.loginUrl,
+      accessMode: (dbPortal.access_mode || canonicalDef?.accessMode || 'public') as PortalDefinition['accessMode'],
+      verifiedStatus: dbPortal.verified_status || canonicalDef?.verifiedStatus || 'User-configured',
+      sessionCookies: dbPortal.session_cookies || undefined
+    };
+  }
+
   return (
-    PORTAL_DEFINITIONS.find(p => p.id === tender.portal_id) ||
+    canonicalDef ||
     ({
       id: tender.portal_id,
       name: tender.portal_name,

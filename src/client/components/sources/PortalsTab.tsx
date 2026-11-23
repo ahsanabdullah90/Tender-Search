@@ -15,6 +15,15 @@ function portalState(p: PortalHealth): PortalState {
   return 'working';
 }
 
+function normalizeUrlInput(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return trimmed;
+}
+
 export function PortalsTab(
   props: Pick<
     SourcesScreenProps,
@@ -24,6 +33,7 @@ export function PortalsTab(
   const { portals } = props;
   const [editing, setEditing] = useState<PortalHealth | null>(null);
   const [form, setForm] = useState({ portal_name: '', website_url: '' });
+  const [editError, setEditError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({
     portal_name: '',
@@ -35,6 +45,7 @@ export function PortalsTab(
   });
   const [addError, setAddError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<PortalHealth | null>(null);
+  const [removeUnreviewedOnDelete, setRemoveUnreviewedOnDelete] = useState(false);
   const [credentialsFor, setCredentialsFor] = useState<PortalHealth | null>(null);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [healing, setHealing] = useState(false);
@@ -46,6 +57,7 @@ export function PortalsTab(
   const startEdit = (p: PortalHealth) => {
     setEditing(p);
     setHealMessage(null);
+    setEditError(null);
     setForm({
       portal_name: p.portal_name,
       website_url: p.tenders_url || p.base_url || ''
@@ -57,10 +69,14 @@ export function PortalsTab(
     setHealing(true);
     setHealMessage(null);
     try {
+      const normalizedUrl = normalizeUrlInput(form.website_url);
+      if (normalizedUrl && normalizedUrl !== form.website_url) {
+        setForm(prev => ({ ...prev, website_url: normalizedUrl }));
+      }
       const data = await apiMutate<{ tendersUrl?: string; message?: string }>(
         `/api/portals/${editing.portal_id}/heal`,
         'POST',
-        { baseUrl: form.website_url.trim() }
+        { baseUrl: normalizedUrl }
       );
       if (data.tendersUrl) {
         setForm(prev => ({ ...prev, website_url: data.tendersUrl! }));
@@ -84,11 +100,13 @@ export function PortalsTab(
     if (!editing) return;
     setResetting(true);
     setHealMessage(null);
+    setEditError(null);
     try {
       const data = await apiMutate<{
         portal_name?: string;
         tenders_url?: string;
         base_url?: string;
+        status?: PortalHealth['status'];
         message?: string;
       }>(`/api/portals/${editing.portal_id}/reset-default`, 'POST');
       setForm({
@@ -96,12 +114,15 @@ export function PortalsTab(
         website_url: data.tenders_url || form.website_url
       });
       setHealMessage(data.message || 'Restored official default URL.');
-      props.onUpdatePortal(editing.portal_id, {
-        tenders_url: data.tenders_url,
-        base_url: data.base_url,
-        status: 'online',
-        last_error_message: null
-      });
+      void Promise.resolve(
+        props.onUpdatePortal(editing.portal_id, {
+          portal_name: data.portal_name || form.portal_name,
+          tenders_url: data.tenders_url,
+          base_url: data.base_url,
+          status: data.status || 'online',
+          last_error_message: null
+        })
+      ).catch(() => {});
     } catch (err) {
       const errData = (err as { data?: { message?: string } } | null)?.data;
       setHealMessage(
@@ -223,7 +244,10 @@ export function PortalsTab(
                     title={`Delete ${p.portal_name}`}
                     aria-label={`Delete ${p.portal_name}`}
                     className="text-ink-muted hover:bg-danger-soft hover:text-danger"
-                    onClick={() => setDeleting(p)}
+                    onClick={() => {
+                      setRemoveUnreviewedOnDelete(false);
+                      setDeleting(p);
+                    }}
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>
@@ -235,7 +259,7 @@ export function PortalsTab(
 
       <Dialog
         open={Boolean(editing)}
-        onClose={() => setEditing(null)}
+        onClose={() => { setEditing(null); setEditError(null); }}
         title={editing ? `Edit ${editing.portal_name}` : ''}
         footer={
           <div className="flex w-full items-center justify-between">
@@ -244,25 +268,34 @@ export function PortalsTab(
               onClick={() => {
                 const toDel = editing;
                 setEditing(null);
+                setEditError(null);
+                setRemoveUnreviewedOnDelete(false);
                 setDeleting(toDel);
               }}
             >
               <Trash2 className="h-4 w-4" /> Delete portal
             </Button>
             <div className="flex items-center gap-2">
-              <Button onClick={() => setEditing(null)}>Cancel</Button>
+              <Button onClick={() => { setEditing(null); setEditError(null); }}>Cancel</Button>
               <Button
                 variant="primary"
-                onClick={() => {
-                  if (editing) {
-                    const url = form.website_url.trim();
-                    props.onUpdatePortal(editing.portal_id, {
+                onClick={async () => {
+                  if (!editing) return;
+                  setEditError(null);
+                  const url = normalizeUrlInput(form.website_url);
+                  try {
+                    const ok = await props.onUpdatePortal(editing.portal_id, {
                       portal_name: form.portal_name.trim(),
                       tenders_url: url,
                       base_url: url
                     });
+                    if (ok === false) {
+                      throw new Error('Failed to save portal changes');
+                    }
+                    setEditing(null);
+                  } catch (err: any) {
+                    setEditError(err?.message || 'Failed to save portal changes');
                   }
-                  setEditing(null);
                 }}
               >
                 Save
@@ -293,14 +326,21 @@ export function PortalsTab(
               {healMessage}
             </div>
           )}
+          {editError && (
+            <div className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+              {editError}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <Button disabled={healing || !form.website_url.trim()} onClick={() => void runAutoHealInDialog()}>
               {healing ? 'Searching website…' : 'Auto-find tender page'}
             </Button>
-            <Button disabled={resetting} variant="ghost" onClick={() => void resetToDefaultUrl()}>
-              {resetting ? 'Resetting…' : 'Reset to default URL'}
-            </Button>
-            <Button onClick={() => { setCredentialsFor(editing); setEditing(null); }}>
+            {editing?.is_builtin !== false && editing?.verified_status !== 'User-added portal' && (
+              <Button disabled={resetting} variant="ghost" onClick={() => void resetToDefaultUrl()}>
+                {resetting ? 'Resetting…' : 'Reset to default URL'}
+              </Button>
+            )}
+            <Button onClick={() => { setCredentialsFor(editing); setEditing(null); setEditError(null); }}>
               <KeyRound className="h-4 w-4" /> Login details
             </Button>
           </div>
@@ -311,7 +351,11 @@ export function PortalsTab(
         portal={credentialsFor}
         isOpen={Boolean(credentialsFor)}
         onClose={() => setCredentialsFor(null)}
-        onSuccess={() => { if (credentialsFor) props.onUpdatePortal(credentialsFor.portal_id, { status: 'online' }); }}
+        onSuccess={() => {
+          if (credentialsFor) {
+            void Promise.resolve(props.onUpdatePortal(credentialsFor.portal_id, { status: 'online' })).catch(() => {});
+          }
+        }}
       />
 
       <Dialog
@@ -326,25 +370,31 @@ export function PortalsTab(
               disabled={!addForm.portal_name.trim() || !addForm.website_url.trim()}
               onClick={async () => {
                 if (!addForm.portal_name.trim() || !addForm.website_url.trim()) return;
+                setAddError(null);
+                const websiteUrl = normalizeUrlInput(addForm.website_url);
+                const loginUrl = addForm.login_url.trim() ? normalizeUrlInput(addForm.login_url) : undefined;
                 try {
                   if (props.onAddPortal) {
-                    await props.onAddPortal({
+                    const ok = await props.onAddPortal({
                       portal_name: addForm.portal_name.trim(),
-                      tenders_url: addForm.website_url.trim(),
-                      base_url: addForm.website_url.trim(),
+                      tenders_url: websiteUrl,
+                      base_url: websiteUrl,
                       category: addForm.category,
                       tier: addForm.tier,
                       access_mode: addForm.access_mode,
-                      login_url: addForm.login_url.trim() || undefined
+                      login_url: loginUrl
                     });
+                    if (ok === false) {
+                      throw new Error('Failed to add portal');
+                    }
                   } else {
                     await apiMutate('/api/portals', 'POST', {
                       portal_name: addForm.portal_name.trim(),
-                      tenders_url: addForm.website_url.trim(),
+                      tenders_url: websiteUrl,
                       category: addForm.category,
                       tier: addForm.tier,
                       access_mode: addForm.access_mode,
-                      login_url: addForm.login_url.trim() || undefined
+                      login_url: loginUrl
                     });
                   }
                   setAdding(false);
@@ -432,22 +482,29 @@ export function PortalsTab(
 
       <Dialog
         open={Boolean(deleting)}
-        onClose={() => setDeleting(null)}
+        onClose={() => { setDeleting(null); setRemoveUnreviewedOnDelete(false); }}
         title="Delete this portal?"
         footer={
           <>
-            <Button onClick={() => setDeleting(null)}>Keep it</Button>
+            <Button onClick={() => { setDeleting(null); setRemoveUnreviewedOnDelete(false); }}>Keep it</Button>
             <Button
               variant="danger"
               onClick={async () => {
                 if (deleting) {
                   if (props.onDeletePortal) {
-                    await props.onDeletePortal(deleting.portal_id);
+                    if (removeUnreviewedOnDelete) {
+                      await props.onDeletePortal(deleting.portal_id, { removeUnreviewedTenders: true });
+                    } else {
+                      await props.onDeletePortal(deleting.portal_id);
+                    }
+                  } else if (removeUnreviewedOnDelete) {
+                    await apiMutate(`/api/portals/${deleting.portal_id}`, 'DELETE', { removeUnreviewedTenders: true });
                   } else {
                     await apiMutate(`/api/portals/${deleting.portal_id}`, 'DELETE');
                   }
                 }
                 setDeleting(null);
+                setRemoveUnreviewedOnDelete(false);
               }}
             >
               Delete
@@ -455,10 +512,26 @@ export function PortalsTab(
           </>
         }
       >
-        <p className="text-ink-muted">
-          Are you sure you want to remove <span className="font-semibold text-ink">{deleting?.portal_name}</span>?
-          This will exclude it from future scans and crawler runs.
-        </p>
+        <div className="space-y-3">
+          <p className="text-ink-muted">
+            Are you sure you want to remove <span className="font-semibold text-ink">{deleting?.portal_name}</span>?
+            This will exclude it from future scans and crawler runs.
+          </p>
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-xs">
+            <input
+              type="checkbox"
+              checked={removeUnreviewedOnDelete}
+              onChange={e => setRemoveUnreviewedOnDelete(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
+            />
+            <span className="text-ink">
+              Also remove unreviewed inbox tenders from this portal
+              <span className="mt-0.5 block text-[11px] text-ink-muted">
+                (Bookmarked tenders and active pipeline bids are always preserved.)
+              </span>
+            </span>
+          </label>
+        </div>
       </Dialog>
     </div>
   );

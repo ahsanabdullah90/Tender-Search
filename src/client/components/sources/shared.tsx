@@ -9,9 +9,9 @@ export interface SourcesScreenProps {
   portals: PortalHealth[];
   onSaveTrack: (track: { id?: string; name: string; positive_keywords: string[]; negative_keywords: string[] }) => void;
   onDeleteTrack: (id: string) => void;
-  onUpdatePortal: (portalId: string, updates: Partial<PortalHealth>) => void;
+  onUpdatePortal: (portalId: string, updates: Partial<PortalHealth>) => Promise<boolean> | void;
   onAddPortal?: (portal: { portal_name: string; tenders_url: string; base_url?: string; category?: string; tier?: string; access_mode?: string; login_url?: string }) => Promise<boolean> | void;
-  onDeletePortal?: (portalId: string) => Promise<boolean> | void;
+  onDeletePortal?: (portalId: string, options?: { removeUnreviewedTenders?: boolean }) => Promise<boolean> | void;
   onLaunchHitl: (portalId: string) => void;
   onVerifyHitl: (portalId: string) => void;
   onScanSinglePortal: (portalId: string) => void;

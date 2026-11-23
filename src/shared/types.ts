@@ -182,6 +182,7 @@ export interface PortalHealth {
   verified_status?: string;
   last_success_at?: string | null;
   pages_scanned?: number;
+  is_builtin?: boolean;
 }
 
 export interface DocumentQueueStatus {

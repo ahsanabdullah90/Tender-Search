@@ -1,6 +1,11 @@
 import { db } from '../connection.js';
 import { sanitizeOriginUrl } from '../../../shared/documentUtils.js';
 import { PortalHealth } from '../../../shared/types.js';
+import { PORTAL_DEFINITIONS } from '../../domain/portalList.js';
+import { deleteTenders } from './tenderLifecycleRepo.js';
+import { refreshTenderDocFetchStatus } from './ingestJobsRepo.js';
+
+const BUILTIN_PORTAL_IDS = new Set(PORTAL_DEFINITIONS.map(p => p.id));
 
 function mapPortalHealthRow(r: any): PortalHealth {
   return {
@@ -23,7 +28,8 @@ function mapPortalHealthRow(r: any): PortalHealth {
     access_mode: r.access_mode,
     verified_status: r.verified_status,
     last_success_at: r.last_success_at ?? null,
-    pages_scanned: r.pages_scanned ?? 0
+    pages_scanned: r.pages_scanned ?? 0,
+    is_builtin: BUILTIN_PORTAL_IDS.has(r.portal_id)
   };
 }
 
@@ -52,6 +58,8 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
       let normalizedVal = val;
       if (key === 'base_url' && typeof val === 'string' && val.trim()) {
         normalizedVal = sanitizeOriginUrl(val, val);
+      } else if (key === 'portal_name' && typeof val === 'string' && val.trim()) {
+        normalizedVal = val.trim();
       }
       fields.push(`${key} = ?`);
       values.push(normalizedVal);
@@ -61,7 +69,15 @@ export function updatePortalHealth(portalId: string, updates: Partial<PortalHeal
   if (fields.length === 0) return;
   values.push(portalId);
 
-  db.prepare(`UPDATE portal_health SET ${fields.join(', ')} WHERE portal_id = ?`).run(...values);
+  const updateTx = db.transaction(() => {
+    db.prepare(`UPDATE portal_health SET ${fields.join(', ')} WHERE portal_id = ?`).run(...values);
+    if (typeof updates.portal_name === 'string' && updates.portal_name.trim()) {
+      const nextName = updates.portal_name.trim();
+      db.prepare('UPDATE tenders SET portal_name = ? WHERE portal_id = ? AND portal_name != ?')
+        .run(nextName, portalId, nextName);
+    }
+  });
+  updateTx();
 }
 
 export function savePortalCredentials(portalId: string, creds: { username?: string; password?: string; loginUrl?: string }) {
@@ -154,6 +170,56 @@ export function deletePortal(portalId: string): boolean {
   });
 
   return deleteTx();
+}
+
+export function cleanupDeletedPortalResources(
+  portalId: string,
+  options?: { removeUnreviewedTenders?: boolean }
+): { cancelledJobs: number; removedTenders: number } {
+  const affectedRows = db.prepare(`
+    SELECT DISTINCT j.tender_id
+    FROM document_ingest_jobs j
+    JOIN tenders t ON t.id = j.tender_id
+    WHERE t.portal_id = ? AND j.status IN ('pending', 'processing')
+  `).all(portalId) as { tender_id: string }[];
+
+  let cancelledJobs = 0;
+  if (affectedRows.length > 0) {
+    const cancelTx = db.transaction(() => {
+      const res = db.prepare(`
+        UPDATE document_ingest_jobs
+        SET status = 'failed',
+            last_error = 'Portal deleted by operator',
+            lease_until = NULL
+        WHERE status IN ('pending', 'processing')
+          AND tender_id IN (SELECT id FROM tenders WHERE portal_id = ?)
+      `).run(portalId);
+      cancelledJobs = res.changes;
+      for (const row of affectedRows) {
+        refreshTenderDocFetchStatus(row.tender_id);
+      }
+    });
+    cancelTx();
+  }
+
+  let removedTenders = 0;
+  if (options?.removeUnreviewedTenders === true) {
+    const unreviewed = db.prepare(`
+      SELECT id FROM tenders
+      WHERE portal_id = ?
+        AND pipeline_status = 'New Opportunity'
+        AND COALESCE(is_bookmarked, 0) = 0
+    `).all(portalId) as { id: string }[];
+    if (unreviewed.length > 0) {
+      const { deletedCount } = deleteTenders(
+        unreviewed.map(r => r.id),
+        'user'
+      );
+      removedTenders = deletedCount;
+    }
+  }
+
+  return { cancelledJobs, removedTenders };
 }
 
 export function getScanningPortalIds(): string[] {

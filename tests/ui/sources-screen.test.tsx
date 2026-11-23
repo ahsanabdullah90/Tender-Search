@@ -742,4 +742,177 @@ describe('SourcesScreen component', () => {
       );
     });
   });
+
+  it('auto-prepends https:// on bare domains in Add Portal and keeps dialog open on error', async () => {
+    const user = userEvent.setup();
+    const handleAddPortal = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Target URL resolves to a restricted address'))
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    render(
+      <SourcesScreen
+        portals={samplePortals}
+        tracks={sampleTracks}
+        onSaveTrack={vi.fn()}
+        onDeleteTrack={vi.fn()}
+        onClearInbox={vi.fn()}
+        onEraseAll={vi.fn()}
+        onUpdatePortal={vi.fn()}
+        onAddPortal={handleAddPortal}
+        onDeletePortal={vi.fn()}
+        onLaunchHitl={vi.fn()}
+        onVerifyHitl={vi.fn()}
+        onScanSinglePortal={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('tab', { name: /Portals/ }));
+    await user.click(screen.getByRole('button', { name: /Add portal/i }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Add procurement portal' });
+    await user.type(screen.getByPlaceholderText('e.g. Sindh Irrigation Department'), 'Custom Irrigation');
+    await user.type(screen.getByPlaceholderText('https://example.gov.pk/tenders'), 'irrigation.punjab.gov.pk/tenders');
+
+    const submitBtn = within(dialog).getByRole('button', { name: 'Add portal' });
+    await user.click(submitBtn);
+
+    await waitFor(() => {
+      expect(handleAddPortal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          portal_name: 'Custom Irrigation',
+          tenders_url: 'https://irrigation.punjab.gov.pk/tenders',
+          base_url: 'https://irrigation.punjab.gov.pk/tenders'
+        })
+      );
+      expect(within(dialog).getByText('Target URL resolves to a restricted address')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('dialog', { name: 'Add procurement portal' })).toBeInTheDocument();
+
+    // Returning false also keeps dialog open and displays fallback error message
+    await user.click(submitBtn);
+    await waitFor(() => {
+      expect(within(dialog).getByText('Failed to add portal')).toBeInTheDocument();
+    });
+
+    // Succeeding on retry closes dialog
+    await user.click(submitBtn);
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Add procurement portal' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('hides Reset to default URL for user-added portals and keeps Edit dialog open when save fails', async () => {
+    const user = userEvent.setup();
+    const handleUpdatePortal = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Invalid tenders_url'))
+      .mockResolvedValueOnce(true);
+
+    const customPortals: PortalHealth[] = [
+      ...samplePortals,
+      {
+        portal_id: 'custom_irrigation',
+        portal_name: 'Custom Irrigation Portal',
+        category: 'Provincial',
+        tier: 'http',
+        base_url: 'https://irrigation.punjab.gov.pk',
+        tenders_url: 'https://irrigation.punjab.gov.pk/tenders',
+        status: 'online',
+        last_scan_at: null,
+        last_items_found: 0,
+        consecutive_zero_yields: 0,
+        last_error_message: null,
+        access_mode: 'public',
+        verified_status: 'User-added portal',
+        is_builtin: false
+      }
+    ];
+
+    render(
+      <SourcesScreen
+        portals={customPortals}
+        tracks={sampleTracks}
+        onSaveTrack={vi.fn()}
+        onDeleteTrack={vi.fn()}
+        onClearInbox={vi.fn()}
+        onEraseAll={vi.fn()}
+        onUpdatePortal={handleUpdatePortal}
+        onAddPortal={vi.fn()}
+        onDeletePortal={vi.fn()}
+        onLaunchHitl={vi.fn()}
+        onVerifyHitl={vi.fn()}
+        onScanSinglePortal={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('tab', { name: /Portals/ }));
+    await user.click(screen.getByRole('button', { name: 'Edit Custom Irrigation Portal' }));
+
+    const editDialog = screen.getByRole('dialog', { name: /Edit Custom Irrigation Portal/ });
+    expect(within(editDialog).queryByRole('button', { name: /Reset to default URL/i })).not.toBeInTheDocument();
+
+    const webAddrInput = within(editDialog).getByLabelText('Website address');
+    await user.clear(webAddrInput);
+    await user.type(webAddrInput, 'irrigation.punjab.gov.pk/new-tenders');
+
+    const saveBtn = within(editDialog).getByRole('button', { name: 'Save' });
+    await user.click(saveBtn);
+
+    await waitFor(() => {
+      expect(handleUpdatePortal).toHaveBeenCalledWith('custom_irrigation', {
+        portal_name: 'Custom Irrigation Portal',
+        tenders_url: 'https://irrigation.punjab.gov.pk/new-tenders',
+        base_url: 'https://irrigation.punjab.gov.pk/new-tenders'
+      });
+      expect(within(editDialog).getByText('Invalid tenders_url')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('dialog', { name: /Edit Custom Irrigation Portal/ })).toBeInTheDocument();
+
+    await user.click(saveBtn);
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: /Edit Custom Irrigation Portal/ })).not.toBeInTheDocument();
+    });
+  });
+
+  it('passes removeUnreviewedTenders option when checkbox is checked in Delete portal dialog', async () => {
+    const user = userEvent.setup();
+    const handleDeletePortal = vi.fn().mockResolvedValue(true);
+
+    render(
+      <SourcesScreen
+        portals={samplePortals}
+        tracks={sampleTracks}
+        onSaveTrack={vi.fn()}
+        onDeleteTrack={vi.fn()}
+        onClearInbox={vi.fn()}
+        onEraseAll={vi.fn()}
+        onUpdatePortal={vi.fn()}
+        onAddPortal={vi.fn()}
+        onDeletePortal={handleDeletePortal}
+        onLaunchHitl={vi.fn()}
+        onVerifyHitl={vi.fn()}
+        onScanSinglePortal={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('tab', { name: /Portals/ }));
+    await user.click(screen.getByRole('button', { name: /Delete Punjab PPRA/i }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Delete this portal?' });
+    const checkbox = within(dialog).getByRole('checkbox', {
+      name: /Also remove unreviewed inbox tenders from this portal/i
+    });
+    expect(checkbox).not.toBeChecked();
+    await user.click(checkbox);
+    expect(checkbox).toBeChecked();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(handleDeletePortal).toHaveBeenCalledTimes(1);
+      expect(handleDeletePortal).toHaveBeenCalledWith('punjab_eproc', { removeUnreviewedTenders: true });
+    });
+  });
 });

@@ -127,6 +127,14 @@ export function InboxScreen(props: InboxScreenProps) {
     return false;
   };
 
+  const portalNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of props.portals || []) {
+      map.set(p.portal_id, p.portal_name);
+    }
+    return map;
+  }, [props.portals]);
+
   // Dynamic portal summary computed directly from active tenders
   const computedPortalSummary: PortalSummaryItem[] = useMemo(() => {
     const map = new Map<string, PortalSummaryItem>();
@@ -143,14 +151,20 @@ export function InboxScreen(props: InboxScreenProps) {
       } else {
         map.set(pid, {
           portal_id: pid,
-          portal_name: t.portal_name || pid,
+          portal_name: portalNameById.get(pid) || t.portal_name || pid,
           total_count: 1,
           unread_count: isUnread ? 1 : 0
         });
       }
     }
     return Array.from(map.values()).sort((a, b) => b.unread_count - a.unread_count || b.total_count - a.total_count);
-  }, [activeTenders, showClosedTenders, viewedIds]);
+  }, [activeTenders, showClosedTenders, viewedIds, portalNameById]);
+
+  useEffect(() => {
+    if (selectedPortalId !== 'All' && !computedPortalSummary.some(p => p.portal_id === selectedPortalId)) {
+      setSelectedPortalId('All');
+    }
+  }, [selectedPortalId, computedPortalSummary]);
 
   const portalSummary = computedPortalSummary;
 

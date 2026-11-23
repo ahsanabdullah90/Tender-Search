@@ -357,15 +357,16 @@ export function getPortalTenderSummary(): {
 }[] {
   return db.prepare(`
     SELECT 
-      portal_id,
-      portal_name,
+      t.portal_id as portal_id,
+      COALESCE(ph.portal_name, MAX(t.portal_name)) as portal_name,
       COUNT(*) as total_count,
-      SUM(CASE WHEN viewed = 0 THEN 1 ELSE 0 END) as unread_count
-    FROM tenders
-    WHERE pipeline_status = 'New Opportunity'
+      SUM(CASE WHEN t.viewed = 0 THEN 1 ELSE 0 END) as unread_count
+    FROM tenders t
+    LEFT JOIN portal_health ph ON ph.portal_id = t.portal_id
+    WHERE t.pipeline_status = 'New Opportunity'
       AND ${NOT_STAGING_SQL}
       AND ${ACTIVE_UNEXPIRED_SQL}
-    GROUP BY portal_id, portal_name
+    GROUP BY t.portal_id
     ORDER BY unread_count DESC, total_count DESC
   `).all() as any[];
 }

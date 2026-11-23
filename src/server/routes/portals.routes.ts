@@ -2,9 +2,11 @@ import { Router } from 'express';
 import {
   asyncHandler,
   getValidatedBody,
+  getValidatedQuery,
   sendError,
   v,
   validateBody,
+  validateQuery,
   type InferSchema,
   type Schema
 } from './routeUtils.js';
@@ -13,6 +15,7 @@ import {
   getPortalById,
   createPortal,
   deletePortal,
+  cleanupDeletedPortalResources,
   updatePortalHealth,
   savePortalCredentials,
   getPortalAuthCredentials
@@ -53,8 +56,10 @@ const createPortalSchema = v.object(
 
 const updatePortalSchema = v.object({
   portal_name: v.optional(v.nonEmptyString('Portal name must not be empty.')),
+  category: v.optional(v.nonEmptyString('Category must not be empty.')),
   base_url: v.optional(v.externalHttpUrl()),
   tenders_url: v.optional(v.externalHttpUrl()),
+  login_url: v.nullish(optionalExternalUrlOrBlank),
   tier: v.optional(v.oneOf(['http', 'playwright'] as const)),
   access_mode: v.optional(v.string({ trim: true })),
   verified_status: v.optional(v.string({ trim: true })),
@@ -62,6 +67,14 @@ const updatePortalSchema = v.object({
     v.oneOf(['online', 'scanning', 'hitl_required', 'selector_broken', 'error'] as const)
   ),
   last_error_message: v.nullish(v.string())
+});
+
+const deletePortalBodySchema = v.object({
+  removeUnreviewedTenders: v.optional(v.boolean())
+});
+
+const deletePortalQuerySchema = v.object({
+  removeUnreviewedTenders: v.optional(v.queryBoolean())
 });
 
 const healPortalSchema = v.object({
@@ -96,6 +109,7 @@ export function createPortalsRouter(ctx: RuntimeContext = getDefaultRuntimeConte
       access_mode: body.access_mode || undefined,
       login_url: body.login_url
     });
+    ctx.scanState.syncTotalPortals();
 
     res.status(201).json({
       success: true,
@@ -104,32 +118,55 @@ export function createPortalsRouter(ctx: RuntimeContext = getDefaultRuntimeConte
     });
   }));
 
-  router.delete('/:portalId', (req, res) => {
+  router.delete(
+    '/:portalId',
+    validateQuery(deletePortalQuerySchema),
+    validateBody(deletePortalBodySchema),
+    (req, res) => {
+      const { portalId } = req.params;
+      const existing = getPortalById(portalId);
+      if (!existing) {
+        return sendError(res, 404, 'Portal not found.', 'NOT_FOUND');
+      }
+
+      const body = getValidatedBody<InferSchema<typeof deletePortalBodySchema>>(res, req);
+      const query = getValidatedQuery<InferSchema<typeof deletePortalQuerySchema>>(res);
+      const removeUnreviewedTenders = Boolean(
+        body?.removeUnreviewedTenders ?? query?.removeUnreviewedTenders
+      );
+
+      const success = deletePortal(portalId);
+      if (!success) {
+        return sendError(res, 500, 'Failed to delete portal.', 'INTERNAL_ERROR');
+      }
+
+      const cleanup = cleanupDeletedPortalResources(portalId, { removeUnreviewedTenders });
+      ctx.scanState.syncTotalPortals();
+
+      res.json({
+        success: true,
+        portal_id: portalId,
+        cancelledJobs: cleanup.cancelledJobs,
+        removedTenders: cleanup.removedTenders,
+        message: `Deleted portal "${existing.portal_name}" successfully.`
+      });
+    }
+  );
+
+  router.put('/:portalId', validateBody(updatePortalSchema), (req, res) => {
     const { portalId } = req.params;
     const existing = getPortalById(portalId);
     if (!existing) {
       return sendError(res, 404, 'Portal not found.', 'NOT_FOUND');
     }
 
-    const success = deletePortal(portalId);
-    if (!success) {
-      return sendError(res, 500, 'Failed to delete portal.', 'INTERNAL_ERROR');
-    }
-
-    res.json({
-      success: true,
-      portal_id: portalId,
-      message: `Deleted portal "${existing.portal_name}" successfully.`
-    });
-  });
-
-  router.put('/:portalId', validateBody(updatePortalSchema), (req, res) => {
-    const { portalId } = req.params;
     const body = getValidatedBody<InferSchema<typeof updatePortalSchema>>(res, req);
     const updates: Partial<PortalHealth> = {
       ...(body.portal_name !== undefined ? { portal_name: body.portal_name } : {}),
+      ...(body.category !== undefined ? { category: body.category } : {}),
       ...(body.base_url !== undefined ? { base_url: sanitizeOriginUrl(body.base_url, body.base_url) } : {}),
       ...(body.tenders_url !== undefined ? { tenders_url: body.tenders_url } : {}),
+      ...(body.login_url !== undefined ? { login_url: body.login_url || (null as any) } : {}),
       ...(body.tier !== undefined ? { tier: body.tier } : {}),
       ...(body.access_mode !== undefined ? { access_mode: body.access_mode } : {}),
       ...(body.verified_status !== undefined ? { verified_status: body.verified_status } : {}),
@@ -149,16 +186,17 @@ export function createPortalsRouter(ctx: RuntimeContext = getDefaultRuntimeConte
       if (updates.last_error_message === undefined) {
         updates.last_error_message = null;
       }
-      if (updates.access_mode === undefined) {
-        const existing = getPortalById(portalId);
-        if (existing && existing.access_mode === 'offline_broken') {
-          updates.access_mode = 'public';
-        }
+      if (updates.access_mode === undefined && existing.access_mode === 'offline_broken') {
+        updates.access_mode = 'public';
       }
     }
 
     updatePortalHealth(portalId, updates);
-    res.json({ success: true, message: 'Portal updated successfully' });
+    res.json({
+      success: true,
+      portal: getPortalById(portalId),
+      message: 'Portal updated successfully'
+    });
   });
 
   router.post('/:portalId/reset-default', (req, res) => {
@@ -168,14 +206,16 @@ export function createPortalsRouter(ctx: RuntimeContext = getDefaultRuntimeConte
       return sendError(res, 404, 'Default definition not found for this portal', 'NOT_FOUND');
     }
 
+    const nextStatus = canonicalDef.accessMode === 'login_required' ? 'hitl_required' : 'online';
     updatePortalHealth(portalId, {
+      portal_name: canonicalDef.name,
       base_url: canonicalDef.baseUrl,
       tenders_url: canonicalDef.tendersUrl,
       login_url: canonicalDef.loginUrl ?? undefined,
       access_mode: canonicalDef.accessMode,
       tier: canonicalDef.tier,
       verified_status: canonicalDef.verifiedStatus,
-      status: canonicalDef.accessMode === 'login_required' ? 'hitl_required' : 'online',
+      status: nextStatus,
       last_error_message: null,
       consecutive_zero_yields: 0
     });
@@ -185,6 +225,7 @@ export function createPortalsRouter(ctx: RuntimeContext = getDefaultRuntimeConte
       portal_name: canonicalDef.name,
       base_url: canonicalDef.baseUrl,
       tenders_url: canonicalDef.tendersUrl,
+      status: nextStatus,
       message: `Reset ${canonicalDef.name} to official default URL`
     });
   });

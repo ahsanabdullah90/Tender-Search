@@ -455,6 +455,181 @@ describe('Server API Routes', () => {
       const deleteAgainRes = await request(app).delete(`/api/portals/${portalId}`);
       expect(deleteAgainRes.status).toBe(404);
     });
+
+    it('marks built-in vs user-added portals with is_builtin and syncs GET /api/scan/status totalPortals on create/delete', async () => {
+      const beforeStatus = await request(app).get('/api/scan/status');
+      const baseTotal = beforeStatus.body.totalPortals;
+
+      const createRes = await request(app)
+        .post('/api/portals')
+        .send({
+          portal_name: 'Custom Lifecycle Portal',
+          tenders_url: 'https://custom-lifecycle.gov.pk/tenders',
+          category: 'Federal/Regional'
+        });
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.portal.is_builtin).toBe(false);
+      const customPortalId = createRes.body.portal.portal_id;
+
+      try {
+        const listRes = await request(app).get('/api/portals');
+        const builtin = listRes.body.find((p: any) => p.portal_id === 'epms_ppra');
+        const custom = listRes.body.find((p: any) => p.portal_id === customPortalId);
+        expect(builtin?.is_builtin).toBe(true);
+        expect(custom?.is_builtin).toBe(false);
+
+        const afterCreateStatus = await request(app).get('/api/scan/status');
+        expect(afterCreateStatus.body.totalPortals).toBe(baseTotal + 1);
+      } finally {
+        const delRes = await request(app).delete(`/api/portals/${customPortalId}`);
+        expect(delRes.status).toBe(200);
+      }
+
+      const afterDeleteStatus = await request(app).get('/api/scan/status');
+      expect(afterDeleteStatus.body.totalPortals).toBe(baseTotal);
+    });
+
+    it('PUT /api/portals/:portalId returns 404 for unknown ID and propagates portal_name rename to tenders and portal-summary without split rows', async () => {
+      const notFoundRes = await request(app)
+        .put('/api/portals/non_existent_portal_xyz')
+        .send({ portal_name: 'Ghost Portal' });
+      expect(notFoundRes.status).toBe(404);
+
+      const futureClosing = new Date(Date.now() + 7 * 86400000).toISOString();
+      insertTestTender('t-rename-1', {
+        portal_id: 'sppra',
+        portal_name: 'Sindh SPPRA (Legacy Label A)',
+        closing_date: futureClosing,
+        pipeline_status: 'New Opportunity',
+        viewed: 0
+      });
+      insertTestTender('t-rename-2', {
+        portal_id: 'sppra',
+        portal_name: 'Sindh SPPRA (Legacy Label B)',
+        closing_date: futureClosing,
+        pipeline_status: 'New Opportunity',
+        viewed: 1
+      });
+
+      const putRes = await request(app)
+        .put('/api/portals/sppra')
+        .send({
+          portal_name: 'Sindh SPPRA Unified',
+          category: 'Regulatory',
+          login_url: 'https://ppms.pprasindh.gov.pk/login'
+        });
+      expect(putRes.status).toBe(200);
+      expect(putRes.body.success).toBe(true);
+      expect(putRes.body.portal.portal_name).toBe('Sindh SPPRA Unified');
+      expect(putRes.body.portal.login_url).toBe('https://ppms.pprasindh.gov.pk/login');
+
+      // Both tender rows updated in DB
+      expect(getTenderById('t-rename-1')?.portal_name).toBe('Sindh SPPRA Unified');
+      expect(getTenderById('t-rename-2')?.portal_name).toBe('Sindh SPPRA Unified');
+
+      // Portal summary returns exactly one aggregated row for sppra
+      const summaryRes = await request(app).get('/api/tenders/portal-summary');
+      expect(summaryRes.status).toBe(200);
+      const sppraRows = summaryRes.body.filter((r: any) => r.portal_id === 'sppra');
+      expect(sppraRows).toHaveLength(1);
+      expect(sppraRows[0]).toEqual({
+        portal_id: 'sppra',
+        portal_name: 'Sindh SPPRA Unified',
+        total_count: 2,
+        unread_count: 1
+      });
+
+      // Reset back to canonical default
+      const resetRes = await request(app).post('/api/portals/sppra/reset-default');
+      expect(resetRes.status).toBe(200);
+      expect(resetRes.body.status).toBe('online');
+      expect(getTenderById('t-rename-1')?.portal_name).toBe(resetRes.body.portal_name);
+    });
+
+    it('DELETE /api/portals/:portalId cancels pending document_ingest_jobs, removes unreviewed New Opportunity tenders when removeUnreviewedTenders=true, preserves bookmarked and pipeline tenders, and syncs scanState.totalPortals', async () => {
+      const createRes = await request(app)
+        .post('/api/portals')
+        .send({
+          portal_name: 'Portal With Tenders & Jobs',
+          tenders_url: 'https://cleanup-test.gov.pk/tenders'
+        });
+      expect(createRes.status).toBe(201);
+      const portalId = createRes.body.portal.portal_id;
+
+      // 1. Unreviewed New Opportunity tender (should be removed)
+      insertTestTender('t-del-unreviewed', {
+        portal_id: portalId,
+        portal_name: 'Portal With Tenders & Jobs',
+        pipeline_status: 'New Opportunity',
+        is_bookmarked: 0
+      });
+      // 2. Bookmarked New Opportunity tender (must be preserved)
+      insertTestTender('t-del-bookmarked', {
+        portal_id: portalId,
+        portal_name: 'Portal With Tenders & Jobs',
+        pipeline_status: 'New Opportunity',
+        is_bookmarked: 1
+      });
+      // 3. Pipeline tender (must be preserved)
+      insertTestTender('t-del-pipeline', {
+        portal_id: portalId,
+        portal_name: 'Portal With Tenders & Jobs',
+        pipeline_status: 'Preparing Bid',
+        is_bookmarked: 0
+      });
+
+      // Enqueue pending & processing jobs across the tenders
+      db.prepare(`
+        INSERT INTO document_ingest_jobs (id, tender_id, url, status, lease_until)
+        VALUES
+          ('job-del-1', 't-del-unreviewed', 'https://cleanup-test.gov.pk/doc1.pdf', 'pending', NULL),
+          ('job-del-2', 't-del-bookmarked', 'https://cleanup-test.gov.pk/doc2.pdf', 'pending', NULL),
+          ('job-del-3', 't-del-pipeline', 'https://cleanup-test.gov.pk/doc3.pdf', 'processing', datetime('now', '+10 minutes'))
+      `).run();
+
+      const beforeDeleteTotal = (await request(app).get('/api/scan/status')).body.totalPortals;
+
+      const delRes = await request(app)
+        .delete(`/api/portals/${portalId}`)
+        .send({ removeUnreviewedTenders: true });
+
+      expect(delRes.status).toBe(200);
+      expect(delRes.body).toMatchObject({
+        success: true,
+        portal_id: portalId,
+        cancelledJobs: 3,
+        removedTenders: 1
+      });
+
+      // Unreviewed tender removed, bookmarked & pipeline tenders preserved
+      expect(getTenderById('t-del-unreviewed')).toBeNull();
+      expect(getTenderById('t-del-bookmarked')).not.toBeNull();
+      expect(getTenderById('t-del-pipeline')).not.toBeNull();
+
+      // Remaining jobs on preserved tenders are marked failed with 'Portal deleted by operator'
+      const remainingJobs = db
+        .prepare("SELECT id, status, last_error, lease_until FROM document_ingest_jobs WHERE id IN ('job-del-2', 'job-del-3') ORDER BY id ASC")
+        .all() as any[];
+      expect(remainingJobs).toEqual([
+        {
+          id: 'job-del-2',
+          status: 'failed',
+          last_error: 'Portal deleted by operator',
+          lease_until: null
+        },
+        {
+          id: 'job-del-3',
+          status: 'failed',
+          last_error: 'Portal deleted by operator',
+          lease_until: null
+        }
+      ]);
+      expect(getTenderById('t-del-bookmarked')?.doc_fetch_status).toBe('failed');
+      expect(getTenderById('t-del-pipeline')?.doc_fetch_status).toBe('failed');
+
+      const afterDeleteTotal = (await request(app).get('/api/scan/status')).body.totalPortals;
+      expect(afterDeleteTotal).toBe(beforeDeleteTotal - 1);
+    });
   });
 
   describe('Scan Control API (/api/scan)', () => {

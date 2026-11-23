@@ -1,9 +1,18 @@
 import { DocumentQueueStatus, ScanDepth, ScanStatus } from '../../shared/types.js';
 import { PORTAL_DEFINITIONS } from '../domain/portalList.js';
-import { getAppSetting, getDocumentQueueCounts } from '../db/index.js';
+import { getAppSetting, getDocumentQueueCounts, getPortalHealthList } from '../db/index.js';
 
 export type ScanProgressEventType = 'scan_progress' | 'documents_updated' | 'doc_queue_progress';
 export type ProgressListener = (status: ScanStatus, eventType?: ScanProgressEventType) => void;
+
+function resolveActivePortalCount(): number {
+  try {
+    const len = getPortalHealthList().length;
+    return len > 0 ? len : PORTAL_DEFINITIONS.length;
+  } catch {
+    return PORTAL_DEFINITIONS.length;
+  }
+}
 
 function createInitialScanStatus(): ScanStatus {
   return {
@@ -13,7 +22,7 @@ function createInitialScanStatus(): ScanStatus {
     scanDepth: 'quick',
     progressPercent: 0,
     completedPortals: 0,
-    totalPortals: PORTAL_DEFINITIONS.length,
+    totalPortals: resolveActivePortalCount(),
     newTendersFound: 0,
     corrigendaFound: 0,
     heldForScope: 0,
@@ -124,6 +133,13 @@ export class ScanStateStore {
     this.state.activePortals = [...active];
     this.state.currentPortal = active[0] ?? null;
     this.broadcast('scan_progress');
+  }
+
+  syncTotalPortals(totalPortals?: number): void {
+    if (!this.state.isScanning) {
+      this.state.totalPortals = totalPortals ?? resolveActivePortalCount();
+      this.broadcast('scan_progress');
+    }
   }
 
   recordBudgetCounts(documentsDeferred: number, visionDeferred: number): void {
